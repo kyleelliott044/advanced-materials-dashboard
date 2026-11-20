@@ -1,6 +1,4 @@
-cat << 'EOF' > pipeline/requirements.txt
 psycopg[binary]
 pandas
 yfinance
 requests
-EOF
