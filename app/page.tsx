@@ -1,69 +1,82 @@
-import Image from "next/image";
+import { connection } from "next/server";
+import { neon } from "@neondatabase/serverless";
+import DashboardClient, {
+  EquityRow,
+  RawInputRow,
+  SensitivityRow,
+  FilingRow,
+  MacroNarrativeRow,
+} from "./DashboardClient";
 
-export default function Home() {
+export default async function HomePage() {
+  await connection();
+  const sql = neon(process.env.DATABASE_URL!);
+
+  const equities = (await sql`
+    SELECT ticker, company_name, sub_sector, contract_type, qualification_years
+    FROM equities_universe
+    ORDER BY qualification_years DESC NULLS LAST, ticker ASC
+  `) as EquityRow[];
+
+  const rawInputs = (await sql`
+    SELECT DISTINCT ON (input_code)
+      input_code,
+      input_name,
+      category,
+      unit,
+      observation_date::text AS observation_date,
+      value
+    FROM raw_inputs
+    ORDER BY input_code, observation_date DESC
+  `) as RawInputRow[];
+
+  const sensitivities = (await sql`
+    SELECT sub_sector, input_code, relationship_type, impact_direction, mechanism_note
+    FROM commodity_sensitivity
+  `) as SensitivityRow[];
+
+  const filings = (await sql`
+    SELECT
+      f.id,
+      f.ticker,
+      e.company_name,
+      e.sub_sector,
+      f.filing_type,
+      f.filing_date::text AS filing_date,
+      f.headline,
+      f.executive_summary,
+      f.theme_tags,
+      f.pricing_and_margins,
+      f.capex_and_backlog,
+      f.key_risks,
+      f.source_url
+    FROM company_filings_ai f
+    LEFT JOIN equities_universe e ON f.ticker = e.ticker
+    ORDER BY f.filing_date DESC, f.id DESC
+    LIMIT 250
+  `) as FilingRow[];
+
+  const narratives = (await sql`
+    SELECT
+      generated_date::text AS generated_date,
+      overall_regime,
+      executive_brief,
+      ai_theme_summary,
+      aerospace_theme_summary,
+      commodities_theme_summary,
+      electrification_battery_summary
+    FROM macro_narrative
+    ORDER BY generated_date DESC
+    LIMIT 1
+  `) as MacroNarrativeRow[];
+
   return (
-    <div className="flex flex-col flex-1 items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex flex-1 w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert h-5 w-[100px]"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the{" "}
-            <code className="rounded bg-black/[.06] px-1.5 py-0.5 font-mono text-[0.9em] dark:bg-white/[.08]">
-              page.tsx
-            </code>{" "}
-            file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
-        </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert h-[14px] w-4"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={14}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
+    <DashboardClient
+      equities={equities}
+      inputs={rawInputs}
+      sensitivities={sensitivities}
+      filings={filings}
+      narrative={narratives[0] || null}
+    />
   );
 }

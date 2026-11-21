@@ -2,3 +2,6 @@ psycopg[binary]
 pandas
 yfinance
 requests
+google-genai
+pydantic
+beautifulsoup4
