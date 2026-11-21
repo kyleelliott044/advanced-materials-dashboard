@@ -395,7 +395,7 @@ def generate_market_macro_narrative(conn):
 if __name__ == "__main__":
     with psycopg.connect(DATABASE_URL) as conn:
         seed_sensitivity_map(conn)
-        process_sec_filings(conn, limit_tickers=35)
-        process_international_briefs(conn, limit_tickers=25)
+        process_sec_filings(conn, limit_tickers=5)
+        process_international_briefs(conn, limit_tickers=3)
         generate_market_macro_narrative(conn)
     print("AI Filings & Macro Synthesis pipeline finished.")
