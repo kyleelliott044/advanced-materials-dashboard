@@ -192,7 +192,7 @@ def process_sec_filings(conn, limit_tickers=35):
                     """
 
                     ai_resp = client.models.generate_content(
-                        model="gemini-2.5-flash",
+                        model="gemini-3.8-flash",
                         contents=prompt,
                         config={
                             "response_mime_type": "application/json",
@@ -273,7 +273,7 @@ def process_international_briefs(conn, limit_tickers=25):
             """
 
             ai_resp = client.models.generate_content(
-                model="gemini-2.5-flash",
+                model="gemini-3.8-flash",
                 contents=prompt,
                 config={
                     "response_mime_type": "application/json",
@@ -356,7 +356,7 @@ def generate_market_macro_narrative(conn):
     """
 
     ai_resp = client.models.generate_content(
-        model="gemini-2.5-flash",
+        model="gemini-3.8-flash",
         contents=prompt,
         config={
             "response_mime_type": "application/json",
