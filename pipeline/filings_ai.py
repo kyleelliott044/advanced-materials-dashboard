@@ -136,6 +136,21 @@ class MacroNarrativeSchema(BaseModel):
     electrification_battery_summary: str = Field(description="3-4 sentences synthesizing EV battery destocking, grid transformers, nuclear/uranium, and rare earth magnets.")
 
 
+class ScopeInsight(BaseModel):
+    scope_type: str = Field(description="Must be 'industry', 'sub_industry', or 'theme'.")
+    scope_name: str = Field(description="Exact name of the industry ('Advanced Materials'), sub-industry, or theme.")
+    sentiment: str = Field(description="One of: 'Bullish', 'Mixed', 'Cautious', 'Bearish'.")
+    headline: str = Field(description="1-sentence institutional takeaway backed by the filings.")
+    key_drivers: str = Field(description="2-3 sentences on demand, volume, and end-market momentum.")
+    pricing_and_margins: str = Field(description="2 sentences on pricing power, surcharges, and raw material pass-through.")
+    capex_and_supply_chain: str = Field(description="2 sentences on backlog, qualification bottlenecks, or capacity expansion.")
+    top_tickers: List[str] = Field(description="Up to 5 tickers from the provided filings that best illustrate this insight.")
+
+
+class InsightBatchSchema(BaseModel):
+    insights: List[ScopeInsight]
+
+
 def seed_sensitivity_map(conn):
     with conn.cursor() as cur:
         cur.executemany("""
@@ -177,7 +192,7 @@ def extract_filing_text(cik_unpadded: str, accession_number: str, primary_doc: s
     return text[5000:33000]
 
 
-def process_sec_filings(conn, limit_tickers=5):
+def process_sec_filings(conn, limit_tickers=4):
     """Fetches last 3 10-K/10-Q filings for US-listed tickers in equities_universe and summarizes with Gemini."""
     sec_map = fetch_sec_ticker_map()
     with conn.cursor() as cur:
@@ -416,14 +431,96 @@ def generate_market_macro_narrative(conn):
     print("Generated overarching AI Market & Theme Macro Narrative.")
 
 
+def generate_scoped_insights(conn):
+    """Generates Industry, Sub-Industry, and Theme summaries from parsed SEC filings in 1 Gemini call."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT f.ticker, e.sub_sector, f.filing_type, f.filing_date,
+                   f.headline, f.executive_summary, f.pricing_and_margins,
+                   f.capex_and_backlog, f.theme_tags
+            FROM company_filings_ai f
+            JOIN equities_universe e ON f.ticker = e.ticker
+            ORDER BY f.filing_date DESC
+            LIMIT 80;
+        """)
+        rows = cur.fetchall()
+
+    if not rows:
+        print("No filings available yet for scoped insights.")
+        return
+
+    sub_counts, theme_counts = {}, {}
+    filing_lines = []
+    for ticker, sub_sector, ftype, fdate, headline, summary, margins, capex, tags in rows:
+        if sub_sector:
+            sub_counts[sub_sector] = sub_counts.get(sub_sector, 0) + 1
+        for tag in (tags or []):
+            theme_counts[tag] = theme_counts.get(tag, 0) + 1
+        filing_lines.append(
+            f"[{ticker} | Sub-Industry: {sub_sector} | Themes: {', '.join(tags or [])} | {ftype} {fdate}] "
+            f"{headline} | Margins: {margins} | Capex/Backlog: {capex}"
+        )
+
+    active_subs = [k for k, _ in sorted(sub_counts.items(), key=lambda x: -x[1])[:10]]
+    active_themes = [k for k, _ in sorted(theme_counts.items(), key=lambda x: -x[1])[:8]]
+
+    prompt = f"""
+    You are a Senior Advanced Materials Equity Strategist.
+    Using ONLY the parsed SEC filings below, generate structured insight summaries for:
+    1. Industry (scope_type='industry'): 'Advanced Materials' (synthesizing all filings)
+    2. Sub-Industries (scope_type='sub_industry'): {', '.join(active_subs)}
+    3. Themes (scope_type='theme'): {', '.join(active_themes)}
+
+    Be specific: cite actual company tickers, margin/pass-through mechanics, and backlog trends from the filings.
+
+    PARSED FILINGS:
+    {chr(10).join(filing_lines)}
+    """
+
+    ai_resp = call_gemini(prompt, InsightBatchSchema)
+    if not ai_resp:
+        return
+    parsed = json.loads(ai_resp.text)
+
+    with conn.cursor() as cur:
+        for item in parsed["insights"]:
+            stype = item["scope_type"]
+            sname = item["scope_name"]
+            count = len(rows) if stype == "industry" else (
+                sub_counts.get(sname, 0) if stype == "sub_industry" else theme_counts.get(sname, 0)
+            )
+            cur.execute("""
+                INSERT INTO sector_theme_insights (
+                    scope_type, scope_name, generated_date, filing_count, sentiment,
+                    headline, key_drivers, pricing_and_margins, capex_and_supply_chain, top_tickers
+                ) VALUES (%s, %s, CURRENT_DATE, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (scope_type, scope_name) DO UPDATE SET
+                    generated_date = CURRENT_DATE,
+                    filing_count = EXCLUDED.filing_count,
+                    sentiment = EXCLUDED.sentiment,
+                    headline = EXCLUDED.headline,
+                    key_drivers = EXCLUDED.key_drivers,
+                    pricing_and_margins = EXCLUDED.pricing_and_margins,
+                    capex_and_supply_chain = EXCLUDED.capex_and_supply_chain,
+                    top_tickers = EXCLUDED.top_tickers;
+            """, (
+                stype, sname, count, item["sentiment"], item["headline"],
+                item["key_drivers"], item["pricing_and_margins"],
+                item["capex_and_supply_chain"], item["top_tickers"],
+            ))
+    conn.commit()
+    print(f"Upserted {len(parsed['insights'])} industry, sub-industry, and theme insights.")
+
+
 if __name__ == "__main__":
     with psycopg.connect(DATABASE_URL) as conn:
         seed_sensitivity_map(conn)
-        process_sec_filings(conn, limit_tickers=5)
+        process_sec_filings(conn, limit_tickers=4)
         process_international_briefs(conn, limit_tickers=3)
         if not quota_exhausted:
             try:
                 generate_market_macro_narrative(conn)
+                generate_scoped_insights(conn)
             except Exception as e:
-                print(f"Skipping macro narrative due to API error: {e}")
+                print(f"Skipping synthesis due to API error: {e}")
     print(f"AI Filings & Macro Synthesis pipeline finished ({requests_used} Gemini calls used).")
