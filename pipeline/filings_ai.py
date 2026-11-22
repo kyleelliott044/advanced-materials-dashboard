@@ -191,15 +191,9 @@ def process_sec_filings(conn, limit_tickers=35):
                     {excerpt}
                     """
 
-                    ai_resp = client.models.generate_content(
-                        model="gemini-3.8-flash",
-                        contents=prompt,
-                        config={
-                            "response_mime_type": "application/json",
-                            "response_schema": FilingSummarySchema,
-                            "temperature": 0.2,
-                        },
-                    )
+                   ai_resp = call_gemini(prompt)
+                    if not ai_resp:
+                        break  # (use `return` inside generate_market_macro_narrative)
                     parsed = json.loads(ai_resp.text)
 
                     with conn.cursor() as cur:
@@ -272,15 +266,9 @@ def process_international_briefs(conn, limit_tickers=25):
             {headlines_str}
             """
 
-            ai_resp = client.models.generate_content(
-                model="gemini-3.8-flash",
-                contents=prompt,
-                config={
-                    "response_mime_type": "application/json",
-                    "response_schema": FilingSummarySchema,
-                    "temperature": 0.2,
-                },
-            )
+         ai_resp = call_gemini(prompt)
+            if not ai_resp:
+                break  # (use `return` inside generate_market_macro_narrative)
             parsed = json.loads(ai_resp.text)
 
             with conn.cursor() as cur:
@@ -355,15 +343,9 @@ def generate_market_macro_narrative(conn):
     {filings_text}
     """
 
-    ai_resp = client.models.generate_content(
-        model="gemini-3.8-flash",
-        contents=prompt,
-        config={
-            "response_mime_type": "application/json",
-            "response_schema": MacroNarrativeSchema,
-            "temperature": 0.25,
-        },
-    )
+   ai_resp = call_gemini(prompt)
+    if not ai_resp:
+        break  # (use `return` inside generate_market_macro_narrative)
     parsed = json.loads(ai_resp.text)
 
     with conn.cursor() as cur:
