@@ -1,3 +1,5 @@
+export const instant = false;
+
 import { connection } from "next/server";
 import { neon } from "@neondatabase/serverless";
 import DashboardClient, {
@@ -7,6 +9,9 @@ import DashboardClient, {
   FilingRow,
   MacroNarrativeRow,
 } from "./DashboardClient";
+import ScopedInsightsPanel, {
+  ScopedInsight,
+} from "@/components/ScopedInsightsPanel";
 
 export default async function HomePage() {
   await connection();
@@ -70,13 +75,39 @@ export default async function HomePage() {
     LIMIT 1
   `) as MacroNarrativeRow[];
 
+  let scopedInsights: ScopedInsight[] = [];
+  try {
+    scopedInsights = (await sql`
+      SELECT
+        scope_type,
+        scope_name,
+        generated_date::text AS generated_date,
+        filing_count,
+        sentiment,
+        headline,
+        key_drivers,
+        pricing_and_margins,
+        capex_and_supply_chain,
+        top_tickers
+      FROM sector_theme_insights
+      ORDER BY scope_type ASC, filing_count DESC
+    `) as ScopedInsight[];
+  } catch {
+    scopedInsights = [];
+  }
+
   return (
-    <DashboardClient
-      equities={equities}
-      inputs={rawInputs}
-      sensitivities={sensitivities}
-      filings={filings}
-      narrative={narratives[0] || null}
-    />
+    <div className="min-h-screen bg-zinc-950 text-zinc-100">
+      <DashboardClient
+        equities={equities}
+        inputs={rawInputs}
+        sensitivities={sensitivities}
+        filings={filings}
+        narrative={narratives[0] || null}
+      />
+      <div className="mx-auto max-w-7xl px-4 pb-12 sm:px-6 lg:px-8">
+        <ScopedInsightsPanel insights={scopedInsights} />
+      </div>
+    </div>
   );
 }
