@@ -9,6 +9,7 @@ from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field
 from typing import List
 from google import genai
+from google.genai import types
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
@@ -20,6 +21,42 @@ SEC_HEADERS = {
 }
 
 client = genai.Client(api_key=GEMINI_API_KEY)
+
+MAX_REQUESTS_PER_RUN = 19  # Leaves 1 request buffer under the 20/day free cap
+requests_used = 0
+quota_exhausted = False
+
+
+def call_gemini(prompt: str, schema, retries: int = 3):
+    global requests_used, quota_exhausted
+    if quota_exhausted or requests_used >= MAX_REQUESTS_PER_RUN:
+        return None
+
+    for attempt in range(retries):
+        try:
+            requests_used += 1
+            return client.models.generate_content(
+                model="gemini-3.8-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=schema,
+                ),
+            )
+        except Exception as e:
+            err = str(e)
+            if "429" in err or "RESOURCE_EXHAUSTED" in err:
+                quota_exhausted = True
+                print("Daily Gemini quota reached — stopping further AI calls for this run.")
+                return None
+            if ("503" in err or "UNAVAILABLE" in err) and attempt < retries - 1:
+                wait = 3 * (2 ** attempt)
+                print(f"Gemini 503 high demand — retrying in {wait}s...")
+                time.sleep(wait)
+                continue
+            raise
+    return None
+
 
 # Sub-sector to Commodity / Macro Input Sensitivity Map
 SENSITIVITY_RULES = [
@@ -79,6 +116,7 @@ SENSITIVITY_RULES = [
     ("Fluoropolymers & Titanium Tech", "SMH", "Revenue Proxy", "Direct (Demand)", "High-purity PFA fluoropolymers essential for semiconductor fab piping and chemical handling."),
 ]
 
+
 # Pydantic Schemas for Guaranteed Structured Gemini Outputs
 class FilingSummarySchema(BaseModel):
     headline: str = Field(description="Concise 1-sentence institutional headline summarizing the filing/earnings.")
@@ -87,6 +125,7 @@ class FilingSummarySchema(BaseModel):
     pricing_and_margins: str = Field(description="Specific details on gross/operating margins, raw material pass-through, surcharges, or price/cost spread.")
     capex_and_backlog: str = Field(description="Details on order backlog, customer qualification milestones, capacity expansion, or capex guidance.")
     key_risks: str = Field(description="Top 1-2 operational, geopolitical, or cyclical risks highlighted in the report.")
+
 
 class MacroNarrativeSchema(BaseModel):
     overall_regime: str = Field(description="Short 4-7 word regime label, e.g. 'AI & Aerospace Boom vs. Chemical Destocking'")
@@ -131,7 +170,6 @@ def extract_filing_text(cik_unpadded: str, accession_number: str, primary_doc: s
     text = soup.get_text(separator=" ", strip=True)
     text = re.sub(r"\s+", " ", text)
 
-    # Locate MD&A section ("Management's Discussion and Analysis") if present, otherwise take core body slice
     mda_match = re.search(r"(Item\s+2\.|Item\s+7\.)\s+Management.{0,30}Discussion", text, re.IGNORECASE)
     if mda_match:
         start = mda_match.start()
@@ -139,7 +177,7 @@ def extract_filing_text(cik_unpadded: str, accession_number: str, primary_doc: s
     return text[5000:33000]
 
 
-def process_sec_filings(conn, limit_tickers=35):
+def process_sec_filings(conn, limit_tickers=5):
     """Fetches last 3 10-K/10-Q filings for US-listed tickers in equities_universe and summarizes with Gemini."""
     sec_map = fetch_sec_ticker_map()
     with conn.cursor() as cur:
@@ -148,7 +186,7 @@ def process_sec_filings(conn, limit_tickers=35):
 
     processed = 0
     for ticker, company_name, sub_sector in all_equities:
-        if processed >= limit_tickers:
+        if quota_exhausted or processed >= limit_tickers:
             break
         clean_ticker = ticker.upper()
         if clean_ticker not in sec_map:
@@ -163,6 +201,8 @@ def process_sec_filings(conn, limit_tickers=35):
 
             filings_found = 0
             for i, form in enumerate(recent["form"]):
+                if quota_exhausted:
+                    break
                 if form in ("10-K", "10-Q") and filings_found < 3:
                     f_date = recent["filingDate"][i]
                     acc_num = recent["accessionNumber"][i]
@@ -191,9 +231,9 @@ def process_sec_filings(conn, limit_tickers=35):
                     {excerpt}
                     """
 
-                   ai_resp = call_gemini(prompt)
+                    ai_resp = call_gemini(prompt, FilingSummarySchema)
                     if not ai_resp:
-                        break  # (use `return` inside generate_market_macro_narrative)
+                        break
                     parsed = json.loads(ai_resp.text)
 
                     with conn.cursor() as cur:
@@ -225,14 +265,14 @@ def process_sec_filings(conn, limit_tickers=35):
                     conn.commit()
                     filings_found += 1
                     print(f"Summarized {ticker} {form} ({f_date})")
-                    time.sleep(0.25)  # Respect SEC EDGAR 10 req/sec fair access limit
+                    time.sleep(0.25)
 
             processed += 1
         except Exception as e:
             print(f"Warning processing SEC filings for {ticker}: {e}")
 
 
-def process_international_briefs(conn, limit_tickers=25):
+def process_international_briefs(conn, limit_tickers=3):
     """Generates Earnings/Market Briefs for non-US tickers (Japan, Korea, Taiwan, Europe) using yfinance metadata & news."""
     with conn.cursor() as cur:
         cur.execute("""
@@ -246,6 +286,8 @@ def process_international_briefs(conn, limit_tickers=25):
         missing = cur.fetchall()
 
     for ticker, company_name, sub_sector, contract_type, qual_years in missing:
+        if quota_exhausted:
+            break
         try:
             tk = yf.Ticker(ticker)
             info = tk.info or {}
@@ -266,9 +308,9 @@ def process_international_briefs(conn, limit_tickers=25):
             {headlines_str}
             """
 
-         ai_resp = call_gemini(prompt)
+            ai_resp = call_gemini(prompt, FilingSummarySchema)
             if not ai_resp:
-                break  # (use `return` inside generate_market_macro_narrative)
+                break
             parsed = json.loads(ai_resp.text)
 
             with conn.cursor() as cur:
@@ -343,9 +385,9 @@ def generate_market_macro_narrative(conn):
     {filings_text}
     """
 
-   ai_resp = call_gemini(prompt)
+    ai_resp = call_gemini(prompt, MacroNarrativeSchema)
     if not ai_resp:
-        break  # (use `return` inside generate_market_macro_narrative)
+        return
     parsed = json.loads(ai_resp.text)
 
     with conn.cursor() as cur:
@@ -379,5 +421,9 @@ if __name__ == "__main__":
         seed_sensitivity_map(conn)
         process_sec_filings(conn, limit_tickers=5)
         process_international_briefs(conn, limit_tickers=3)
-        generate_market_macro_narrative(conn)
-    print("AI Filings & Macro Synthesis pipeline finished.")
+        if not quota_exhausted:
+            try:
+                generate_market_macro_narrative(conn)
+            except Exception as e:
+                print(f"Skipping macro narrative due to API error: {e}")
+    print(f"AI Filings & Macro Synthesis pipeline finished ({requests_used} Gemini calls used).")
