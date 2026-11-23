@@ -28,6 +28,13 @@ requests_used = 0
 groq_requests_used = 0
 quota_exhausted = False
 
+GROQ_MODELS = [
+    "openai/gpt-oss-120b",
+    "qwen/qwen3.8-27b",
+    "openai/gpt-oss-20b",
+]
+exhausted_groq_models = set()
+
 
 class _FallbackResp:
     def __init__(self, text: str):
@@ -40,44 +47,68 @@ def _call_groq_fallback(prompt: str, schema):
         return None
 
     schema_json = json.dumps(schema.model_json_schema())
-    # Trim very long SEC excerpts to stay under Groq's free tokens-per-minute limit
+    # Trim long SEC excerpts to stay under Groq's free tokens-per-minute ceiling
     trimmed_prompt = prompt[:16000]
 
-    for attempt in range(3):
-        resp = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "openai/gpt-oss-120b",
-                "response_format": {"type": "json_object"},
-                "temperature": 0.2,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are an institutional equity analyst. "
-                            "Return ONLY a valid JSON object matching this exact schema:\n"
-                            f"{schema_json}"
-                        ),
-                    },
-                    {"role": "user", "content": trimmed_prompt},
-                ],
-            },
-            timeout=45,
-        )
-        if resp.status_code == 429 and attempt < 2:
-            wait = 15 * (attempt + 1)
-            print(f"Groq rate limit hit — waiting {wait}s...")
-            time.sleep(wait)
+    for model_id in GROQ_MODELS:
+        if model_id in exhausted_groq_models:
             continue
-        resp.raise_for_status()
-        groq_requests_used += 1
-        content = resp.json()["choices"][0]["message"]["content"]
-        time.sleep(3)  # Pacing to stay under free-tier tokens-per-minute cap
-        return _FallbackResp(content)
+
+        for attempt in range(2):
+            try:
+                resp = requests.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {GROQ_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model_id,
+                        "response_format": {"type": "json_object"},
+                        "temperature": 0.2,
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You are an institutional equity analyst. "
+                                    "Return ONLY a valid JSON object matching this exact schema:\n"
+                                    f"{schema_json}"
+                                ),
+                            },
+                            {"role": "user", "content": trimmed_prompt},
+                        ],
+                    },
+                    timeout=45,
+                )
+            except requests.RequestException as e:
+                print(f"Groq network error on {model_id}: {e} — trying next model.")
+                break
+
+            if resp.status_code == 429:
+                err_lower = resp.text.lower()
+                if "tokens per day" in err_lower or "requests per day" in err_lower:
+                    print(f"Groq daily limit reached for {model_id} — switching to next model.")
+                    exhausted_groq_models.add(model_id)
+                    break
+                if attempt == 0:
+                    print(f"Groq TPM limit on {model_id} — waiting 15s...")
+                    time.sleep(15)
+                    continue
+                print(f"Groq still rate-limited on {model_id} — trying next model.")
+                break
+
+            if resp.status_code in (400, 404, 413):
+                print(f"Groq {resp.status_code} on {model_id} — switching to next model.")
+                if resp.status_code == 404:
+                    exhausted_groq_models.add(model_id)
+                break
+
+            resp.raise_for_status()
+            groq_requests_used += 1
+            content = resp.json()["choices"][0]["message"]["content"]
+            time.sleep(3)  # Pacing to stay under free-tier tokens-per-minute cap
+            return _FallbackResp(content)
+
     return None
 
 
@@ -261,7 +292,7 @@ def extract_filing_text(cik_unpadded: str, accession_number: str, primary_doc: s
     return text[5000:33000]
 
 
-def process_sec_filings(conn, limit_tickers=4):
+def process_sec_filings(conn, limit_tickers=8):
     """Fetches last 3 10-K/10-Q filings for US-listed tickers, prioritizing empty stocks first."""
     sec_map = fetch_sec_ticker_map()
     with conn.cursor() as cur:
@@ -367,7 +398,7 @@ def process_sec_filings(conn, limit_tickers=4):
             print(f"Warning processing SEC filings for {ticker}: {e}")
 
 
-def process_international_briefs(conn, limit_tickers=3):
+def process_international_briefs(conn, limit_tickers=5):
     """Generates Earnings/Market Briefs for non-US tickers (Japan, Korea, Taiwan, Europe) using yfinance metadata & news."""
     with conn.cursor() as cur:
         cur.execute("""
@@ -593,8 +624,8 @@ def generate_scoped_insights(conn):
 if __name__ == "__main__":
     with psycopg.connect(DATABASE_URL, autocommit=True) as conn:
         seed_sensitivity_map(conn)
-        process_sec_filings(conn, limit_tickers=4)
-        process_international_briefs(conn, limit_tickers=3)
+        process_sec_filings(conn, limit_tickers=8)
+        process_international_briefs(conn, limit_tickers=5)
         try:
             generate_market_macro_narrative(conn)
             generate_scoped_insights(conn)
