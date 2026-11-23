@@ -513,7 +513,7 @@ def generate_scoped_insights(conn):
 
 
 if __name__ == "__main__":
-    with psycopg.connect(DATABASE_URL) as conn:
+    with psycopg.connect(DATABASE_URL, autocommit=True) as conn:
         seed_sensitivity_map(conn)
         process_sec_filings(conn, limit_tickers=4)
         process_international_briefs(conn, limit_tickers=3)
