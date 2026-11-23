@@ -13,6 +13,7 @@ from google.genai import types
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
 # SEC EDGAR requires a descriptive User-Agent header with contact email
 SEC_HEADERS = {
@@ -24,38 +25,94 @@ client = genai.Client(api_key=GEMINI_API_KEY)
 
 MAX_REQUESTS_PER_RUN = 19  # Leaves 1 request buffer under the 20/day free cap
 requests_used = 0
+groq_requests_used = 0
 quota_exhausted = False
+
+
+class _FallbackResp:
+    def __init__(self, text: str):
+        self.text = text
+
+
+def _call_groq_fallback(prompt: str, schema):
+    global groq_requests_used
+    if not GROQ_API_KEY:
+        return None
+
+    schema_json = json.dumps(schema.model_json_schema())
+    # Trim very long SEC excerpts to stay under Groq's free tokens-per-minute limit
+    trimmed_prompt = prompt[:16000]
+
+    for attempt in range(3):
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "llama-3.3-70b-versatile",
+                "response_format": {"type": "json_object"},
+                "temperature": 0.2,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are an institutional equity analyst. "
+                            "Return ONLY a valid JSON object matching this exact schema:\n"
+                            f"{schema_json}"
+                        ),
+                    },
+                    {"role": "user", "content": trimmed_prompt},
+                ],
+            },
+            timeout=45,
+        )
+        if resp.status_code == 429 and attempt < 2:
+            wait = 15 * (attempt + 1)
+            print(f"Groq rate limit hit — waiting {wait}s...")
+            time.sleep(wait)
+            continue
+        resp.raise_for_status()
+        groq_requests_used += 1
+        content = resp.json()["choices"][0]["message"]["content"]
+        time.sleep(3)  # Pacing to stay under free-tier tokens-per-minute cap
+        return _FallbackResp(content)
+    return None
 
 
 def call_gemini(prompt: str, schema, retries: int = 3):
     global requests_used, quota_exhausted
-    if quota_exhausted or requests_used >= MAX_REQUESTS_PER_RUN:
-        return None
 
-    for attempt in range(retries):
-        try:
-            requests_used += 1
-            return client.models.generate_content(
-                model="gemini-3.8-flash",
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=schema,
-                ),
-            )
-        except Exception as e:
-            err = str(e)
-            if "429" in err or "RESOURCE_EXHAUSTED" in err:
-                quota_exhausted = True
-                print("Daily Gemini quota reached — stopping further AI calls for this run.")
-                return None
-            if ("503" in err or "UNAVAILABLE" in err) and attempt < retries - 1:
-                wait = 3 * (2 ** attempt)
-                print(f"Gemini 503 high demand — retrying in {wait}s...")
-                time.sleep(wait)
-                continue
-            raise
-    return None
+    if not quota_exhausted and requests_used < MAX_REQUESTS_PER_RUN:
+        for attempt in range(retries):
+            try:
+                requests_used += 1
+                return client.models.generate_content(
+                    model="gemini-3.8-flash",
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        response_mime_type="application/json",
+                        response_schema=schema,
+                    ),
+                )
+            except Exception as e:
+                err = str(e)
+                if "429" in err or "RESOURCE_EXHAUSTED" in err:
+                    quota_exhausted = True
+                    print("Daily Gemini quota reached — switching to Groq fallback.")
+                    break
+                if any(k in err for k in ("503", "UNAVAILABLE", "disconnected", "timed out")):
+                    if attempt < retries - 1:
+                        wait = 3 * (2 ** attempt)
+                        print(f"Gemini 503/transient error — retrying in {wait}s...")
+                        time.sleep(wait)
+                        continue
+                    print("Gemini still unavailable — switching to Groq fallback.")
+                    break
+                raise
+
+    return _call_groq_fallback(prompt, schema)
 
 
 # Sub-sector to Commodity / Macro Input Sensitivity Map
@@ -117,7 +174,7 @@ SENSITIVITY_RULES = [
 ]
 
 
-# Pydantic Schemas for Guaranteed Structured Gemini Outputs
+# Pydantic Schemas for Guaranteed Structured Outputs
 class FilingSummarySchema(BaseModel):
     headline: str = Field(description="Concise 1-sentence institutional headline summarizing the filing/earnings.")
     executive_summary: str = Field(description="3-4 sentence analytical summary of revenue drivers, volume trends, and strategic positioning.")
@@ -193,15 +250,21 @@ def extract_filing_text(cik_unpadded: str, accession_number: str, primary_doc: s
 
 
 def process_sec_filings(conn, limit_tickers=4):
-    """Fetches last 3 10-K/10-Q filings for US-listed tickers in equities_universe and summarizes with Gemini."""
+    """Fetches last 3 10-K/10-Q filings for US-listed tickers, prioritizing empty stocks first."""
     sec_map = fetch_sec_ticker_map()
     with conn.cursor() as cur:
-        cur.execute("SELECT ticker, company_name, sub_sector FROM equities_universe ORDER BY qualification_years DESC NULLS LAST, ticker ASC;")
+        cur.execute("""
+            SELECT e.ticker, e.company_name, e.sub_sector
+            FROM equities_universe e
+            LEFT JOIN company_filings_ai f ON e.ticker = f.ticker
+            GROUP BY e.ticker, e.company_name, e.sub_sector, e.qualification_years
+            ORDER BY COUNT(f.id) ASC, e.qualification_years DESC NULLS LAST, e.ticker ASC;
+        """)
         all_equities = cur.fetchall()
 
     processed = 0
     for ticker, company_name, sub_sector in all_equities:
-        if quota_exhausted or processed >= limit_tickers:
+        if processed >= limit_tickers:
             break
         clean_ticker = ticker.upper()
         if clean_ticker not in sec_map:
@@ -215,9 +278,9 @@ def process_sec_filings(conn, limit_tickers=4):
             recent = sub_resp.json()["filings"]["recent"]
 
             filings_found = 0
+            new_added = 0
+            all_apis_exhausted = False
             for i, form in enumerate(recent["form"]):
-                if quota_exhausted:
-                    break
                 if form in ("10-K", "10-Q") and filings_found < 3:
                     f_date = recent["filingDate"][i]
                     acc_num = recent["accessionNumber"][i]
@@ -248,6 +311,7 @@ def process_sec_filings(conn, limit_tickers=4):
 
                     ai_resp = call_gemini(prompt, FilingSummarySchema)
                     if not ai_resp:
+                        all_apis_exhausted = True
                         break
                     parsed = json.loads(ai_resp.text)
 
@@ -279,10 +343,14 @@ def process_sec_filings(conn, limit_tickers=4):
                         ))
                     conn.commit()
                     filings_found += 1
+                    new_added += 1
                     print(f"Summarized {ticker} {form} ({f_date})")
                     time.sleep(0.25)
 
-            processed += 1
+            if all_apis_exhausted:
+                break
+            if new_added > 0:
+                processed += 1
         except Exception as e:
             print(f"Warning processing SEC filings for {ticker}: {e}")
 
@@ -301,8 +369,6 @@ def process_international_briefs(conn, limit_tickers=3):
         missing = cur.fetchall()
 
     for ticker, company_name, sub_sector, contract_type, qual_years in missing:
-        if quota_exhausted:
-            break
         try:
             tk = yf.Ticker(ticker)
             info = tk.info or {}
@@ -432,7 +498,7 @@ def generate_market_macro_narrative(conn):
 
 
 def generate_scoped_insights(conn):
-    """Generates Industry, Sub-Industry, and Theme summaries from parsed SEC filings in 1 Gemini call."""
+    """Generates Industry, Sub-Industry, and Theme summaries from parsed SEC filings in 1 AI call."""
     with conn.cursor() as cur:
         cur.execute("""
             SELECT f.ticker, e.sub_sector, f.filing_type, f.filing_date,
@@ -467,9 +533,9 @@ def generate_scoped_insights(conn):
     prompt = f"""
     You are a Senior Advanced Materials Equity Strategist.
     Using ONLY the parsed SEC filings below, generate structured insight summaries for:
-    1. Industry (scope_type='industry'): 'Advanced Materials' (synthesizing all filings)
-    2. Sub-Industries (scope_type='sub_industry'): {', '.join(active_subs)}
-    3. Themes (scope_type='theme'): {', '.join(active_themes)}
+1. Industry (scope_type='industry'): 'Advanced Materials' (synthesizing all filings)
+2. Sub-Industries (scope_type='sub_industry'): {', '.join(active_subs)}
+3. Themes (scope_type='theme'): {', '.join(active_themes)}
 
     Be specific: cite actual company tickers, margin/pass-through mechanics, and backlog trends from the filings.
 
@@ -517,10 +583,9 @@ if __name__ == "__main__":
         seed_sensitivity_map(conn)
         process_sec_filings(conn, limit_tickers=4)
         process_international_briefs(conn, limit_tickers=3)
-        if not quota_exhausted:
-            try:
-                generate_market_macro_narrative(conn)
-                generate_scoped_insights(conn)
-            except Exception as e:
-                print(f"Skipping synthesis due to API error: {e}")
-    print(f"AI Filings & Macro Synthesis pipeline finished ({requests_used} Gemini calls used).")
+        try:
+            generate_market_macro_narrative(conn)
+            generate_scoped_insights(conn)
+        except Exception as e:
+            print(f"Skipping synthesis due to API error: {e}")
+    print(f"AI Filings & Macro Synthesis pipeline finished ({requests_used} Gemini calls, {groq_requests_used} Groq calls used).")
