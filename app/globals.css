@@ -24,3 +24,101 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+/* Light Mode Theme Overrides */
+html.light-mode,
+html.light-mode body {
+  background-color: #f8fafc !important;
+  color: #0f172a !important;
+}
+
+/* Main page & drawer backgrounds */
+html.light-mode .bg-zinc-950,
+html.light-mode .bg-\[\#090d16\] {
+  background-color: #f8fafc !important;
+  color: #0f172a !important;
+}
+
+/* Header, cards, tables & panels */
+html.light-mode .bg-\[\#0c1220\],
+html.light-mode .bg-\[\#0c1220\]\/90,
+html.light-mode .bg-\[\#111827\],
+html.light-mode .bg-\[\#111827\]\/70,
+html.light-mode .bg-\[\#111827\]\/80,
+html.light-mode .bg-\[\#111827\]\/90,
+html.light-mode .bg-zinc-950\/70,
+html.light-mode .bg-zinc-900\/50 {
+  background-color: #ffffff !important;
+  color: #0f172a !important;
+}
+
+/* Narrative gradient banner */
+html.light-mode .bg-gradient-to-br {
+  background-image: linear-gradient(to bottom right, #f0f9ff, #ffffff, #f8fafc) !important;
+}
+
+/* Secondary buttons, pills & tab bars */
+html.light-mode .bg-slate-800,
+html.light-mode .bg-slate-800\/80,
+html.light-mode .bg-slate-900\/60,
+html.light-mode .bg-zinc-900,
+html.light-mode .bg-zinc-800 {
+  background-color: #f1f5f9 !important;
+  color: #334155 !important;
+}
+
+/* Borders & dividers */
+html.light-mode [class*="border-slate-8"],
+html.light-mode [class*="border-slate-7"],
+html.light-mode [class*="border-zinc-8"],
+html.light-mode [class*="divide-slate-8"] > :not([hidden]) ~ :not([hidden]) {
+  border-color: #e2e8f0 !important;
+}
+
+/* Typography */
+html.light-mode .text-white,
+html.light-mode .text-slate-100,
+html.light-mode .text-zinc-100 {
+  color: #0f172a !important;
+}
+
+html.light-mode .text-slate-200,
+html.light-mode .text-slate-300,
+html.light-mode .text-zinc-200,
+html.light-mode .text-zinc-300 {
+  color: #334155 !important;
+}
+
+html.light-mode .text-slate-400,
+html.light-mode .text-zinc-400 {
+  color: #64748b !important;
+}
+
+/* Deeper accent colors for legibility on white */
+html.light-mode .text-sky-400,
+html.light-mode .text-sky-300 {
+  color: #0284c7 !important;
+}
+
+html.light-mode .text-emerald-400,
+html.light-mode .text-emerald-300 {
+  color: #059669 !important;
+}
+
+html.light-mode .text-rose-300,
+html.light-mode .text-rose-400 {
+  color: #e11d48 !important;
+}
+
+html.light-mode .text-purple-300 {
+  color: #7c3aed !important;
+}
+
+/* Keep active primary buttons white text on blue */
+html.light-mode .bg-sky-500 {
+  color: #ffffff !important;
+}
+
+/* Table row hover */
+html.light-mode tr:hover {
+  background-color: #f1f5f9 !important;
+}
