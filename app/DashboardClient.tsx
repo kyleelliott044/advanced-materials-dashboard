@@ -8,6 +8,8 @@ export interface EquityRow {
   sub_sector: string | null;
   contract_type: string | null;
   qualification_years: string | number | null;
+  adv_mat_rev_pct: number | null;
+  country: string | null;
 }
 
 export interface RawInputRow {
@@ -53,6 +55,13 @@ export interface MacroNarrativeRow {
   electrification_battery_summary: string;
 }
 
+type SortOption =
+  | "rev_desc"
+  | "rev_asc"
+  | "country_asc"
+  | "moat_desc"
+  | "ticker_asc";
+
 const CONTRACT_BADGES: Record<string, { label: string; style: string }> = {
   take_or_pay: {
     label: "Take-or-Pay",
@@ -67,6 +76,18 @@ const CONTRACT_BADGES: Record<string, { label: string; style: string }> = {
     style: "bg-amber-500/10 text-amber-400 border-amber-500/30",
   },
 };
+
+const CORE_THEMES = [
+  "AI Infrastructure",
+  "Aerospace & Defense",
+  "Electrification & Grid",
+  "EV & Batteries",
+  "Semiconductors",
+  "Medical Devices",
+  "Industrial Recovery",
+  "Commodity Headwind",
+  "Pricing Power",
+];
 
 export default function DashboardClient({
   equities,
@@ -87,10 +108,13 @@ export default function DashboardClient({
   >("executive");
   const [search, setSearch] = useState("");
   const [sectorFilter, setSectorFilter] = useState("ALL");
+  const [countryFilter, setCountryFilter] = useState("ALL");
   const [contractFilter, setContractFilter] = useState("ALL");
+  const [sortBy, setSortBy] = useState<SortOption>("rev_desc");
   const [selectedCommodity, setSelectedCommodity] = useState<string | null>(null);
   const [minQualYears, setMinQualYears] = useState(0);
   const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
+  const [feedThemeFilter, setFeedThemeFilter] = useState("ALL");
 
   const sectors = useMemo(() => {
     const unique = new Set(
@@ -98,6 +122,23 @@ export default function DashboardClient({
     );
     return ["ALL", ...Array.from(unique).sort()];
   }, [equities]);
+
+  const countries = useMemo(() => {
+    const unique = new Set(
+      equities.map((e) => e.country).filter((c): c is string => Boolean(c))
+    );
+    return ["ALL", ...Array.from(unique).sort()];
+  }, [equities]);
+
+  const feedThemes = useMemo(() => {
+    const unique = new Set<string>(CORE_THEMES);
+    for (const f of filings) {
+      for (const tag of f.theme_tags || []) {
+        unique.add(tag);
+      }
+    }
+    return ["ALL", ...Array.from(unique)];
+  }, [filings]);
 
   // Map sub_sector -> sensitivity rules
   const sectorSensitivitiesMap = useMemo(() => {
@@ -120,13 +161,17 @@ export default function DashboardClient({
   }, [filings]);
 
   const filteredEquities = useMemo(() => {
-    return equities.filter((eq) => {
+    const q = search.toLowerCase();
+    const filtered = equities.filter((eq) => {
       const matchesSearch =
-        eq.ticker.toLowerCase().includes(search.toLowerCase()) ||
-        eq.company_name.toLowerCase().includes(search.toLowerCase()) ||
-        (eq.sub_sector || "").toLowerCase().includes(search.toLowerCase());
+        eq.ticker.toLowerCase().includes(q) ||
+        eq.company_name.toLowerCase().includes(q) ||
+        (eq.sub_sector || "").toLowerCase().includes(q) ||
+        (eq.country || "").toLowerCase().includes(q);
       const matchesSector =
         sectorFilter === "ALL" || eq.sub_sector === sectorFilter;
+      const matchesCountry =
+        countryFilter === "ALL" || eq.country === countryFilter;
       const matchesContract =
         contractFilter === "ALL" || eq.contract_type === contractFilter;
       const qual = Number(eq.qualification_years || 0);
@@ -140,20 +185,50 @@ export default function DashboardClient({
       return (
         matchesSearch &&
         matchesSector &&
+        matchesCountry &&
         matchesContract &&
         matchesCommodity &&
         qual >= minQualYears
       );
     });
+
+    return [...filtered].sort((a, b) => {
+      if (sortBy === "rev_desc") {
+        const diff = (b.adv_mat_rev_pct ?? -1) - (a.adv_mat_rev_pct ?? -1);
+        return diff !== 0 ? diff : a.ticker.localeCompare(b.ticker);
+      }
+      if (sortBy === "rev_asc") {
+        const diff = (a.adv_mat_rev_pct ?? 999) - (b.adv_mat_rev_pct ?? 999);
+        return diff !== 0 ? diff : a.ticker.localeCompare(b.ticker);
+      }
+      if (sortBy === "country_asc") {
+        const countryDiff = (a.country || "ZZZ").localeCompare(b.country || "ZZZ");
+        if (countryDiff !== 0) return countryDiff;
+        return (b.adv_mat_rev_pct ?? -1) - (a.adv_mat_rev_pct ?? -1);
+      }
+      if (sortBy === "moat_desc") {
+        const diff =
+          Number(b.qualification_years || 0) - Number(a.qualification_years || 0);
+        return diff !== 0 ? diff : a.ticker.localeCompare(b.ticker);
+      }
+      return a.ticker.localeCompare(b.ticker);
+    });
   }, [
     equities,
     search,
     sectorFilter,
+    countryFilter,
     contractFilter,
+    sortBy,
     selectedCommodity,
     sectorSensitivitiesMap,
     minQualYears,
   ]);
+
+  const filteredFilings = useMemo(() => {
+    if (feedThemeFilter === "ALL") return filings;
+    return filings.filter((f) => (f.theme_tags || []).includes(feedThemeFilter));
+  }, [filings, feedThemeFilter]);
 
   const selectedEquity = useMemo(
     () => equities.find((e) => e.ticker === selectedTicker) || null,
@@ -177,11 +252,11 @@ export default function DashboardClient({
             <div className="flex items-center gap-2.5">
               <span className="h-2.5 w-2.5 rounded-full bg-emerald-400 animate-pulse" />
               <h1 className="text-lg font-semibold tracking-tight text-white">
-                Advanced Materials Intelligence & Macro Terminal
+                Advanced Materials Intelligence &amp; Macro Terminal
               </h1>
             </div>
             <p className="text-xs text-slate-400 mt-0.5">
-              {equities.length} Global Equities • {filings.length} AI-Parsed 10-K/10-Q & Earnings Briefs • Commodity Sensitivity Engine
+              {equities.length} Global Equities • {filings.length} AI-Parsed 10-K/10-Q &amp; Earnings Briefs • Commodity Sensitivity Engine
             </p>
           </div>
 
@@ -194,7 +269,7 @@ export default function DashboardClient({
                   : "bg-slate-800/80 text-slate-300 hover:bg-slate-800"
               }`}
             >
-              Universe & Commodity Matrix
+              Universe &amp; Commodity Matrix
             </button>
             <button
               onClick={() => setActiveTab("feed")}
@@ -204,7 +279,7 @@ export default function DashboardClient({
                   : "bg-slate-800/80 text-slate-300 hover:bg-slate-800"
               }`}
             >
-              <span>Earnings & 10-K Feed</span>
+              <span>Earnings &amp; 10-K Feed</span>
               <span className="px-1.5 py-0.2 rounded bg-slate-900/60 text-[10px] font-mono">
                 {filings.length}
               </span>
@@ -229,7 +304,7 @@ export default function DashboardClient({
                 )}
               </div>
               <h2 className="text-base font-semibold text-white mt-1.5">
-                Cross-Market Narrative: Filings, Commodities & Secular Capex
+                Cross-Market Narrative: Filings, Commodities &amp; Secular Capex
               </h2>
             </div>
 
@@ -243,7 +318,7 @@ export default function DashboardClient({
               ].map((tab) => (
                 <button
                   key={tab.id}
-                  onClick={() => setNarrativeTab(tab.id as any)}
+                  onClick={() => setNarrativeTab(tab.id as typeof narrativeTab)}
                   className={`px-3 py-1 rounded-md text-xs font-medium transition ${
                     narrativeTab === tab.id
                       ? "bg-sky-500/20 text-sky-300 border border-sky-500/40"
@@ -269,7 +344,7 @@ export default function DashboardClient({
                 {narrativeTab === "commodities" && <p>{narrative.commodities_theme_summary}</p>}
                 {narrativeTab === "ev" && <p>{narrative.electrification_battery_summary}</p>}
                 <div className="mt-3 text-[11px] font-mono text-slate-500">
-                  Synthesized across {filings.length} company filings & {inputs.length} commodity feeds • Updated {narrative.generated_date}
+                  Synthesized across {filings.length} company filings &amp; {inputs.length} commodity feeds • Updated {narrative.generated_date}
                 </div>
               </>
             )}
@@ -292,7 +367,7 @@ export default function DashboardClient({
                 </button>
               )}
             </div>
-            <span className="text-xs text-slate-500">EOD Market & FRED Data</span>
+            <span className="text-xs text-slate-500">EOD Market &amp; FRED Data</span>
           </div>
 
           <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-4 gap-3">
@@ -337,21 +412,38 @@ export default function DashboardClient({
         {/* TAB 1: Equity Universe & Commodity Exposure Table */}
         {activeTab === "screener" && (
           <section className="space-y-4">
-            <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 bg-[#111827]/80 border border-slate-800 rounded-xl p-4">
-              <div className="flex-1">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 bg-[#111827]/80 border border-slate-800 rounded-xl p-4">
+              <div className="sm:col-span-2 lg:col-span-2">
                 <label className="block text-[11px] font-mono uppercase text-slate-400 mb-1.5">
-                  Search Ticker, Company, or Sub-Sector
+                  Search Ticker, Company, Sub-Sector, or Country
                 </label>
                 <input
                   type="text"
-                  placeholder="Click any stock row to open 10-K/10-Q & commodity dossier..."
+                  placeholder="Search or click any row for 10-K dossier..."
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   className="w-full rounded-lg bg-[#090d16] border border-slate-700/80 px-3.5 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-sky-500"
                 />
               </div>
 
-              <div className="w-full md:w-52">
+              <div>
+                <label className="block text-[11px] font-mono uppercase text-slate-400 mb-1.5">
+                  Country
+                </label>
+                <select
+                  value={countryFilter}
+                  onChange={(e) => setCountryFilter(e.target.value)}
+                  className="w-full rounded-lg bg-[#090d16] border border-slate-700/80 px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-sky-500"
+                >
+                  {countries.map((c) => (
+                    <option key={c} value={c}>
+                      {c === "ALL" ? "All Countries" : c}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
                 <label className="block text-[11px] font-mono uppercase text-slate-400 mb-1.5">
                   Sub-Sector
                 </label>
@@ -368,7 +460,7 @@ export default function DashboardClient({
                 </select>
               </div>
 
-              <div className="w-full md:w-44">
+              <div>
                 <label className="block text-[11px] font-mono uppercase text-slate-400 mb-1.5">
                   Contract Type
                 </label>
@@ -384,8 +476,25 @@ export default function DashboardClient({
                 </select>
               </div>
 
-              <div className="w-full md:w-40">
+              <div>
                 <label className="block text-[11px] font-mono uppercase text-slate-400 mb-1.5">
+                  Sort By
+                </label>
+                <select
+                  value={sortBy}
+                  onChange={(e) => setSortBy(e.target.value as SortOption)}
+                  className="w-full rounded-lg bg-[#090d16] border border-slate-700/80 px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-sky-500"
+                >
+                  <option value="rev_desc">Adv. Mat. Rev % (High → Low)</option>
+                  <option value="rev_asc">Adv. Mat. Rev % (Low → High)</option>
+                  <option value="country_asc">Country (A → Z)</option>
+                  <option value="moat_desc">Qual. Moat (High → Low)</option>
+                  <option value="ticker_asc">Ticker (A → Z)</option>
+                </select>
+              </div>
+
+              <div className="sm:col-span-2 lg:col-span-6 flex items-center gap-4 pt-1 border-t border-slate-800/70">
+                <label className="text-[11px] font-mono uppercase text-slate-400 whitespace-nowrap">
                   Min Moat: {minQualYears} yrs
                 </label>
                 <input
@@ -395,8 +504,26 @@ export default function DashboardClient({
                   step={0.5}
                   value={minQualYears}
                   onChange={(e) => setMinQualYears(Number(e.target.value))}
-                  className="w-full accent-sky-400 cursor-pointer mt-2"
+                  className="w-48 accent-sky-400 cursor-pointer"
                 />
+                {(countryFilter !== "ALL" ||
+                  sectorFilter !== "ALL" ||
+                  contractFilter !== "ALL" ||
+                  minQualYears > 0 ||
+                  search) && (
+                  <button
+                    onClick={() => {
+                      setSearch("");
+                      setCountryFilter("ALL");
+                      setSectorFilter("ALL");
+                      setContractFilter("ALL");
+                      setMinQualYears(0);
+                    }}
+                    className="ml-auto text-xs font-mono text-sky-400 hover:text-sky-300 underline"
+                  >
+                    Reset Filters
+                  </button>
+                )}
               </div>
             </div>
 
@@ -407,7 +534,7 @@ export default function DashboardClient({
                   {equities.length} companies{" "}
                   {selectedCommodity && (
                     <span className="text-sky-400 font-mono">
-                      • Exposed to {selectedCommodity}
+                      — Exposed to {selectedCommodity}
                     </span>
                   )}
                 </span>
@@ -420,12 +547,14 @@ export default function DashboardClient({
                 <table className="w-full text-left border-collapse">
                   <thead>
                     <tr className="border-b border-slate-800/90 text-[11px] font-mono uppercase text-slate-400 bg-[#0c1220]">
-                      <th className="py-3.5 px-5">Ticker</th>
-                      <th className="py-3.5 px-5">Company</th>
-                      <th className="py-3.5 px-5">Commodity Drivers</th>
-                      <th className="py-3.5 px-5">Pricing Structure</th>
-                      <th className="py-3.5 px-5">AI Filings</th>
-                      <th className="py-3.5 px-5 text-right">Qual. Moat</th>
+                      <th className="py-3.5 px-4">Ticker</th>
+                      <th className="py-3.5 px-4">Company</th>
+                      <th className="py-3.5 px-4">Country</th>
+                      <th className="py-3.5 px-4 text-right">Adv. Mat. Rev</th>
+                      <th className="py-3.5 px-4">Commodity Drivers</th>
+                      <th className="py-3.5 px-4">Pricing Structure</th>
+                      <th className="py-3.5 px-4">AI Filings</th>
+                      <th className="py-3.5 px-4 text-right">Qual. Moat</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/60 text-sm">
@@ -436,6 +565,7 @@ export default function DashboardClient({
                           style: "bg-slate-800 text-slate-300 border-slate-700",
                         };
                       const qual = Number(eq.qualification_years || 0);
+                      const revPct = eq.adv_mat_rev_pct;
                       const rules = sectorSensitivitiesMap[eq.sub_sector || ""] || [];
                       const eqFilings = tickerFilingsMap[eq.ticker] || [];
 
@@ -445,14 +575,34 @@ export default function DashboardClient({
                           onClick={() => setSelectedTicker(eq.ticker)}
                           className="hover:bg-slate-800/60 cursor-pointer transition-colors"
                         >
-                          <td className="py-3.5 px-5 font-mono font-semibold text-sky-400">
+                          <td className="py-3.5 px-4 font-mono font-semibold text-sky-400">
                             {eq.ticker}
                           </td>
-                          <td className="py-3.5 px-5">
+                          <td className="py-3.5 px-4">
                             <div className="font-medium text-white">{eq.company_name}</div>
                             <div className="text-xs text-slate-400">{eq.sub_sector}</div>
                           </td>
-                          <td className="py-3.5 px-5">
+                          <td className="py-3.5 px-4 text-xs text-slate-300 whitespace-nowrap">
+                            {eq.country || "—"}
+                          </td>
+                          <td className="py-3.5 px-4 text-right font-mono">
+                            {revPct != null ? (
+                              <span
+                                className={`inline-block px-2 py-0.5 rounded text-xs font-semibold border ${
+                                  revPct >= 80
+                                    ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
+                                    : revPct >= 40
+                                    ? "bg-sky-500/15 text-sky-300 border-sky-500/30"
+                                    : "bg-slate-800 text-slate-300 border-slate-700"
+                                }`}
+                              >
+                                {revPct}%
+                              </span>
+                            ) : (
+                              <span className="text-xs text-slate-600">—</span>
+                            )}
+                          </td>
+                          <td className="py-3.5 px-4">
                             <div className="flex flex-wrap gap-1.5">
                               {rules.length === 0 ? (
                                 <span className="text-xs text-slate-500">—</span>
@@ -475,14 +625,14 @@ export default function DashboardClient({
                               )}
                             </div>
                           </td>
-                          <td className="py-3.5 px-5">
+                          <td className="py-3.5 px-4">
                             <span
                               className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border ${badge.style}`}
                             >
                               {badge.label}
                             </span>
                           </td>
-                          <td className="py-3.5 px-5">
+                          <td className="py-3.5 px-4">
                             {eqFilings.length > 0 ? (
                               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-purple-500/15 text-purple-300 border border-purple-500/30 text-xs font-mono">
                                 {eqFilings.length} Brief{eqFilings.length > 1 ? "s" : ""}
@@ -491,7 +641,7 @@ export default function DashboardClient({
                               <span className="text-xs text-slate-600 font-mono">Queued</span>
                             )}
                           </td>
-                          <td className="py-3.5 px-5 text-right font-mono text-slate-200">
+                          <td className="py-3.5 px-4 text-right font-mono text-slate-200">
                             {qual.toFixed(1)}y
                           </td>
                         </tr>
@@ -507,22 +657,40 @@ export default function DashboardClient({
         {/* TAB 2: Live Earnings & SEC 10-K/10-Q Intelligence Feed */}
         {activeTab === "feed" && (
           <section className="space-y-4">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <h2 className="text-sm font-semibold text-white">
-                Latest AI-Parsed 10-K, 10-Q & Global Earnings Summaries
+                Latest AI-Parsed 10-K, 10-Q &amp; Global Earnings Summaries
               </h2>
               <span className="text-xs text-slate-400">
-                Click any card to inspect full company dossier
+                Showing {filteredFilings.length} of {filings.length} briefs • Click any card for full dossier
               </span>
             </div>
 
-            {filings.length === 0 ? (
+            <div className="flex flex-wrap gap-1.5">
+              {feedThemes.map((theme) => (
+                <button
+                  key={theme}
+                  onClick={() => setFeedThemeFilter(theme)}
+                  className={`px-3 py-1 rounded-full text-xs font-medium border transition ${
+                    feedThemeFilter === theme
+                      ? "bg-sky-500 text-white border-sky-400"
+                      : "bg-[#111827] text-slate-400 border-slate-800 hover:text-slate-200"
+                  }`}
+                >
+                  {theme === "ALL" ? "All Themes" : theme}
+                </button>
+              ))}
+            </div>
+
+            {filteredFilings.length === 0 ? (
               <div className="rounded-xl border border-slate-800 bg-[#111827]/70 p-8 text-center text-sm text-slate-400">
-                No filings parsed yet. Trigger the GitHub Actions workflow (`filings_ai.py`) to populate SEC 10-K/10-Q and earnings briefs.
+                {filings.length === 0
+                  ? "No filings parsed yet. Trigger the GitHub Actions workflow (`filings_ai.py`) to populate SEC 10-K/10-Q and earnings briefs."
+                  : `No filings tagged with "${feedThemeFilter}" yet.`}
               </div>
             ) : (
               <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                {filings.map((f) => (
+                {filteredFilings.map((f) => (
                   <div
                     key={f.id}
                     onClick={() => setSelectedTicker(f.ticker)}
@@ -576,21 +744,34 @@ export default function DashboardClient({
           <div className="w-full max-w-2xl bg-[#0c1220] border-l border-slate-800 h-full overflow-y-auto p-6 space-y-6 shadow-2xl">
             <div className="flex items-start justify-between border-b border-slate-800 pb-4">
               <div>
-                <div className="flex items-center gap-2.5">
+                <div className="flex items-center gap-2.5 flex-wrap">
                   <span className="text-xl font-mono font-bold text-sky-400">
                     {selectedEquity.ticker}
                   </span>
                   <span className="px-2.5 py-0.5 rounded-full text-xs bg-slate-800 text-slate-300">
                     {selectedEquity.sub_sector}
                   </span>
+                  {selectedEquity.country && (
+                    <span className="px-2.5 py-0.5 rounded-full text-xs bg-slate-800/80 text-slate-300 border border-slate-700">
+                      {selectedEquity.country}
+                    </span>
+                  )}
                 </div>
                 <h2 className="text-lg font-semibold text-white mt-1">
                   {selectedEquity.company_name}
                 </h2>
-                <div className="flex items-center gap-4 mt-2 text-xs font-mono text-slate-400">
+                <div className="flex flex-wrap items-center gap-3 mt-2 text-xs font-mono text-slate-400">
                   <span>Contract: {selectedEquity.contract_type}</span>
                   <span>•</span>
-                  <span>Qualification Moat: {selectedEquity.qualification_years} yrs</span>
+                  <span>Qual. Moat: {selectedEquity.qualification_years} yrs</span>
+                  {selectedEquity.adv_mat_rev_pct != null && (
+                    <>
+                      <span>•</span>
+                      <span className="text-emerald-400">
+                        Adv. Mat. Rev: {selectedEquity.adv_mat_rev_pct}%
+                      </span>
+                    </>
+                  )}
                 </div>
               </div>
               <button
@@ -604,7 +785,7 @@ export default function DashboardClient({
             {/* Commodity & Macro Sensitivity Breakdown */}
             <div className="space-y-2.5">
               <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                Commodity & Macro Exposure Mechanics
+                Commodity &amp; Macro Exposure Mechanics
               </h3>
               {selectedEquitySensitivities.length === 0 ? (
                 <p className="text-xs text-slate-500">
@@ -645,11 +826,11 @@ export default function DashboardClient({
             {/* Last Few 10-K / 10-Q / Earnings Reports */}
             <div className="space-y-3">
               <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                Recent 10-K, 10-Q & Earnings Intelligence ({selectedEquityFilings.length})
+                Recent 10-K, 10-Q &amp; Earnings Intelligence ({selectedEquityFilings.length})
               </h3>
               {selectedEquityFilings.length === 0 ? (
                 <div className="rounded-lg bg-[#111827] border border-slate-800 p-4 text-xs text-slate-400">
-                  This ticker is queued for the next SEC EDGAR / Gemini synthesis batch.
+                  This ticker is queued for the next SEC EDGAR / AI synthesis batch.
                 </div>
               ) : (
                 selectedEquityFilings.map((f) => (
@@ -682,7 +863,7 @@ export default function DashboardClient({
                       {f.pricing_and_margins && (
                         <div className="rounded bg-[#090d16] p-2.5 border border-slate-800/80">
                           <span className="font-mono text-[10px] uppercase text-emerald-400 block mb-0.5">
-                            Pricing Power & Margins
+                            Pricing Power &amp; Margins
                           </span>
                           <span className="text-slate-300">{f.pricing_and_margins}</span>
                         </div>
@@ -690,7 +871,7 @@ export default function DashboardClient({
                       {f.capex_and_backlog && (
                         <div className="rounded bg-[#090d16] p-2.5 border border-slate-800/80">
                           <span className="font-mono text-[10px] uppercase text-sky-400 block mb-0.5">
-                            Backlog, Qualification & Capex
+                            Backlog, Qualification &amp; Capex
                           </span>
                           <span className="text-slate-300">{f.capex_and_backlog}</span>
                         </div>
