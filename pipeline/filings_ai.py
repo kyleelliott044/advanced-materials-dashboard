@@ -171,6 +171,18 @@ SENSITIVITY_RULES = [
     ("Olefins & Polyolefins", "CL=F", "Margin Spread", "Direct (Demand)", "US ethane-to-crude oil cost advantage widens North American polyethylene margins when oil rises."),
     ("Packaging & Specialty Plastics", "NG=F", "Cost Input", "Inverse (Cost)", "USGC ethane/natural gas feedstock costs vs. global polyethylene clearing prices."),
     ("Fluoropolymers & Titanium Tech", "SMH", "Revenue Proxy", "Direct (Demand)", "High-purity PFA fluoropolymers essential for semiconductor fab piping and chemical handling."),
+    # New Commodity & Macro Rules
+    ("Specialty Alloys", "PNICKUSDM", "Cost Input", "Pass-Through", "Nickel is a core alloying element; surcharges pass through with a 1-2 quarter lag."),
+    ("Specialty Alloys", "PCOBAUSDM", "Cost Input", "Pass-Through", "Cobalt superalloy melt costs indexed to aerospace OEM contracts."),
+    ("High-Nickel Cathodes", "PNICKUSDM", "Cost Input", "Pass-Through", "Nickel sulfate costs pass through to battery cell makers."),
+    ("High-Nickel Cathodes", "PCOBAUSDM", "Cost Input", "Pass-Through", "Cobalt feedstock indexed in NMC cathode contracts."),
+    ("Integrated Chemicals & Materials", "BZ=F", "Cost Input", "Inverse (Cost)", "Brent crude sets European and Asian naphtha cracker feedstock costs."),
+    ("Integrated Chemicals & Materials", "PNGASEUUSDM", "Cost Input", "Inverse (Cost)", "European TTF natural gas dictates EU chemical plant competitiveness."),
+    ("Integrated Chemicals & Materials", "WPU061", "Revenue Proxy", "Direct (Demand)", "Industrial chemical PPI tracks base chemical pricing power."),
+    ("Packaging & Specialty Plastics", "WPU066", "Revenue Proxy", "Direct (Demand)", "Plastic resin PPI tracks polymer conversion spreads."),
+    ("Optical Fiber & Display Glass", "PL=F", "Cost Input", "Inverse (Cost)", "Platinum-rhodium bushings are required for high-temp specialty glass drawing."),
+    ("Semicon Packaging & Chemicals", "SI=F", "Cost Input", "Pass-Through", "Silver conductive pastes and plating chemistry for chip packaging."),
+    ("Medical Devices & Biomaterials", "IHI", "Revenue Proxy", "Direct (Demand)", "Procedure volumes and med-tech capex drive biocompatible polymer & tissue demand."),
 ]
 
 
