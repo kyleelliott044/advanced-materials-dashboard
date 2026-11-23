@@ -18,7 +18,8 @@ export default async function HomePage() {
   const sql = neon(process.env.DATABASE_URL!);
 
   const equities = (await sql`
-    SELECT ticker, company_name, sub_sector, contract_type, qualification_years
+    SELECT ticker, company_name, sub_sector, contract_type, qualification_years, adv_mat_rev_pct,
+      country
     FROM equities_universe
     ORDER BY qualification_years DESC NULLS LAST, ticker ASC
   `) as EquityRow[];
