@@ -198,6 +198,9 @@ FRED_INPUTS = [
     ("INDPRO", "US Industrial Production Index", "Index 2017=100", "Macro Activity"),
     ("PCUOMFGOMFG", "PPI Total Manufacturing", "Index Dec 1984=100", "Input Inflation"),
     ("WPU101", "PPI Iron and Steel", "Index 1982=100", "Input Inflation"),
+    ("WPU066", "PPI Plastic Resins & Materials", "Index 1982=100", "Input Inflation"),
+    ("PCOBAUSDM", "Global Cobalt Price", "USD / Metric Ton", "Battery & Alloy Metal"),
+    ("PNICKUSDM", "Global Nickel Price", "USD / Metric Ton", "Battery & Alloy Metal"),
     ("DGS10", "10-Year Treasury Constant Maturity", "Percent", "Cost of Capital"),
 ]
 
