@@ -178,7 +178,7 @@ SENSITIVITY_RULES = [
 class FilingSummarySchema(BaseModel):
     headline: str = Field(description="Concise 1-sentence institutional headline summarizing the filing/earnings.")
     executive_summary: str = Field(description="3-4 sentence analytical summary of revenue drivers, volume trends, and strategic positioning.")
-    theme_tags: List[str] = Field(description="2 to 5 tags from: ['AI Infrastructure', 'Aerospace & Defense', 'Electrification & Grid', 'EV & Batteries', 'Semiconductors', 'Industrial Recovery', 'Commodity Headwind', 'Pricing Power']")
+    theme_tags: List[str] = Field(description="2 to 5 tags from: ['AI Infrastructure', 'Aerospace & Defense', 'Electrification & Grid', 'EV & Batteries', 'Semiconductors', 'Medical Devices', 'Industrial Recovery', 'Commodity Headwind', 'Pricing Power']")
     pricing_and_margins: str = Field(description="Specific details on gross/operating margins, raw material pass-through, surcharges, or price/cost spread.")
     capex_and_backlog: str = Field(description="Details on order backlog, customer qualification milestones, capacity expansion, or capex guidance.")
     key_risks: str = Field(description="Top 1-2 operational, geopolitical, or cyclical risks highlighted in the report.")
