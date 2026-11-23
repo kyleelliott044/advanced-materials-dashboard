@@ -51,7 +51,7 @@ def _call_groq_fallback(prompt: str, schema):
                 "Content-Type": "application/json",
             },
             json={
-                "model": "llama-3.3-70b-versatile",
+                "model": "openai/gpt-oss-120b",
                 "response_format": {"type": "json_object"},
                 "temperature": 0.2,
                 "messages": [
