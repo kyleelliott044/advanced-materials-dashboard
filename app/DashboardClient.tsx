@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo } from "react";
+import { useState, useMemo, useEffect } from "react";
 
 export interface EquityRow {
   ticker: string;
@@ -115,6 +115,22 @@ export default function DashboardClient({
   const [minQualYears, setMinQualYears] = useState(0);
   const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
   const [feedThemeFilter, setFeedThemeFilter] = useState("ALL");
+  const [isLight, setIsLight] = useState(false);
+
+  useEffect(() => {
+    const saved = localStorage.getItem("dashboard-theme");
+    if (saved === "light") {
+      document.documentElement.classList.add("light-mode");
+      setIsLight(true);
+    }
+  }, []);
+
+  const toggleTheme = () => {
+    const next = !isLight;
+    setIsLight(next);
+    document.documentElement.classList.toggle("light-mode", next);
+    localStorage.setItem("dashboard-theme", next ? "light" : "dark");
+  };
 
   const sectors = useMemo(() => {
     const unique = new Set(
@@ -283,6 +299,13 @@ export default function DashboardClient({
               <span className="px-1.5 py-0.2 rounded bg-slate-900/60 text-[10px] font-mono">
                 {filings.length}
               </span>
+            </button>
+            <button
+              onClick={toggleTheme}
+              className="px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-800/80 text-slate-300 hover:bg-slate-800 border border-slate-700/80 transition"
+              title="Toggle Light / Dark Mode"
+            >
+              {isLight ? "🌙 Dark" : "☀️ Light"}
             </button>
           </div>
         </div>
