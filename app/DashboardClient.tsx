@@ -10,6 +10,7 @@ export interface EquityRow {
   qualification_years: string | number | null;
   adv_mat_rev_pct: number | null;
   country: string | null;
+  market_cap_usd: number | null;
 }
 
 export interface RawInputRow {
@@ -19,6 +20,8 @@ export interface RawInputRow {
   unit: string | null;
   observation_date: string;
   value: string | number;
+  is_proxy?: boolean;
+  source_note?: string | null;
 }
 
 export interface SensitivityRow {
@@ -55,7 +58,22 @@ export interface MacroNarrativeRow {
   electrification_battery_summary: string;
 }
 
+export interface SupplyChainRow {
+  ticker: string;
+  direction: "upstream_supplier" | "downstream_customer" | string;
+  counterparty_name: string;
+  is_named_entity: boolean;
+  material_or_product: string;
+  is_sole_source: boolean;
+  exposure_pct: number | null;
+  source_filing_type: string | null;
+  source_filing_date: string | null;
+  source_quote: string | null;
+}
+
 type SortOption =
+  | "mcap_desc"
+  | "mcap_asc"
   | "rev_desc"
   | "rev_asc"
   | "country_asc"
@@ -89,18 +107,28 @@ const CORE_THEMES = [
   "Pricing Power",
 ];
 
+function formatMarketCap(usd: number | null): string {
+  if (usd == null || usd <= 0) return "—";
+  if (usd >= 1e12) return `$${(usd / 1e12).toFixed(2)}T`;
+  if (usd >= 1e9) return `$${(usd / 1e9).toFixed(1)}B`;
+  if (usd >= 1e6) return `$${(usd / 1e6).toFixed(0)}M`;
+  return `$${usd.toLocaleString()}`;
+}
+
 export default function DashboardClient({
   equities,
   inputs,
   sensitivities,
   filings,
   narrative,
+  supplyChain = [],
 }: {
   equities: EquityRow[];
   inputs: RawInputRow[];
   sensitivities: SensitivityRow[];
   filings: FilingRow[];
   narrative: MacroNarrativeRow | null;
+  supplyChain?: SupplyChainRow[];
 }) {
   const [activeTab, setActiveTab] = useState<"screener" | "feed">("screener");
   const [narrativeTab, setNarrativeTab] = useState<
@@ -110,7 +138,7 @@ export default function DashboardClient({
   const [sectorFilter, setSectorFilter] = useState("ALL");
   const [countryFilter, setCountryFilter] = useState("ALL");
   const [contractFilter, setContractFilter] = useState("ALL");
-  const [sortBy, setSortBy] = useState<SortOption>("rev_desc");
+  const [sortBy, setSortBy] = useState<SortOption>("mcap_desc");
   const [selectedCommodity, setSelectedCommodity] = useState<string | null>(null);
   const [minQualYears, setMinQualYears] = useState(0);
   const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
@@ -176,6 +204,16 @@ export default function DashboardClient({
     return map;
   }, [filings]);
 
+  // Map ticker -> supply chain links
+  const tickerSupplyChainMap = useMemo(() => {
+    const map: Record<string, SupplyChainRow[]> = {};
+    for (const sc of supplyChain) {
+      if (!map[sc.ticker]) map[sc.ticker] = [];
+      map[sc.ticker].push(sc);
+    }
+    return map;
+  }, [supplyChain]);
+
   const filteredEquities = useMemo(() => {
     const q = search.toLowerCase();
     const filtered = equities.filter((eq) => {
@@ -209,6 +247,14 @@ export default function DashboardClient({
     });
 
     return [...filtered].sort((a, b) => {
+      if (sortBy === "mcap_desc") {
+        const diff = (b.market_cap_usd ?? -1) - (a.market_cap_usd ?? -1);
+        return diff !== 0 ? diff : a.ticker.localeCompare(b.ticker);
+      }
+      if (sortBy === "mcap_asc") {
+        const diff = (a.market_cap_usd ?? 1e18) - (b.market_cap_usd ?? 1e18);
+        return diff !== 0 ? diff : a.ticker.localeCompare(b.ticker);
+      }
       if (sortBy === "rev_desc") {
         const diff = (b.adv_mat_rev_pct ?? -1) - (a.adv_mat_rev_pct ?? -1);
         return diff !== 0 ? diff : a.ticker.localeCompare(b.ticker);
@@ -220,7 +266,7 @@ export default function DashboardClient({
       if (sortBy === "country_asc") {
         const countryDiff = (a.country || "ZZZ").localeCompare(b.country || "ZZZ");
         if (countryDiff !== 0) return countryDiff;
-        return (b.adv_mat_rev_pct ?? -1) - (a.adv_mat_rev_pct ?? -1);
+        return (b.market_cap_usd ?? -1) - (a.market_cap_usd ?? -1);
       }
       if (sortBy === "moat_desc") {
         const diff =
@@ -258,6 +304,17 @@ export default function DashboardClient({
   const selectedEquitySensitivities = selectedEquity?.sub_sector
     ? sectorSensitivitiesMap[selectedEquity.sub_sector] || []
     : [];
+
+  const selectedEquitySupplyChain = selectedTicker
+    ? tickerSupplyChainMap[selectedTicker] || []
+    : [];
+
+  const upstreamSuppliers = selectedEquitySupplyChain.filter(
+    (s) => s.direction === "upstream_supplier"
+  );
+  const downstreamCustomers = selectedEquitySupplyChain.filter(
+    (s) => s.direction === "downstream_customer"
+  );
 
   return (
     <div className="min-h-screen bg-[#090d16] text-slate-100 font-sans selection:bg-sky-500/30">
@@ -390,7 +447,7 @@ export default function DashboardClient({
                 </button>
               )}
             </div>
-            <span className="text-xs text-slate-500">EOD Market &amp; FRED Data</span>
+            <span className="text-xs text-slate-500">EOD Market, FRED &amp; AI-Grounded Spot</span>
           </div>
 
           <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-4 gap-3">
@@ -402,15 +459,25 @@ export default function DashboardClient({
                   onClick={() =>
                     setSelectedCommodity(isSelected ? null : item.input_code)
                   }
+                  title={item.source_note || undefined}
                   className={`text-left rounded-xl p-3.5 border transition ${
                     isSelected
                       ? "bg-sky-950/50 border-sky-400 ring-1 ring-sky-400/50"
                       : "bg-[#111827]/90 border-slate-800/90 hover:border-slate-700"
                   }`}
                 >
-                  <div className="flex items-center justify-between text-[11px] font-mono">
-                    <span className="text-sky-400 font-semibold">{item.input_code}</span>
-                    <span className="text-slate-500 truncate max-w-[115px]">
+                  <div className="flex items-center justify-between gap-1 text-[11px] font-mono">
+                    <div className="flex items-center gap-1.5 min-w-0">
+                      <span className="text-sky-400 font-semibold truncate">
+                        {item.input_code}
+                      </span>
+                      {item.is_proxy && (
+                        <span className="px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[9px] uppercase">
+                          AI Spot
+                        </span>
+                      )}
+                    </div>
+                    <span className="text-slate-500 truncate max-w-[100px]">
                       {item.category}
                     </span>
                   </div>
@@ -442,7 +509,7 @@ export default function DashboardClient({
                 </label>
                 <input
                   type="text"
-                  placeholder="Search or click any row for 10-K dossier..."
+                  placeholder="Search or click any row for 10-K & supply chain dossier..."
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   className="w-full rounded-lg bg-[#090d16] border border-slate-700/80 px-3.5 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-sky-500"
@@ -508,6 +575,8 @@ export default function DashboardClient({
                   onChange={(e) => setSortBy(e.target.value as SortOption)}
                   className="w-full rounded-lg bg-[#090d16] border border-slate-700/80 px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-sky-500"
                 >
+                  <option value="mcap_desc">Market Cap USD (High → Low)</option>
+                  <option value="mcap_asc">Market Cap USD (Low → High)</option>
                   <option value="rev_desc">Adv. Mat. Rev % (High → Low)</option>
                   <option value="rev_asc">Adv. Mat. Rev % (Low → High)</option>
                   <option value="country_asc">Country (A → Z)</option>
@@ -562,7 +631,7 @@ export default function DashboardClient({
                   )}
                 </span>
                 <span className="text-sky-400 font-medium">
-                  Click any company row for 10-K/Earnings Dossier &rarr;
+                  Click any company row for 10-K &amp; Supply Chain Dossier &rarr;
                 </span>
               </div>
 
@@ -573,6 +642,7 @@ export default function DashboardClient({
                       <th className="py-3.5 px-4">Ticker</th>
                       <th className="py-3.5 px-4">Company</th>
                       <th className="py-3.5 px-4">Country</th>
+                      <th className="py-3.5 px-4 text-right">Market Cap</th>
                       <th className="py-3.5 px-4 text-right">Adv. Mat. Rev</th>
                       <th className="py-3.5 px-4">Commodity Drivers</th>
                       <th className="py-3.5 px-4">Pricing Structure</th>
@@ -607,6 +677,9 @@ export default function DashboardClient({
                           </td>
                           <td className="py-3.5 px-4 text-xs text-slate-300 whitespace-nowrap">
                             {eq.country || "—"}
+                          </td>
+                          <td className="py-3.5 px-4 text-right font-mono text-xs text-slate-200 whitespace-nowrap">
+                            {formatMarketCap(eq.market_cap_usd)}
                           </td>
                           <td className="py-3.5 px-4 text-right font-mono">
                             {revPct != null ? (
@@ -784,6 +857,14 @@ export default function DashboardClient({
                   {selectedEquity.company_name}
                 </h2>
                 <div className="flex flex-wrap items-center gap-3 mt-2 text-xs font-mono text-slate-400">
+                  {selectedEquity.market_cap_usd != null && (
+                    <>
+                      <span className="text-white font-semibold">
+                        Mkt Cap: {formatMarketCap(selectedEquity.market_cap_usd)}
+                      </span>
+                      <span>•</span>
+                    </>
+                  )}
                   <span>Contract: {selectedEquity.contract_type}</span>
                   <span>•</span>
                   <span>Qual. Moat: {selectedEquity.qualification_years} yrs</span>
@@ -803,6 +884,120 @@ export default function DashboardClient({
               >
                 Close ✕
               </button>
+            </div>
+
+            {/* Verified Upstream Suppliers & Downstream Customers */}
+            <div className="space-y-2.5">
+              <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                Verified Supply Chain &amp; Value-Chain Counterparties
+              </h3>
+              {selectedEquitySupplyChain.length === 0 ? (
+                <p className="text-xs text-slate-500">
+                  No disclosed upstream suppliers or downstream customers extracted from filings yet.
+                </p>
+              ) : (
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  {/* Upstream Suppliers */}
+                  <div className="rounded-lg bg-[#111827] border border-slate-800 p-3.5 space-y-2.5">
+                    <div className="text-[11px] font-mono uppercase tracking-wider text-amber-400">
+                      Upstream Raw Material Suppliers ({upstreamSuppliers.length})
+                    </div>
+                    {upstreamSuppliers.length === 0 ? (
+                      <p className="text-xs text-slate-500">None disclosed in parsed filings.</p>
+                    ) : (
+                      <div className="space-y-2.5">
+                        {upstreamSuppliers.map((sup, idx) => (
+                          <div
+                            key={`${sup.counterparty_name}-${idx}`}
+                            className="rounded bg-[#090d16] border border-slate-800/80 p-2.5 space-y-1"
+                          >
+                            <div className="flex items-center justify-between gap-1.5 flex-wrap">
+                              <span className="text-xs font-semibold text-white">
+                                {sup.counterparty_name}
+                              </span>
+                              <div className="flex items-center gap-1">
+                                {sup.is_sole_source && (
+                                  <span className="px-1.5 py-0.2 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30 text-[10px] font-mono">
+                                    SOLE SOURCE
+                                  </span>
+                                )}
+                                {sup.exposure_pct != null && (
+                                  <span className="px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-300 text-[10px] font-mono">
+                                    {sup.exposure_pct}%
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            <div className="text-[11px] text-sky-300 font-medium">
+                              Input: {sup.material_or_product}
+                            </div>
+                            {sup.source_quote && (
+                              <p className="text-[11px] text-slate-400 italic leading-snug">
+                                &ldquo;{sup.source_quote}&rdquo;
+                                {sup.source_filing_type && (
+                                  <span className="not-italic font-mono text-[10px] text-slate-500 ml-1">
+                                    ({sup.source_filing_type} {sup.source_filing_date})
+                                  </span>
+                                )}
+                              </p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Downstream Customers */}
+                  <div className="rounded-lg bg-[#111827] border border-slate-800 p-3.5 space-y-2.5">
+                    <div className="text-[11px] font-mono uppercase tracking-wider text-emerald-400">
+                      Downstream Customers &amp; OEMs ({downstreamCustomers.length})
+                    </div>
+                    {downstreamCustomers.length === 0 ? (
+                      <p className="text-xs text-slate-500">None disclosed in parsed filings.</p>
+                    ) : (
+                      <div className="space-y-2.5">
+                        {downstreamCustomers.map((cust, idx) => (
+                          <div
+                            key={`${cust.counterparty_name}-${idx}`}
+                            className="rounded bg-[#090d16] border border-slate-800/80 p-2.5 space-y-1"
+                          >
+                            <div className="flex items-center justify-between gap-1.5 flex-wrap">
+                              <span className="text-xs font-semibold text-white">
+                                {cust.counterparty_name}
+                              </span>
+                              <div className="flex items-center gap-1">
+                                {cust.is_sole_source && (
+                                  <span className="px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[10px] font-mono">
+                                    10%+ CONC.
+                                  </span>
+                                )}
+                                {cust.exposure_pct != null && (
+                                  <span className="px-1.5 py-0.2 rounded bg-emerald-500/15 text-emerald-300 text-[10px] font-mono">
+                                    {cust.exposure_pct}%
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            <div className="text-[11px] text-sky-300 font-medium">
+                              Product: {cust.material_or_product}
+                            </div>
+                            {cust.source_quote && (
+                              <p className="text-[11px] text-slate-400 italic leading-snug">
+                                &ldquo;{cust.source_quote}&rdquo;
+                                {cust.source_filing_type && (
+                                  <span className="not-italic font-mono text-[10px] text-slate-500 ml-1">
+                                    ({cust.source_filing_type} {cust.source_filing_date})
+                                  </span>
+                                )}
+                              </p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* Commodity & Macro Sensitivity Breakdown */}
