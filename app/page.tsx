@@ -1,3 +1,5 @@
+import { Suspense } from "react";
+import { connection } from "next/server";
 import { neon } from "@neondatabase/serverless";
 import DashboardClient, {
   EquityRow,
@@ -9,9 +11,8 @@ import DashboardClient, {
 } from "./DashboardClient";
 import ScopedInsightsPanel from "./ScopedInsightsPanel";
 
-export const dynamic = "force-dynamic";
-
-export default async function HomePage() {
+async function DashboardDataLoader() {
+  await connection();
   const sql = neon(process.env.DATABASE_URL!);
 
   const [
@@ -123,7 +124,6 @@ export default async function HomePage() {
     `,
   ]);
 
-  // Normalize Postgres BIGINT / NUMERIC strings to JS numbers for client serialization
   const equities: EquityRow[] = rawEquities.map((row) => ({
     ticker: row.ticker,
     company_name: row.company_name,
@@ -153,7 +153,7 @@ export default async function HomePage() {
   const narrative = (narratives[0] as MacroNarrativeRow) || null;
 
   return (
-    <div className="min-h-screen bg-[#090d16]">
+    <>
       <DashboardClient
         equities={equities}
         inputs={inputs as RawInputRow[]}
@@ -163,6 +163,22 @@ export default async function HomePage() {
         supplyChain={supplyChain}
       />
       <ScopedInsightsPanel insights={insights as any[]} />
+    </>
+  );
+}
+
+export default function HomePage() {
+  return (
+    <div className="min-h-screen bg-[#090d16]">
+      <Suspense
+        fallback={
+          <div className="max-w-7xl mx-auto px-6 py-12 text-xs font-mono text-slate-400">
+            Loading Advanced Materials Intelligence Terminal...
+          </div>
+        }
+      >
+        <DashboardDataLoader />
+      </Suspense>
     </div>
   );
 }
