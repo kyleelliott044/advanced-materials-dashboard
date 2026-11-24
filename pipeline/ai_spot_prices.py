@@ -2,12 +2,13 @@ import os
 import re
 import time
 import json
+from datetime import date
+from typing import List, Optional
+from urllib.parse import quote_plus
 import requests
 import psycopg
-from datetime import date
 from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field
-from typing import List, Optional
 from google import genai
 from google.genai import types
 
@@ -16,6 +17,12 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+
+GROQ_MODELS = [
+    "openai/gpt-oss-120b",
+    "qwen/qwen3.8-27b",
+    "openai/gpt-oss-20b",
+]
 
 SPECIALTY_MATERIALS = [
     ("NDPR_CN", "Neodymium-Praseodymium (NdPr) Oxide Spot", "USD / kg", "Rare Earths"),
@@ -26,6 +33,17 @@ SPECIALTY_MATERIALS = [
     ("SPHERICAL_GRAPHITE", "Uncoated Spherical Graphite (99.95% Spot)", "USD / Metric Ton", "Battery Materials"),
     ("COBALT_SULFATE", "Battery-Grade Cobalt Sulfate Spot", "USD / Metric Ton", "Battery & Alloy Metal"),
     ("CARBON_FIBER_T700", "Industrial Standard-Modulus Carbon Fiber Tow", "USD / kg", "Composites"),
+]
+
+SEARCH_QUERIES = [
+    ("NDPR_CN", "NdPr oxide price USD kg rare earth"),
+    ("LICARB_CN", "lithium carbonate price ton SMM GFEX"),
+    ("GALLIUM_9999", "gallium metal price kg spot"),
+    ("GERMANIUM_INGOT", "germanium ingot price kg spot"),
+    ("POLYSILICON_N", "n-type polysilicon price kg"),
+    ("SPHERICAL_GRAPHITE", "spherical graphite price ton"),
+    ("COBALT_SULFATE", "cobalt sulfate price ton"),
+    ("CARBON_FIBER_T700", "carbon fiber price kg aerospace industrial"),
 ]
 
 
@@ -41,90 +59,91 @@ class MaterialSpotBatch(BaseModel):
     quotes: List[MaterialSpotQuote]
 
 
-def _fetch_web_snippets() -> tuple[str, list[str]]:
-    """Fetches public search snippets for each specialty material when Gemini Search is quota-limited."""
-    headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"}
+def _fetch_rss_snippets() -> tuple[str, list[str]]:
+    """Fetches public Google News & Bing News RSS items (unblocked on GitHub Actions)."""
+    headers = {"User-Agent": "Mozilla/5.0 (compatible; MaterialsMacroBot/1.0)"}
     snippets = []
     urls = []
+    seen_titles = set()
 
-    queries = [
-        ("NDPR_CN", "NdPr oxide spot price USD per kg SMM Asian Metal"),
-        ("LICARB_CN", "battery grade lithium carbonate spot price USD per ton SMM GFEX"),
-        ("GALLIUM_9999", "gallium metal 99.99 spot price USD per kg"),
-        ("GERMANIUM_INGOT", "germanium ingot spot price USD per kg"),
-        ("POLYSILICON_N", "n-type polysilicon price USD per kg InfoLink SMM"),
-        ("SPHERICAL_GRAPHITE", "spherical graphite price USD per ton"),
-        ("COBALT_SULFATE", "cobalt sulfate spot price USD per ton SMM"),
-        ("CARBON_FIBER_T700", "carbon fiber T700 price USD per kg"),
-    ]
+    for code, query in SEARCH_QUERIES:
+        encoded = quote_plus(query)
+        rss_urls = [
+            f"https://news.google.com/rss/search?q={encoded}&hl=en-US&gl=US&ceid=US:en",
+            f"https://www.bing.com/news/search?q={encoded}&format=rss",
+        ]
+        for rss_url in rss_urls:
+            try:
+                r = requests.get(rss_url, headers=headers, timeout=12)
+                if r.status_code != 200:
+                    continue
+                soup = BeautifulSoup(r.text, "html.parser")
+                for item in soup.find_all("item")[:3]:
+                    title = item.find("title").get_text(strip=True) if item.find("title") else ""
+                    if not title or title in seen_titles:
+                        continue
+                    seen_titles.add(title)
+                    pub_date = item.find("pubdate").get_text(strip=True) if item.find("pubdate") else ""
+                    desc_raw = item.find("description").get_text(" ", strip=True) if item.find("description") else ""
+                    desc_clean = BeautifulSoup(desc_raw, "html.parser").get_text(" ", strip=True)[:220]
+                    snippets.append(f"[{code}] ({pub_date}) {title} — {desc_clean}")
+                    if len(urls) < 4:
+                        urls.append(rss_url.split("?")[0])
+            except Exception:
+                continue
+        time.sleep(0.2)
 
-    for code, q in queries:
-        try:
-            r = requests.post(
-                "https://html.duckduckgo.com/html/",
-                data={"q": q},
-                headers=headers,
-                timeout=12,
-            )
-            soup = BeautifulSoup(r.text, "html.parser")
-            results = soup.select(".result")[:2]
-            for res in results:
-                title_el = res.select_one(".result__a")
-                snip_el = res.select_one(".result__snippet")
-                if title_el and snip_el:
-                    snippets.append(f"[{code}] {title_el.get_text(strip=True)}: {snip_el.get_text(strip=True)}")
-                    href = title_el.get("href", "")
-                    if href.startswith("http") and len(urls) < 4:
-                        urls.append(href)
-            time.sleep(0.6)
-        except Exception:
-            continue
-
+    print(f"Retrieved {len(snippets)} RSS market snippets across {len(SEARCH_QUERIES)} materials.")
     return "\n".join(snippets), urls
 
 
 def _search_via_groq(prompt: str) -> tuple[str, list[str]]:
     if not GROQ_API_KEY:
         return "", []
-    snippets, urls = _fetch_web_snippets()
+    snippets, urls = _fetch_rss_snippets()
     if not snippets:
-        print("No web snippets retrieved for Groq spot-price extraction.")
         return "", []
 
     schema_hint = json.dumps(MaterialSpotBatch.model_json_schema())
-    try:
-        resp = requests.post(
-            "https://api.groq.com/openai/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {GROQ_API_KEY}",
-                "Content-Type": "application/json",
-            },
-            json={
-                "model": "openai/gpt-oss-120b",
-                "response_format": {"type": "json_object"},
-                "temperature": 0.1,
-                "messages": [
-                    {
-                        "role": "system",
-                        "content": (
-                            "You are a commodities data analyst. Extract spot prices from the provided search snippets "
-                            "and return ONLY a valid JSON object matching this exact schema:\n"
-                            f"{schema_hint}"
-                        ),
-                    },
-                    {
-                        "role": "user",
-                        "content": f"{prompt}\n\nWEB SEARCH SNIPPETS:\n{snippets[:14000]}",
-                    },
-                ],
-            },
-            timeout=45,
-        )
-        resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"] or "", urls
-    except Exception as e:
-        print(f"Groq spot-price extraction failed: {e}")
-        return "", []
+    for model_id in GROQ_MODELS:
+        try:
+            resp = requests.post(
+                "https://api.groq.com/openai/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {GROQ_API_KEY}",
+                    "Content-Type": "application/json",
+                },
+                json={
+                    "model": model_id,
+                    "response_format": {"type": "json_object"},
+                    "temperature": 0.1,
+                    "messages": [
+                        {
+                            "role": "system",
+                            "content": (
+                                "You are a commodities data analyst. Extract verifiable spot prices from the provided "
+                                "market news snippets and return ONLY a valid JSON object matching this exact schema:\n"
+                                f"{schema_hint}"
+                            ),
+                        },
+                        {
+                            "role": "user",
+                            "content": f"{prompt}\n\nMARKET RSS SNIPPETS:\n{snippets[:14000]}",
+                        },
+                    ],
+                },
+                timeout=45,
+            )
+            if resp.status_code == 429:
+                print(f"Groq rate limit on {model_id} — trying next model.")
+                continue
+            resp.raise_for_status()
+            return resp.json()["choices"][0]["message"]["content"] or "", urls
+        except Exception as e:
+            print(f"Groq spot-price extraction failed on {model_id}: {e}")
+            continue
+
+    return "", []
 
 
 def refresh_ai_material_prices(conn):
@@ -169,10 +188,10 @@ def refresh_ai_material_prices(conn):
             chunks = resp.candidates[0].grounding_metadata.grounding_chunks or []
             grounding_urls = [c.web.uri for c in chunks if getattr(c, "web", None) and c.web.uri][:5]
         except Exception as e:
-            print(f"Gemini search unavailable ({e}) — falling back to web snippets + Groq.")
+            print(f"Gemini search unavailable ({e}) — falling back to RSS + Groq.")
 
     if not raw_text:
-        provider_label = "Web Search + Groq"
+        provider_label = "Market RSS + Groq"
         raw_text, grounding_urls = _search_via_groq(prompt)
 
     json_match = re.search(r"\{.*\}", raw_text, re.DOTALL)
