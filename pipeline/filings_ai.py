@@ -991,7 +991,18 @@ def backfill_existing_supply_chain(conn, limit_tickers=2):
             conn = ensure_conn(conn)
 
     return conn
-
+    
+def _fmt_mcap(mcap) -> str:
+    if mcap is None:
+        return "N/A"
+    val = float(mcap)
+    if val >= 1e12:
+        return f"${val / 1e12:.2f}T"
+    if val >= 1e9:
+        return f"${val / 1e9:.1f}B"
+    if val >= 1e6:
+        return f"${val / 1e6:.0f}M"
+    return f"${val:,.0f}"
 
 def generate_market_macro_narrative(conn):
     conn = ensure_conn(conn)
