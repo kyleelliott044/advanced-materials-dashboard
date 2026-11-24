@@ -1,12 +1,9 @@
 name: Setup Python Pipeline Environment
-description: Checks out repo and installs Python dependencies with pip caching
+description: Sets up Python 3.11 and installs dependencies with pip caching
 
 runs:
   using: composite
   steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
