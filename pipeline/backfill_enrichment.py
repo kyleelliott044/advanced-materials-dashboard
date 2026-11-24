@@ -69,6 +69,32 @@ CANONICAL_INPUT_GUIDE = """
 """
 
 
+def connect_db():
+    return psycopg.connect(
+        DATABASE_URL,
+        autocommit=True,
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=5,
+    )
+
+
+def ensure_conn(conn):
+    if conn is not None and not conn.closed and not conn.broken:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1;")
+            return conn
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    print("Reconnecting to Neon PostgreSQL...")
+    return connect_db()
+
+
 class CommodityDriverLink(BaseModel):
     commodity_name: str = Field(
         description="Human-readable name of the specific commodity, feedstock, energy input, or end-market driver (e.g., 'High-Purity Nickel', 'Natural Gas', 'Lithium Carbonate', 'Titanium Sponge', 'Copper Foil'). Never return a ticker symbol or FRED code."
@@ -139,6 +165,7 @@ class EnrichmentBackfillSchema(BaseModel):
 
 
 def ensure_tables(conn):
+    conn = ensure_conn(conn)
     with conn.cursor() as cur:
         cur.execute("""
             ALTER TABLE equities_universe
@@ -185,6 +212,7 @@ def ensure_tables(conn):
               CHECK (direction IN ('upstream_supplier', 'downstream_customer', 'competitor'));
         """)
     conn.commit()
+    return conn
 
 
 def _safe_pct(val) -> Optional[float]:
@@ -373,30 +401,6 @@ def save_enrichment(conn, ticker: str, ftype: str, fdate: str, parsed: dict, sou
             (d.get("source_quote") or "")[:350],
         ))
 
-    if driver_rows:
-        with conn.cursor() as cur:
-            cur.executemany(
-                """
-                INSERT INTO equity_commodity_drivers (
-                    ticker, commodity_name, matched_input_code, exposure_role,
-                    impact_direction, pass_through_lag, cogs_or_rev_share_pct,
-                    mechanism_detail, source_filing_type, source_filing_date, source_quote
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (ticker, commodity_name) DO UPDATE SET
-                    matched_input_code = COALESCE(EXCLUDED.matched_input_code, equity_commodity_drivers.matched_input_code),
-                    exposure_role = EXCLUDED.exposure_role,
-                    impact_direction = EXCLUDED.impact_direction,
-                    pass_through_lag = EXCLUDED.pass_through_lag,
-                    cogs_or_rev_share_pct = COALESCE(EXCLUDED.cogs_or_rev_share_pct, equity_commodity_drivers.cogs_or_rev_share_pct),
-                    mechanism_detail = EXCLUDED.mechanism_detail,
-                    source_filing_type = EXCLUDED.source_filing_type,
-                    source_filing_date = EXCLUDED.source_filing_date,
-                    source_quote = EXCLUDED.source_quote,
-                    updated_at = NOW();
-                """,
-                driver_rows,
-            )
-
     sc_rows = []
     for direction, key in (
         ("upstream_supplier", "upstream_suppliers"),
@@ -424,39 +428,78 @@ def save_enrichment(conn, ticker: str, ftype: str, fdate: str, parsed: dict, sou
                 quote[:400],
             ))
 
-    if sc_rows:
-        with conn.cursor() as cur:
-            cur.executemany(
-                """
-                INSERT INTO equity_supply_chain (
-                    ticker, direction, counterparty_name, is_named_entity,
-                    material_or_product, is_sole_source, exposure_pct,
-                    source_filing_type, source_filing_date, source_quote
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (ticker, direction, counterparty_name, material_or_product) DO UPDATE SET
-                    is_named_entity = EXCLUDED.is_named_entity,
-                    is_sole_source = EXCLUDED.is_sole_source,
-                    exposure_pct = COALESCE(EXCLUDED.exposure_pct, equity_supply_chain.exposure_pct),
-                    source_filing_type = EXCLUDED.source_filing_type,
-                    source_filing_date = EXCLUDED.source_filing_date,
-                    source_quote = EXCLUDED.source_quote,
-                    updated_at = NOW();
-                """,
-                sc_rows,
-            )
+    for attempt in range(2):
+        conn = ensure_conn(conn)
+        try:
+            if driver_rows:
+                with conn.cursor() as cur:
+                    cur.executemany(
+                        """
+                        INSERT INTO equity_commodity_drivers (
+                            ticker, commodity_name, matched_input_code, exposure_role,
+                            impact_direction, pass_through_lag, cogs_or_rev_share_pct,
+                            mechanism_detail, source_filing_type, source_filing_date, source_quote
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (ticker, commodity_name) DO UPDATE SET
+                            matched_input_code = COALESCE(EXCLUDED.matched_input_code, equity_commodity_drivers.matched_input_code),
+                            exposure_role = EXCLUDED.exposure_role,
+                            impact_direction = EXCLUDED.impact_direction,
+                            pass_through_lag = EXCLUDED.pass_through_lag,
+                            cogs_or_rev_share_pct = COALESCE(EXCLUDED.cogs_or_rev_share_pct, equity_commodity_drivers.cogs_or_rev_share_pct),
+                            mechanism_detail = EXCLUDED.mechanism_detail,
+                            source_filing_type = EXCLUDED.source_filing_type,
+                            source_filing_date = EXCLUDED.source_filing_date,
+                            source_quote = EXCLUDED.source_quote,
+                            updated_at = NOW();
+                        """,
+                        driver_rows,
+                    )
 
-    with conn.cursor() as cur:
-        cur.execute(
-            "UPDATE equities_universe SET enrichment_backfilled_at = NOW() WHERE ticker = %s;",
-            (ticker,),
-        )
+            if sc_rows:
+                with conn.cursor() as cur:
+                    cur.executemany(
+                        """
+                        INSERT INTO equity_supply_chain (
+                            ticker, direction, counterparty_name, is_named_entity,
+                            material_or_product, is_sole_source, exposure_pct,
+                            source_filing_type, source_filing_date, source_quote
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (ticker, direction, counterparty_name, material_or_product) DO UPDATE SET
+                            is_named_entity = EXCLUDED.is_named_entity,
+                            is_sole_source = EXCLUDED.is_sole_source,
+                            exposure_pct = COALESCE(EXCLUDED.exposure_pct, equity_supply_chain.exposure_pct),
+                            source_filing_type = EXCLUDED.source_filing_type,
+                            source_filing_date = EXCLUDED.source_filing_date,
+                            source_quote = EXCLUDED.source_quote,
+                            updated_at = NOW();
+                        """,
+                        sc_rows,
+                    )
 
-    conn.commit()
-    print(f"[{ticker}] Saved {len(driver_rows)} commodity drivers & {len(sc_rows)} value-chain/competitor links ({ftype} {fdate})")
+            with conn.cursor() as cur:
+                cur.execute(
+                    "UPDATE equities_universe SET enrichment_backfilled_at = NOW() WHERE ticker = %s;",
+                    (ticker,),
+                )
+
+            conn.commit()
+            print(f"[{ticker}] Saved {len(driver_rows)} commodity drivers & {len(sc_rows)} value-chain/competitor links ({ftype} {fdate})")
+            return conn
+        except psycopg.OperationalError as e:
+            print(f"DB connection dropped saving {ticker} ({e}) — reconnecting...")
+            try:
+                conn.close()
+            except Exception:
+                pass
+            conn = connect_db()
+            if attempt == 1:
+                raise
+
+    return conn
 
 
-def run_backfill(conn):
-    ensure_tables(conn)
+def run_backfill(conn=None):
+    conn = ensure_tables(conn)
 
     # Select best already-parsed filing per ticker where enrichment has not yet been run
     with conn.cursor() as cur:
@@ -516,7 +559,7 @@ def run_backfill(conn):
 
     if not targets:
         print("All already-analyzed filings have been processed for commodity drivers, competitors, and supply-chain links.")
-        return
+        return conn
 
     print(f"Found {len(targets)} analyzed stocks to enrich (batch limit={BATCH_LIMIT})...")
 
@@ -580,11 +623,16 @@ def run_backfill(conn):
             print("All AI providers exhausted for this run — stopping cleanly.")
             break
 
-        save_enrichment(conn, ticker, ftype, fdate, parsed, full_source_text)
+        conn = save_enrichment(conn, ticker, ftype, fdate, parsed, full_source_text)
 
     print(f"Backfill run complete ({gemini_calls_used} Gemini calls, {groq_calls_used} Groq calls used).")
+    return conn
 
 
 if __name__ == "__main__":
-    with psycopg.connect(DATABASE_URL, autocommit=True) as conn:
-        run_backfill(conn)
+    conn = connect_db()
+    try:
+        conn = run_backfill(conn)
+    finally:
+        if conn and not conn.closed:
+            conn.close()
