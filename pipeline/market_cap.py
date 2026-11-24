@@ -37,6 +37,29 @@ def fetch_fx_to_usd() -> dict[str, float]:
     return rates
 
 
+def _get_cap_and_currency(ticker: str):
+    tk = yf.Ticker(ticker)
+    try:
+        fi = tk.fast_info
+        raw_cap = fi["market_cap"]
+        ccy = fi["currency"] or "USD"
+        if raw_cap and raw_cap > 0:
+            return float(raw_cap), str(ccy)
+    except Exception:
+        pass
+
+    try:
+        info = tk.info or {}
+        raw_cap = info.get("marketCap")
+        ccy = info.get("currency") or "USD"
+        if raw_cap and raw_cap > 0:
+            return float(raw_cap), str(ccy)
+    except Exception:
+        pass
+
+    return None, None
+
+
 def update_market_caps(conn):
     fx_rates = fetch_fx_to_usd()
     with conn.cursor() as cur:
@@ -45,28 +68,23 @@ def update_market_caps(conn):
 
     updates = []
     for ticker in tickers:
-        try:
-            fi = yf.Ticker(ticker).fast_info
-            raw_cap = getattr(fi, "market_cap", None)
-            ccy = getattr(fi, "currency", None) or "USD"
-            if not raw_cap or raw_cap <= 0:
-                continue
+        raw_cap, ccy = _get_cap_and_currency(ticker)
+        if not raw_cap or not ccy:
+            continue
 
-            # London Stock Exchange quotes often use British pence (GBp = 0.01 GBP)
-            if ccy == "GBp":
-                fx = fx_rates.get("GBP", 1.27) / 100.0
-            else:
-                fx = fx_rates.get(ccy.upper())
+        # London Stock Exchange quotes often use British pence (GBp = 0.01 GBP)
+        if ccy == "GBp":
+            fx = fx_rates.get("GBP", 1.27) / 100.0
+        else:
+            fx = fx_rates.get(ccy.upper())
 
-            if not fx:
-                print(f"Skipping {ticker}: missing FX rate for {ccy}")
-                continue
+        if not fx:
+            print(f"Skipping {ticker}: missing FX rate for {ccy}")
+            continue
 
-            usd_cap = int(round(float(raw_cap) * fx))
-            updates.append((usd_cap, ticker))
-            time.sleep(0.05)
-        except Exception as e:
-            print(f"Warning fetching market cap for {ticker}: {e}")
+        usd_cap = int(round(raw_cap * fx))
+        updates.append((usd_cap, ticker))
+        time.sleep(0.05)
 
     with conn.cursor() as cur:
         cur.executemany(
