@@ -1,9 +1,11 @@
 import os
 import re
+import time
 import json
 import requests
 import psycopg
 from datetime import date
+from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field
 from typing import List, Optional
 from google import genai
@@ -39,9 +41,56 @@ class MaterialSpotBatch(BaseModel):
     quotes: List[MaterialSpotQuote]
 
 
-def _search_via_groq_compound(prompt: str) -> str:
+def _fetch_web_snippets() -> tuple[str, list[str]]:
+    """Fetches public search snippets for each specialty material when Gemini Search is quota-limited."""
+    headers = {"User-Agent": "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/124.0 Safari/537.36"}
+    snippets = []
+    urls = []
+
+    queries = [
+        ("NDPR_CN", "NdPr oxide spot price USD per kg SMM Asian Metal"),
+        ("LICARB_CN", "battery grade lithium carbonate spot price USD per ton SMM GFEX"),
+        ("GALLIUM_9999", "gallium metal 99.99 spot price USD per kg"),
+        ("GERMANIUM_INGOT", "germanium ingot spot price USD per kg"),
+        ("POLYSILICON_N", "n-type polysilicon price USD per kg InfoLink SMM"),
+        ("SPHERICAL_GRAPHITE", "spherical graphite price USD per ton"),
+        ("COBALT_SULFATE", "cobalt sulfate spot price USD per ton SMM"),
+        ("CARBON_FIBER_T700", "carbon fiber T700 price USD per kg"),
+    ]
+
+    for code, q in queries:
+        try:
+            r = requests.post(
+                "https://html.duckduckgo.com/html/",
+                data={"q": q},
+                headers=headers,
+                timeout=12,
+            )
+            soup = BeautifulSoup(r.text, "html.parser")
+            results = soup.select(".result")[:2]
+            for res in results:
+                title_el = res.select_one(".result__a")
+                snip_el = res.select_one(".result__snippet")
+                if title_el and snip_el:
+                    snippets.append(f"[{code}] {title_el.get_text(strip=True)}: {snip_el.get_text(strip=True)}")
+                    href = title_el.get("href", "")
+                    if href.startswith("http") and len(urls) < 4:
+                        urls.append(href)
+            time.sleep(0.6)
+        except Exception:
+            continue
+
+    return "\n".join(snippets), urls
+
+
+def _search_via_groq(prompt: str) -> tuple[str, list[str]]:
     if not GROQ_API_KEY:
-        return ""
+        return "", []
+    snippets, urls = _fetch_web_snippets()
+    if not snippets:
+        print("No web snippets retrieved for Groq spot-price extraction.")
+        return "", []
+
     schema_hint = json.dumps(MaterialSpotBatch.model_json_schema())
     try:
         resp = requests.post(
@@ -51,26 +100,31 @@ def _search_via_groq_compound(prompt: str) -> str:
                 "Content-Type": "application/json",
             },
             json={
-                "model": "groq/compound-mini",
+                "model": "openai/gpt-oss-120b",
+                "response_format": {"type": "json_object"},
                 "temperature": 0.1,
                 "messages": [
                     {
                         "role": "system",
                         "content": (
-                            "Use web search to find current spot prices and return ONLY a raw JSON object "
-                            f"matching this schema (no markdown fences):\n{schema_hint}"
+                            "You are a commodities data analyst. Extract spot prices from the provided search snippets "
+                            "and return ONLY a valid JSON object matching this exact schema:\n"
+                            f"{schema_hint}"
                         ),
                     },
-                    {"role": "user", "content": prompt},
+                    {
+                        "role": "user",
+                        "content": f"{prompt}\n\nWEB SEARCH SNIPPETS:\n{snippets[:14000]}",
+                    },
                 ],
             },
-            timeout=60,
+            timeout=45,
         )
         resp.raise_for_status()
-        return resp.json()["choices"][0]["message"]["content"] or ""
+        return resp.json()["choices"][0]["message"]["content"] or "", urls
     except Exception as e:
-        print(f"Groq web-search fallback failed: {e}")
-        return ""
+        print(f"Groq spot-price extraction failed: {e}")
+        return "", []
 
 
 def refresh_ai_material_prices(conn):
@@ -86,13 +140,13 @@ def refresh_ai_material_prices(conn):
     meta_map = {code: (name, unit, cat) for code, name, unit, cat in SPECIALTY_MATERIALS}
 
     prompt = f"""
-    Today is {today_str}. Search for the most recent spot or market assessment prices (converted to USD in the exact target unit requested) for these non-exchange specialty materials:
+    Today is {today_str}. Extract the most recent spot or market assessment prices (converted to USD in the exact target unit requested) for these non-exchange specialty materials:
 
     {mat_list}
 
     Rules:
-    - Convert RMB/CNY quotes to USD using current FX rates if quoted on Chinese spot markets (SMM, Asian Metal, GFEX).
-    - Do NOT guess or fabricate prices. If no recent quote (within the last 45 days) is verifiable in search results, set price_usd to null.
+    - Convert RMB/CNY quotes to USD (~7.2 RMB/USD) if quoted on Chinese spot markets (SMM, Asian Metal, GFEX).
+    - Do NOT guess or fabricate prices. If no recent quote is verifiable in the results, set price_usd to null.
     """
 
     raw_text = ""
@@ -115,11 +169,11 @@ def refresh_ai_material_prices(conn):
             chunks = resp.candidates[0].grounding_metadata.grounding_chunks or []
             grounding_urls = [c.web.uri for c in chunks if getattr(c, "web", None) and c.web.uri][:5]
         except Exception as e:
-            print(f"Gemini search unavailable ({e}) — falling back to Groq Compound web search.")
+            print(f"Gemini search unavailable ({e}) — falling back to web snippets + Groq.")
 
     if not raw_text:
-        provider_label = "Groq Web Search"
-        raw_text = _search_via_groq_compound(prompt)
+        provider_label = "Web Search + Groq"
+        raw_text, grounding_urls = _search_via_groq(prompt)
 
     json_match = re.search(r"\{.*\}", raw_text, re.DOTALL)
     if not json_match:
