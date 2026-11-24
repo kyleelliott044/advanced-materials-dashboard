@@ -71,6 +71,20 @@ export interface SupplyChainRow {
   source_quote: string | null;
 }
 
+export interface CommodityDriverRow {
+  ticker: string;
+  commodity_name: string;
+  matched_input_code: string | null;
+  exposure_role: string;
+  impact_direction: string;
+  pass_through_lag: string | null;
+  cogs_or_rev_share_pct: number | null;
+  mechanism_detail: string;
+  source_filing_type: string | null;
+  source_filing_date: string | null;
+  source_quote: string | null;
+}
+
 type SortOption =
   | "mcap_desc"
   | "mcap_asc"
@@ -107,6 +121,41 @@ const CORE_THEMES = [
   "Pricing Power",
 ];
 
+// Fallback names if a sensitivity rule references an input not yet in raw_inputs
+const FALLBACK_INPUT_NAMES: Record<string, string> = {
+  "HG=F": "Copper",
+  "NG=F": "Natural Gas",
+  "CL=F": "WTI Crude Oil",
+  "BZ=F": "Brent Crude Oil",
+  "ALI=F": "Aluminum",
+  "PL=F": "Platinum",
+  "SI=F": "Silver",
+  PNICKUSDM: "Global Nickel",
+  PCOBAUSDM: "Global Cobalt",
+  PNGASEUUSDM: "European Natural Gas",
+  WPU101: "Iron & Steel",
+  WPU061: "Industrial Chemicals",
+  WPU066: "Plastic Resins",
+  INDPRO: "US Industrial Production",
+  PCUOMFGOMFG: "Manufacturing PPI",
+  DGS10: "10-Year Treasury Yield",
+  SMH: "Semiconductor Wafer Demand",
+  ITA: "Aerospace & Defense",
+  LIT: "Lithium & Battery Tech",
+  REMX: "Rare Earth Metals",
+  URA: "Uranium & Nuclear",
+  SLX: "Specialty Steel",
+  IHI: "Medical Devices",
+  NDPR_CN: "NdPr Rare Earth Oxide",
+  LICARB_CN: "Lithium Carbonate",
+  GALLIUM_9999: "Refined Gallium",
+  GERMANIUM_INGOT: "Germanium Ingot",
+  POLYSILICON_N: "N-Type Polysilicon",
+  SPHERICAL_GRAPHITE: "Spherical Graphite",
+  COBALT_SULFATE: "Cobalt Sulfate",
+  CARBON_FIBER_T700: "Carbon Fiber Tow",
+};
+
 function formatMarketCap(usd: number | null): string {
   if (usd == null || usd <= 0) return "—";
   if (usd >= 1e12) return `$${(usd / 1e12).toFixed(2)}T`;
@@ -122,6 +171,7 @@ export default function DashboardClient({
   filings,
   narrative,
   supplyChain = [],
+  commodityDrivers = [],
 }: {
   equities: EquityRow[];
   inputs: RawInputRow[];
@@ -129,6 +179,7 @@ export default function DashboardClient({
   filings: FilingRow[];
   narrative: MacroNarrativeRow | null;
   supplyChain?: SupplyChainRow[];
+  commodityDrivers?: CommodityDriverRow[];
 }) {
   const [activeTab, setActiveTab] = useState<"screener" | "feed">("screener");
   const [narrativeTab, setNarrativeTab] = useState<
@@ -160,6 +211,18 @@ export default function DashboardClient({
     localStorage.setItem("dashboard-theme", next ? "light" : "dark");
   };
 
+  // Map every input_code -> human-readable commodity name
+  const inputNameMap = useMemo(() => {
+    const map: Record<string, string> = { ...FALLBACK_INPUT_NAMES };
+    for (const item of inputs) {
+      map[item.input_code] = item.input_name;
+    }
+    return map;
+  }, [inputs]);
+
+  const getCommodityDisplayName = (code: string) =>
+    inputNameMap[code] || code;
+
   const sectors = useMemo(() => {
     const unique = new Set(
       equities.map((e) => e.sub_sector).filter((s): s is string => Boolean(s))
@@ -184,7 +247,6 @@ export default function DashboardClient({
     return ["ALL", ...Array.from(unique)];
   }, [filings]);
 
-  // Map sub_sector -> sensitivity rules
   const sectorSensitivitiesMap = useMemo(() => {
     const map: Record<string, SensitivityRow[]> = {};
     for (const s of sensitivities) {
@@ -194,7 +256,15 @@ export default function DashboardClient({
     return map;
   }, [sensitivities]);
 
-  // Map ticker -> filings
+  const tickerDriversMap = useMemo(() => {
+    const map: Record<string, CommodityDriverRow[]> = {};
+    for (const d of commodityDrivers) {
+      if (!map[d.ticker]) map[d.ticker] = [];
+      map[d.ticker].push(d);
+    }
+    return map;
+  }, [commodityDrivers]);
+
   const tickerFilingsMap = useMemo(() => {
     const map: Record<string, FilingRow[]> = {};
     for (const f of filings) {
@@ -204,7 +274,6 @@ export default function DashboardClient({
     return map;
   }, [filings]);
 
-  // Map ticker -> supply chain links
   const tickerSupplyChainMap = useMemo(() => {
     const map: Record<string, SupplyChainRow[]> = {};
     for (const sc of supplyChain) {
@@ -217,11 +286,16 @@ export default function DashboardClient({
   const filteredEquities = useMemo(() => {
     const q = search.toLowerCase();
     const filtered = equities.filter((eq) => {
+      const aiDrivers = tickerDriversMap[eq.ticker] || [];
+      const matchesDriverSearch = aiDrivers.some((d) =>
+        d.commodity_name.toLowerCase().includes(q)
+      );
       const matchesSearch =
         eq.ticker.toLowerCase().includes(q) ||
         eq.company_name.toLowerCase().includes(q) ||
         (eq.sub_sector || "").toLowerCase().includes(q) ||
-        (eq.country || "").toLowerCase().includes(q);
+        (eq.country || "").toLowerCase().includes(q) ||
+        matchesDriverSearch;
       const matchesSector =
         sectorFilter === "ALL" || eq.sub_sector === sectorFilter;
       const matchesCountry =
@@ -232,8 +306,14 @@ export default function DashboardClient({
 
       let matchesCommodity = true;
       if (selectedCommodity) {
-        const rules = sectorSensitivitiesMap[eq.sub_sector || ""] || [];
-        matchesCommodity = rules.some((r) => r.input_code === selectedCommodity);
+        const subRules = sectorSensitivitiesMap[eq.sub_sector || ""] || [];
+        const matchesSubRule = subRules.some(
+          (r) => r.input_code === selectedCommodity
+        );
+        const matchesAiDriver = aiDrivers.some(
+          (d) => d.matched_input_code === selectedCommodity
+        );
+        matchesCommodity = matchesSubRule || matchesAiDriver;
       }
 
       return (
@@ -284,6 +364,7 @@ export default function DashboardClient({
     sortBy,
     selectedCommodity,
     sectorSensitivitiesMap,
+    tickerDriversMap,
     minQualYears,
   ]);
 
@@ -299,6 +380,10 @@ export default function DashboardClient({
 
   const selectedEquityFilings = selectedTicker
     ? tickerFilingsMap[selectedTicker] || []
+    : [];
+
+  const selectedEquityDrivers = selectedTicker
+    ? tickerDriversMap[selectedTicker] || []
     : [];
 
   const selectedEquitySensitivities = selectedEquity?.sub_sector
@@ -414,7 +499,7 @@ export default function DashboardClient({
           <div className="pt-4 text-sm leading-relaxed text-slate-200">
             {!narrative ? (
               <p className="text-slate-400 italic">
-                Run the GitHub Actions workflow (`filings_ai.py`) with your `GEMINI_API_KEY` secret to generate the cross-filing macro narrative.
+                Run the GitHub Actions workflow (`filings_ai.py`) to generate the cross-filing macro narrative.
               </p>
             ) : (
               <>
@@ -431,23 +516,23 @@ export default function DashboardClient({
           </div>
         </section>
 
-        {/* Interactive Commodity & Macro Filter Cards */}
+        {/* Interactive Commodity & Macro Filter Cards (Named Commodities, Not Codes) */}
         <section>
           <div className="flex items-center justify-between mb-3">
             <div className="flex items-center gap-3">
               <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                Click Any Commodity / Macro Proxy to Filter Exposed Stocks
+                Click Any Commodity or Macro Driver to Filter Exposed Stocks
               </h2>
               {selectedCommodity && (
                 <button
                   onClick={() => setSelectedCommodity(null)}
                   className="text-xs font-mono text-sky-400 hover:text-sky-300 underline"
                 >
-                  Clear Filter ({selectedCommodity})
+                  Clear Filter ({getCommodityDisplayName(selectedCommodity)})
                 </button>
               )}
             </div>
-            <span className="text-xs text-slate-500">EOD Market, FRED &amp; AI-Grounded Spot</span>
+            <span className="text-xs text-slate-500">EOD Market, FRED &amp; AI Spot</span>
           </div>
 
           <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-4 gap-3">
@@ -466,32 +551,29 @@ export default function DashboardClient({
                       : "bg-[#111827]/90 border-slate-800/90 hover:border-slate-700"
                   }`}
                 >
-                  <div className="flex items-center justify-between gap-1 text-[11px] font-mono">
-                    <div className="flex items-center gap-1.5 min-w-0">
-                      <span className="text-sky-400 font-semibold truncate">
-                        {item.input_code}
-                      </span>
-                      {item.is_proxy && (
-                        <span className="px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[9px] uppercase">
-                          AI Spot
-                        </span>
-                      )}
-                    </div>
-                    <span className="text-slate-500 truncate max-w-[100px]">
-                      {item.category}
+                  <div className="flex items-center justify-between gap-1.5">
+                    <span className="text-[11px] font-medium text-sky-400 truncate">
+                      {item.category || "Macro Input"}
                     </span>
+                    {item.is_proxy && (
+                      <span className="px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[9px] font-mono uppercase shrink-0">
+                        AI Spot
+                      </span>
+                    )}
                   </div>
-                  <div className="mt-1 text-xs font-medium text-slate-200 truncate">
+                  <div className="mt-1 text-xs font-semibold text-white line-clamp-1">
                     {item.input_name}
                   </div>
-                  <div className="mt-2.5 flex items-baseline justify-between">
+                  <div className="mt-2.5 flex items-baseline justify-between gap-1">
                     <span className="text-lg font-semibold font-mono text-white">
                       {Number(item.value).toLocaleString(undefined, {
                         minimumFractionDigits: 2,
                         maximumFractionDigits: 2,
                       })}
                     </span>
-                    <span className="text-[10px] text-slate-500">{item.unit}</span>
+                    <span className="text-[10px] text-slate-500 truncate">
+                      {item.unit}
+                    </span>
                   </div>
                 </button>
               );
@@ -505,11 +587,11 @@ export default function DashboardClient({
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 bg-[#111827]/80 border border-slate-800 rounded-xl p-4">
               <div className="sm:col-span-2 lg:col-span-2">
                 <label className="block text-[11px] font-mono uppercase text-slate-400 mb-1.5">
-                  Search Ticker, Company, Sub-Sector, or Country
+                  Search Ticker, Company, Commodity, or Country
                 </label>
                 <input
                   type="text"
-                  placeholder="Search or click any row for 10-K & supply chain dossier..."
+                  placeholder="Search e.g. 'Nickel', 'Titanium', 'TSMC', or click row..."
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   className="w-full rounded-lg bg-[#090d16] border border-slate-700/80 px-3.5 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-sky-500"
@@ -625,13 +707,13 @@ export default function DashboardClient({
                   Showing <strong className="text-white">{filteredEquities.length}</strong> of{" "}
                   {equities.length} companies{" "}
                   {selectedCommodity && (
-                    <span className="text-sky-400 font-mono">
-                      — Exposed to {selectedCommodity}
+                    <span className="text-sky-400 font-medium">
+                      — Exposed to {getCommodityDisplayName(selectedCommodity)}
                     </span>
                   )}
                 </span>
                 <span className="text-sky-400 font-medium">
-                  Click any company row for 10-K &amp; Supply Chain Dossier &rarr;
+                  Click any company row for AI Commodity &amp; Filing Dossier &rarr;
                 </span>
               </div>
 
@@ -659,8 +741,30 @@ export default function DashboardClient({
                         };
                       const qual = Number(eq.qualification_years || 0);
                       const revPct = eq.adv_mat_rev_pct;
-                      const rules = sectorSensitivitiesMap[eq.sub_sector || ""] || [];
+                      const aiDrivers = tickerDriversMap[eq.ticker] || [];
+                      const subRules = sectorSensitivitiesMap[eq.sub_sector || ""] || [];
                       const eqFilings = tickerFilingsMap[eq.ticker] || [];
+
+                      // Prefer AI-extracted stock-level commodity drivers; fall back to named sub-sector rules
+                      const pillItems =
+                        aiDrivers.length > 0
+                          ? aiDrivers.slice(0, 4).map((d) => ({
+                              label: d.commodity_name,
+                              direction: d.impact_direction,
+                              tooltip: `${d.exposure_role} (${d.impact_direction}): ${d.mechanism_detail}`,
+                            }))
+                          : subRules.slice(0, 4).map((r) => ({
+                              label: getCommodityDisplayName(r.input_code),
+                              direction: r.impact_direction,
+                              tooltip: `${r.relationship_type}: ${r.mechanism_note}`,
+                            }));
+
+                      const extraCount =
+                        aiDrivers.length > 4
+                          ? aiDrivers.length - 4
+                          : aiDrivers.length === 0 && subRules.length > 4
+                          ? subRules.length - 4
+                          : 0;
 
                       return (
                         <tr
@@ -699,25 +803,32 @@ export default function DashboardClient({
                             )}
                           </td>
                           <td className="py-3.5 px-4">
-                            <div className="flex flex-wrap gap-1.5">
-                              {rules.length === 0 ? (
+                            <div className="flex flex-wrap gap-1.5 max-w-xs">
+                              {pillItems.length === 0 ? (
                                 <span className="text-xs text-slate-500">—</span>
                               ) : (
-                                rules.map((r) => (
-                                  <span
-                                    key={r.input_code}
-                                    className={`px-2 py-0.5 rounded text-[11px] font-mono border ${
-                                      r.impact_direction.includes("Inverse")
-                                        ? "bg-rose-500/10 text-rose-300 border-rose-500/30"
-                                        : r.impact_direction.includes("Direct")
-                                        ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/30"
-                                        : "bg-sky-500/10 text-sky-300 border-sky-500/30"
-                                    }`}
-                                    title={`${r.relationship_type}: ${r.mechanism_note}`}
-                                  >
-                                    {r.input_code}
-                                  </span>
-                                ))
+                                <>
+                                  {pillItems.map((p, idx) => (
+                                    <span
+                                      key={`${p.label}-${idx}`}
+                                      className={`px-2 py-0.5 rounded text-[11px] font-medium border ${
+                                        p.direction.includes("Inverse")
+                                          ? "bg-rose-500/10 text-rose-300 border-rose-500/30"
+                                          : p.direction.includes("Direct")
+                                          ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/30"
+                                          : "bg-sky-500/10 text-sky-300 border-sky-500/30"
+                                      }`}
+                                      title={p.tooltip}
+                                    >
+                                      {p.label}
+                                    </span>
+                                  ))}
+                                  {extraCount > 0 && (
+                                    <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-slate-800 text-slate-400 border border-slate-700">
+                                      +{extraCount}
+                                    </span>
+                                  )}
+                                </>
                               )}
                             </div>
                           </td>
@@ -886,6 +997,113 @@ export default function DashboardClient({
               </button>
             </div>
 
+            {/* In-Depth AI Company-Specific Commodity & Input Breakdown */}
+            <div className="space-y-2.5">
+              <div className="flex items-center justify-between">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                  {selectedEquityDrivers.length > 0
+                    ? `AI-Extracted Commodity & Input Exposure (${selectedEquityDrivers.length})`
+                    : "Sub-Sector Commodity & Macro Exposure"}
+                </h3>
+                {selectedEquityDrivers.length > 0 && (
+                  <span className="text-[10px] font-mono text-sky-400">
+                    Company-Specific Filing Analysis
+                  </span>
+                )}
+              </div>
+
+              {selectedEquityDrivers.length > 0 ? (
+                <div className="space-y-2.5">
+                  {selectedEquityDrivers.map((d, idx) => (
+                    <div
+                      key={`${d.commodity_name}-${idx}`}
+                      className="rounded-lg bg-[#111827] border border-slate-800 p-3.5 space-y-1.5"
+                    >
+                      <div className="flex items-center justify-between gap-2 flex-wrap">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="font-semibold text-white text-xs">
+                            {d.commodity_name}
+                          </span>
+                          <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 text-[10px] font-mono">
+                            {d.exposure_role}
+                          </span>
+                          {d.cogs_or_rev_share_pct != null && (
+                            <span className="px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[10px] font-mono">
+                              {d.cogs_or_rev_share_pct}% Share
+                            </span>
+                          )}
+                        </div>
+                        <div className="flex items-center gap-1.5">
+                          {d.pass_through_lag && (
+                            <span className="text-[10px] font-mono text-slate-400">
+                              {d.pass_through_lag}
+                            </span>
+                          )}
+                          <span
+                            className={`text-[11px] font-mono px-2 py-0.5 rounded ${
+                              d.impact_direction.includes("Inverse")
+                                ? "bg-rose-500/15 text-rose-300"
+                                : d.impact_direction.includes("Direct")
+                                ? "bg-emerald-500/15 text-emerald-300"
+                                : "bg-sky-500/15 text-sky-300"
+                            }`}
+                          >
+                            {d.impact_direction}
+                          </span>
+                        </div>
+                      </div>
+                      <p className="text-xs text-slate-300 leading-relaxed">
+                        {d.mechanism_detail}
+                      </p>
+                      {d.source_quote && (
+                        <p className="text-[11px] text-slate-400 italic leading-snug border-l-2 border-slate-700 pl-2">
+                          &ldquo;{d.source_quote}&rdquo;
+                          {d.source_filing_type && (
+                            <span className="not-italic font-mono text-[10px] text-slate-500 ml-1">
+                              ({d.source_filing_type} {d.source_filing_date})
+                            </span>
+                          )}
+                        </p>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              ) : selectedEquitySensitivities.length === 0 ? (
+                <p className="text-xs text-slate-500">
+                  No direct commodity rules mapped for this sub-sector yet.
+                </p>
+              ) : (
+                <div className="space-y-2">
+                  {selectedEquitySensitivities.map((s) => (
+                    <div
+                      key={s.input_code}
+                      className="rounded-lg bg-[#111827] border border-slate-800 p-3.5"
+                    >
+                      <div className="flex items-center justify-between">
+                        <span className="font-semibold text-sky-400 text-xs">
+                          {getCommodityDisplayName(s.input_code)} — {s.relationship_type}
+                        </span>
+                        <span
+                          className={`text-[11px] font-mono px-2 py-0.5 rounded ${
+                            s.impact_direction.includes("Inverse")
+                              ? "bg-rose-500/15 text-rose-300"
+                              : s.impact_direction.includes("Direct")
+                              ? "bg-emerald-500/15 text-emerald-300"
+                              : "bg-sky-500/15 text-sky-300"
+                          }`}
+                        >
+                          {s.impact_direction}
+                        </span>
+                      </div>
+                      <p className="text-xs text-slate-300 mt-1.5 leading-relaxed">
+                        {s.mechanism_note}
+                      </p>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+
             {/* Verified Upstream Suppliers & Downstream Customers */}
             <div className="space-y-2.5">
               <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
@@ -897,7 +1115,6 @@ export default function DashboardClient({
                 </p>
               ) : (
                 <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  {/* Upstream Suppliers */}
                   <div className="rounded-lg bg-[#111827] border border-slate-800 p-3.5 space-y-2.5">
                     <div className="text-[11px] font-mono uppercase tracking-wider text-amber-400">
                       Upstream Raw Material Suppliers ({upstreamSuppliers.length})
@@ -947,7 +1164,6 @@ export default function DashboardClient({
                     )}
                   </div>
 
-                  {/* Downstream Customers */}
                   <div className="rounded-lg bg-[#111827] border border-slate-800 p-3.5 space-y-2.5">
                     <div className="text-[11px] font-mono uppercase tracking-wider text-emerald-400">
                       Downstream Customers &amp; OEMs ({downstreamCustomers.length})
@@ -996,47 +1212,6 @@ export default function DashboardClient({
                       </div>
                     )}
                   </div>
-                </div>
-              )}
-            </div>
-
-            {/* Commodity & Macro Sensitivity Breakdown */}
-            <div className="space-y-2.5">
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                Commodity &amp; Macro Exposure Mechanics
-              </h3>
-              {selectedEquitySensitivities.length === 0 ? (
-                <p className="text-xs text-slate-500">
-                  No direct commodity rules mapped for this sub-sector yet.
-                </p>
-              ) : (
-                <div className="space-y-2">
-                  {selectedEquitySensitivities.map((s) => (
-                    <div
-                      key={s.input_code}
-                      className="rounded-lg bg-[#111827] border border-slate-800 p-3.5"
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="font-mono font-semibold text-sky-400 text-xs">
-                          {s.input_code} — {s.relationship_type}
-                        </span>
-                        <span
-                          className={`text-[11px] font-mono px-2 py-0.5 rounded ${
-                            s.impact_direction.includes("Inverse")
-                              ? "bg-rose-500/15 text-rose-300"
-                              : s.impact_direction.includes("Direct")
-                              ? "bg-emerald-500/15 text-emerald-300"
-                              : "bg-sky-500/15 text-sky-300"
-                          }`}
-                        >
-                          {s.impact_direction}
-                        </span>
-                      </div>
-                      <p className="text-xs text-slate-300 mt-1.5 leading-relaxed">
-                        {s.mechanism_note}
-                      </p>
-                    </div>
-                  ))}
                 </div>
               )}
             </div>
