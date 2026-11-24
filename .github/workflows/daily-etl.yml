@@ -23,7 +23,18 @@ jobs:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
         run: python pipeline/ingest.py
 
-      - name: Run SEC filings & Gemini AI synthesis
+      - name: Update USD market caps
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: python pipeline/market_cap.py
+
+      - name: Refresh AI-grounded specialty material spot prices
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: python pipeline/ai_spot_prices.py
+
+      - name: Run SEC filings & AI synthesis
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
