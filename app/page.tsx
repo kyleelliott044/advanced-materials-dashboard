@@ -11,6 +11,11 @@ import DashboardClient, {
   CommodityDriverRow,
 } from "./DashboardClient";
 import ScopedInsightsPanel from "./ScopedInsightsPanel";
+import {
+  CompanyProduct,
+  ExcludedProduct,
+  CompanyProductProfile,
+} from "../lib/productRollup";
 
 async function DashboardDataLoader() {
   await connection();
@@ -25,6 +30,9 @@ async function DashboardDataLoader() {
     rawSupplyChain,
     rawDrivers,
     insights,
+    rawProducts,
+    rawExcluded,
+    rawProfiles,
   ] = await Promise.all([
     sql`
       SELECT
@@ -63,22 +71,45 @@ async function DashboardDataLoader() {
     `,
     sql`
       SELECT
-        f.id,
-        f.ticker,
-        e.company_name,
-        e.sub_sector,
-        f.filing_type,
-        f.filing_date::text AS filing_date,
-        f.headline,
-        f.executive_summary,
-        f.theme_tags,
-        f.pricing_and_margins,
-        f.capex_and_backlog,
-        f.key_risks,
-        f.source_url
-      FROM company_filings_ai f
-      LEFT JOIN equities_universe e ON f.ticker = e.ticker
-      ORDER BY f.filing_date DESC, f.id DESC
+        id,
+        ticker,
+        company_name,
+        sub_sector,
+        filing_type,
+        filing_date,
+        fiscal_period,
+        headline,
+        executive_summary,
+        theme_tags,
+        pricing_and_margins,
+        capex_and_backlog,
+        key_risks,
+        source_url
+      FROM (
+        SELECT
+          f.id,
+          f.ticker,
+          e.company_name,
+          e.sub_sector,
+          f.filing_type,
+          f.filing_date::text AS filing_date,
+          f.fiscal_period,
+          f.headline,
+          f.executive_summary,
+          f.theme_tags,
+          f.pricing_and_margins,
+          f.capex_and_backlog,
+          f.key_risks,
+          f.source_url,
+          ROW_NUMBER() OVER (
+            PARTITION BY f.ticker
+            ORDER BY f.filing_date DESC, f.id DESC
+          ) AS rn
+        FROM company_filings_ai f
+        LEFT JOIN equities_universe e ON f.ticker = e.ticker
+      ) ranked
+      WHERE rn <= 3
+      ORDER BY filing_date DESC, id DESC
     `,
     sql`
       SELECT
@@ -139,6 +170,23 @@ async function DashboardDataLoader() {
       FROM sector_theme_insights
       ORDER BY filing_count DESC, scope_name ASC
     `,
+    sql`
+      SELECT
+        id, ticker, name, category, business_unit, status, as_of,
+        advanced, raw_materials, downstream, pricing_structure,
+        revenue, peers, src, conf
+      FROM company_products
+      ORDER BY ticker ASC, id ASC
+    `.catch(() => []),
+    sql`
+      SELECT ticker, name, reason
+      FROM company_excluded_products
+      ORDER BY ticker ASC, id ASC
+    `.catch(() => []),
+    sql`
+      SELECT ticker, note
+      FROM company_product_profiles
+    `.catch(() => []),
   ]);
 
   const equities: EquityRow[] = rawEquities.map((row) => ({
@@ -196,6 +244,9 @@ async function DashboardDataLoader() {
         narrative={narrative}
         supplyChain={supplyChain}
         commodityDrivers={commodityDrivers}
+        products={rawProducts as CompanyProduct[]}
+        excludedProducts={rawExcluded as ExcludedProduct[]}
+        productProfiles={rawProfiles as CompanyProductProfile[]}
       />
       <ScopedInsightsPanel insights={insights as any[]} />
     </>
