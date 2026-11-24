@@ -365,13 +365,13 @@ class InsightBatchSchema(BaseModel):
 
 
 def _quote_exists(quote: str, source_text: str) -> bool:
-    if not quote or len(quote.strip()) < 12:
+    if not quote or len(quote.strip()) < 10:
         return False
     clean_q = re.sub(r"[^a-z0-9 ]+", " ", quote.lower()).split()
     clean_s = " ".join(re.sub(r"[^a-z0-9 ]+", " ", source_text.lower()).split())
-    if len(clean_q) < 5:
+    if len(clean_q) < 4:
         return " ".join(clean_q) in clean_s
-    return any(" ".join(clean_q[i : i + 6]) in clean_s for i in range(len(clean_q) - 5))
+    return any(" ".join(clean_q[i : i + 4]) in clean_s for i in range(len(clean_q) - 3))
 
 
 def save_commodity_drivers(conn, ticker: str, filing_type: str, filing_date: str, drivers: list):
@@ -486,6 +486,28 @@ def seed_sensitivity_map(conn):
         """, SENSITIVITY_RULES)
     print(f"Upserted {len(SENSITIVITY_RULES)} commodity sensitivity rules.")
 
+def ensure_ai_tables(conn):
+    with conn.cursor() as cur:
+        cur.execute("""
+            CREATE TABLE IF NOT EXISTS equity_supply_chain (
+              id SERIAL PRIMARY KEY,
+              ticker TEXT NOT NULL REFERENCES equities_universe(ticker) ON DELETE CASCADE,
+              direction TEXT NOT NULL CHECK (direction IN ('upstream_supplier', 'downstream_customer')),
+              counterparty_name TEXT NOT NULL,
+              is_named_entity BOOLEAN DEFAULT TRUE,
+              material_or_product TEXT NOT NULL,
+              is_sole_source BOOLEAN DEFAULT FALSE,
+              exposure_pct NUMERIC(5,2),
+              source_filing_type TEXT,
+              source_filing_date DATE,
+              source_quote TEXT,
+              updated_at TIMESTAMPTZ DEFAULT NOW(),
+              UNIQUE (ticker, direction, counterparty_name, material_or_product)
+            );
+            CREATE INDEX IF NOT EXISTS idx_supply_chain_ticker ON equity_supply_chain(ticker);
+        """)
+    conn.commit()
+
 
 def fetch_sec_ticker_map():
     resp = requests.get("https://www.sec.gov/files/company_tickers.json", headers=SEC_HEADERS, timeout=20)
@@ -499,6 +521,22 @@ def fetch_sec_ticker_map():
     return mapping
 
 
+def _extract_keyword_windows(text: str, patterns: list[str], window: int = 1800, max_total: int = 6500) -> str:
+    chunks = []
+    used_ranges = []
+    for pat in patterns:
+        for m in re.finditer(pat, text, re.IGNORECASE):
+            start = max(0, m.start() - 350)
+            end = min(len(text), m.end() + window)
+            if any(not (end < s or start > e) for s, e in used_ranges):
+                continue
+            used_ranges.append((start, end))
+            chunks.append(text[start:end])
+            if sum(len(c) for c in chunks) >= max_total:
+                return " ... ".join(chunks)
+    return " ... ".join(chunks)
+
+
 def extract_filing_text(cik_unpadded: str, accession_number: str, primary_doc: str) -> str:
     acc_no_dash = accession_number.replace("-", "")
     url = f"https://www.sec.gov/Archives/edgar/data/{cik_unpadded}/{acc_no_dash}/{primary_doc}"
@@ -508,17 +546,35 @@ def extract_filing_text(cik_unpadded: str, accession_number: str, primary_doc: s
     text = soup.get_text(separator=" ", strip=True)
     text = re.sub(r"\s+", " ", text)
 
-    item1_match = re.search(r"Item\s+1\.\s+Business", text, re.IGNORECASE)
-    mda_match = re.search(r"(Item\s+2\.|Item\s+7\.)\s+Management.{0,30}Discussion", text, re.IGNORECASE)
+    # 1. Targeted supply-chain & customer-concentration windows (fits inside Groq's 16K cap)
+    sc_windows = _extract_keyword_windows(
+        text,
+        [
+            r"(raw materials|sources and availability of raw materials|sole[- ]source|single[- ]source|principal suppliers)",
+            r"(major customers|customer concentration|accounted for \d+% of (consolidated |total )?(net )?(sales|revenue))",
+        ],
+        window=1600,
+        max_total=6000,
+    )
 
-    if item1_match and mda_match and mda_match.start() > item1_match.start():
-        item1_slice = text[item1_match.start() : item1_match.start() + 9000]
-        mda_slice = text[mda_match.start() : mda_match.start() + 19000]
-        return f"{item1_slice} ... {mda_slice}"
-    if mda_match:
-        start = mda_match.start()
-        return text[start : start + 28000]
-    return text[5000:33000]
+    # 2. Skip Table of Contents by taking the last match of Item 1. Business
+    item1_matches = list(re.finditer(r"Item\s+1\.\s+Business", text, re.IGNORECASE))
+    mda_matches = list(re.finditer(r"(Item\s+2\.|Item\s+7\.)\s+Management.{0,30}Discussion", text, re.IGNORECASE))
+
+    item1_slice = ""
+    if item1_matches:
+        start1 = item1_matches[-1].start()
+        item1_slice = text[start1 : start1 + 7000]
+
+    mda_slice = ""
+    if mda_matches:
+        start_mda = mda_matches[-1].start()
+        mda_slice = text[start_mda : start_mda + 14000]
+    else:
+        mda_slice = text[5000:19000]
+
+    combined = f"{sc_windows} ... {item1_slice} ... {mda_slice}".strip(" .")
+    return combined[:28000]
 
 
 def process_sec_filings(conn, limit_tickers=8):
@@ -740,6 +796,79 @@ def backfill_existing_filing_drivers(conn, limit_tickers=8):
             break
         parsed = json.loads(ai_resp.text)
         save_commodity_drivers(conn, ticker, ftype, fdate, parsed.get("commodity_drivers", []))
+
+class SupplyChainBackfillBatch(BaseModel):
+    upstream_suppliers: List[SupplyChainLink] = Field(default_factory=list)
+    downstream_customers: List[SupplyChainLink] = Field(default_factory=list)
+
+
+def backfill_existing_supply_chain(conn, limit_tickers=8):
+    """Extracts upstream suppliers & downstream customers for US stocks whose filings were already parsed."""
+    sec_map = fetch_sec_ticker_map()
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT DISTINCT e.ticker, e.company_name, e.sub_sector, e.qualification_years
+            FROM equities_universe e
+            JOIN company_filings_ai f ON e.ticker = f.ticker
+            LEFT JOIN equity_supply_chain sc ON e.ticker = sc.ticker
+            WHERE sc.ticker IS NULL
+            ORDER BY e.qualification_years DESC NULLS LAST, e.ticker ASC;
+        """)
+        candidates = cur.fetchall()
+
+    processed = 0
+    for ticker, company_name, sub_sector, _ in candidates:
+        if processed >= limit_tickers:
+            break
+        clean_ticker = ticker.upper()
+        if clean_ticker not in sec_map:
+            continue
+
+        cik_padded, cik_unpadded = sec_map[clean_ticker]
+        try:
+            sub_url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
+            sub_resp = requests.get(sub_url, headers=SEC_HEADERS, timeout=15)
+            sub_resp.raise_for_status()
+            recent = sub_resp.json()["filings"]["recent"]
+
+            # Prefer the most recent 10-K (has full Item 1 Raw Materials & Customer Concentration)
+            target_idx = next((i for i, f in enumerate(recent["form"]) if f == "10-K"), None)
+            if target_idx is None:
+                target_idx = next((i for i, f in enumerate(recent["form"]) if f == "10-Q"), None)
+            if target_idx is None:
+                continue
+
+            form = recent["form"][target_idx]
+            f_date = recent["filingDate"][target_idx]
+            acc_num = recent["accessionNumber"][target_idx]
+            doc_name = recent["primaryDocument"][target_idx]
+
+            excerpt = extract_filing_text(cik_unpadded, acc_num, doc_name)
+            if len(excerpt) < 500:
+                continue
+
+            prompt = f"""
+            You are an institutional advanced materials supply-chain analyst.
+            Analyze this SEC {form} filing excerpt for {company_name} ({ticker}), sub-sector: {sub_sector}.
+            Extract ALL disclosed:
+            1. Upstream raw material suppliers, feedstock sources, or sole-source/single-source inputs.
+            2. Downstream customers, OEMs, or 10%+ customer concentration disclosures.
+            Include named companies when disclosed (e.g. Boeing, TSMC, Apple, Airbus) OR named counterparty groups when anonymized (e.g. 'Customer A', 'Tier-1 Aerospace OEMs'), along with verbatim quotes from the text.
+
+            FILING EXCERPT:
+            {excerpt}
+            """
+
+            ai_resp = call_gemini(prompt, SupplyChainBackfillBatch)
+            if not ai_resp:
+                break
+            parsed = json.loads(ai_resp.text)
+            save_supply_chain_links(conn, ticker, form, f_date, parsed, excerpt)
+            processed += 1
+            print(f"Backfilled supply chain for {ticker} ({form} {f_date})")
+            time.sleep(0.25)
+        except Exception as e:
+            print(f"Warning backfilling supply chain for {ticker}: {e}")
 
 
 def generate_market_macro_narrative(conn):
