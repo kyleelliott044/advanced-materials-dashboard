@@ -137,6 +137,9 @@ class EnrichmentBackfillSchema(BaseModel):
 def ensure_tables(conn):
     with conn.cursor() as cur:
         cur.execute("""
+            ALTER TABLE equities_universe
+              ADD COLUMN IF NOT EXISTS enrichment_backfilled_at TIMESTAMPTZ;
+
             CREATE TABLE IF NOT EXISTS equity_commodity_drivers (
               id SERIAL PRIMARY KEY,
               ticker TEXT NOT NULL REFERENCES equities_universe(ticker) ON DELETE CASCADE,
@@ -171,6 +174,18 @@ def ensure_tables(conn):
             );
         """)
     conn.commit()
+
+
+def _safe_pct(val) -> Optional[float]:
+    if val is None:
+        return None
+    try:
+        num = float(val)
+        if 0 <= num <= 100:
+            return round(num, 2)
+    except (TypeError, ValueError):
+        pass
+    return None
 
 
 def _call_ai(prompt: str, schema) -> Optional[dict]:
@@ -339,7 +354,7 @@ def save_enrichment(conn, ticker: str, ftype: str, fdate: str, parsed: dict, sou
             (d.get("exposure_role") or "Cost Input")[:50],
             (d.get("impact_direction") or "Pass-Through")[:50],
             (d.get("pass_through_lag") or "Quarterly")[:60],
-            d.get("cogs_or_rev_share_pct"),
+            _safe_pct(d.get("cogs_or_rev_share_pct")),
             mech[:600],
             ftype,
             fdate,
@@ -387,7 +402,7 @@ def save_enrichment(conn, ticker: str, ftype: str, fdate: str, parsed: dict, sou
                 bool(item.get("is_named_entity", False)),
                 mat[:180],
                 bool(item.get("is_sole_source", False)),
-                item.get("exposure_pct"),
+                _safe_pct(item.get("exposure_pct")),
                 ftype,
                 fdate,
                 quote[:400],
@@ -414,6 +429,12 @@ def save_enrichment(conn, ticker: str, ftype: str, fdate: str, parsed: dict, sou
                 sc_rows,
             )
 
+    with conn.cursor() as cur:
+        cur.execute(
+            "UPDATE equities_universe SET enrichment_backfilled_at = NOW() WHERE ticker = %s;",
+            (ticker,),
+        )
+
     conn.commit()
     print(f"[{ticker}] Saved {len(driver_rows)} commodity drivers & {len(sc_rows)} supply-chain links ({ftype} {fdate})")
 
@@ -421,7 +442,7 @@ def save_enrichment(conn, ticker: str, ftype: str, fdate: str, parsed: dict, sou
 def run_backfill(conn):
     ensure_tables(conn)
 
-    # Select best already-parsed filing per ticker where commodity drivers OR supply chain links are still missing
+    # Select best already-parsed filing per ticker where enrichment has not yet been run
     with conn.cursor() as cur:
         cur.execute("""
             WITH best_filing AS (
@@ -431,6 +452,7 @@ def run_backfill(conn):
                     e.sub_sector,
                     e.contract_type,
                     e.qualification_years,
+                    e.enrichment_backfilled_at,
                     f.filing_type,
                     f.filing_date::text AS filing_date,
                     f.executive_summary,
@@ -449,12 +471,27 @@ def run_backfill(conn):
                     END ASC,
                     f.filing_date DESC
             )
-            SELECT bf.*
+            SELECT
+                bf.ticker,
+                bf.company_name,
+                bf.sub_sector,
+                bf.contract_type,
+                bf.qualification_years,
+                bf.filing_type,
+                bf.filing_date,
+                bf.executive_summary,
+                bf.pricing_and_margins,
+                bf.capex_and_backlog,
+                bf.key_risks,
+                bf.source_url
             FROM best_filing bf
-            WHERE NOT EXISTS (SELECT 1 FROM equity_commodity_drivers d WHERE d.ticker = bf.ticker)
-               OR NOT EXISTS (SELECT 1 FROM equity_supply_chain sc WHERE sc.ticker = bf.ticker)
+            WHERE bf.enrichment_backfilled_at IS NULL
+              AND (
+                  NOT EXISTS (SELECT 1 FROM equity_commodity_drivers d WHERE d.ticker = bf.ticker)
+                  OR NOT EXISTS (SELECT 1 FROM equity_supply_chain sc WHERE sc.ticker = bf.ticker)
+              )
             ORDER BY
-                CASE WHEN bf.source_url LIKE '%sec.gov%' THEN 0 ELSE 1 END ASC,
+                CASE WHEN bf.source_url LIKE '%%sec.gov%%' THEN 0 ELSE 1 END ASC,
                 bf.qualification_years DESC NULLS LAST,
                 bf.ticker ASC
             LIMIT %s;
@@ -462,7 +499,7 @@ def run_backfill(conn):
         targets = cur.fetchall()
 
     if not targets:
-        print("All already-analyzed filings have commodity drivers and supply-chain records populated.")
+        print("All already-analyzed filings have been processed for commodity drivers and supply-chain links.")
         return
 
     print(f"Found {len(targets)} analyzed stocks to enrich (batch limit={BATCH_LIMIT})...")
