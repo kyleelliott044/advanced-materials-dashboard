@@ -1,12 +1,10 @@
 import os
-import re
 import time
 import json
 from typing import List, Optional, Literal
 import requests
 import psycopg
 import yfinance as yf
-from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
@@ -16,12 +14,57 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 BATCH_LIMIT = int(os.environ.get("PRODUCT_BATCH_LIMIT", "15"))
 
-SEC_HEADERS = {
-    "User-Agent": "AdvancedMaterialsResearchPlatform research@materials-macro.io",
-    "Accept-Encoding": "gzip, deflate",
-}
+def _build_gemini_client():
+    if not GEMINI_API_KEY:
+        return None
+    try:
+        return genai.Client(
+            api_key=GEMINI_API_KEY,
+            http_options=types.HttpOptions(timeout=45000),
+        )
+    except TypeError:
+        return genai.Client(api_key=GEMINI_API_KEY)
 
-client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+
+client = _build_gemini_client()
+
+MAX_GEMINI_CALLS = 18
+gemini_calls_used = 0
+groq_calls_used = 0
+gemini_unavailable = False
+
+GROQ_MODELS = [
+    "openai/gpt-oss-120b",
+    "qwen/qwen3.8-27b",
+    "openai/gpt-oss-20b",
+]
+exhausted_groq_models = set()
+
+
+def connect_db():
+    return psycopg.connect(
+        DATABASE_URL,
+        autocommit=True,
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=5,
+    )
+
+
+def ensure_conn(conn):
+    if conn is not None and not conn.closed and not conn.broken:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1;")
+            return conn
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    print("Reconnecting to Neon PostgreSQL...", flush=True)
+    return connect_db()
 
 
 class RawMaterialSpec(BaseModel):
@@ -92,7 +135,94 @@ class CompanyProductsBatch(BaseModel):
     excluded: List[ExcludedItem] = Field(default_factory=list)
 
 
+def _call_ai(prompt: str, schema) -> Optional[dict]:
+    global gemini_calls_used, groq_calls_used, gemini_unavailable
+
+    if client and not gemini_unavailable and gemini_calls_used < MAX_GEMINI_CALLS:
+        try:
+            gemini_calls_used += 1
+            resp = client.models.generate_content(
+                model="gemini-3.8-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    response_mime_type="application/json",
+                    response_schema=schema,
+                    temperature=0.1,
+                ),
+            )
+            return json.loads(resp.text)
+        except Exception as e:
+            gemini_unavailable = True
+            print(f"Gemini unavailable/quota ({e}) — switching immediately to Groq cascade.", flush=True)
+
+    if not GROQ_API_KEY:
+        return None
+
+    schema_json = json.dumps(schema.model_json_schema())
+    trimmed_prompt = prompt[:16000]
+
+    for model_id in GROQ_MODELS:
+        if model_id in exhausted_groq_models:
+            continue
+
+        for attempt in range(2):
+            try:
+                resp = requests.post(
+                    "https://api.groq.com/openai/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {GROQ_API_KEY}",
+                        "Content-Type": "application/json",
+                    },
+                    json={
+                        "model": model_id,
+                        "response_format": {"type": "json_object"},
+                        "temperature": 0.1,
+                        "messages": [
+                            {
+                                "role": "system",
+                                "content": (
+                                    "You are an institutional advanced materials analyst. "
+                                    "Return ONLY a valid JSON object matching this exact schema:\n"
+                                    f"{schema_json}"
+                                ),
+                            },
+                            {"role": "user", "content": trimmed_prompt},
+                        ],
+                    },
+                    timeout=45,
+                )
+            except requests.RequestException as e:
+                print(f"Groq network error on {model_id}: {e}", flush=True)
+                break
+
+            if resp.status_code == 429:
+                err_lower = resp.text.lower()
+                if "tokens per day" in err_lower or "requests per day" in err_lower:
+                    print(f"Groq daily limit reached for {model_id} — switching model.", flush=True)
+                    exhausted_groq_models.add(model_id)
+                    break
+                if attempt == 0:
+                    print(f"Groq TPM limit on {model_id} — waiting 15s...", flush=True)
+                    time.sleep(15)
+                    continue
+                break
+
+            if resp.status_code in (400, 404, 413):
+                print(f"Groq {resp.status_code} on {model_id} — switching model.", flush=True)
+                if resp.status_code == 404:
+                    exhausted_groq_models.add(model_id)
+                break
+
+            resp.raise_for_status()
+            groq_calls_used += 1
+            time.sleep(2)
+            return json.loads(resp.json()["choices"][0]["message"]["content"])
+
+    return None
+
+
 def get_registry_and_universe(conn):
+    conn = ensure_conn(conn)
     with conn.cursor() as cur:
         cur.execute("""
             SELECT DISTINCT ON (input_code) input_code, input_name, category
@@ -104,11 +234,11 @@ def get_registry_and_universe(conn):
         cur.execute("SELECT ticker, company_name, sub_sector FROM equities_universe;")
         universe = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
 
-    return registry, universe
+    return conn, registry, universe
 
 
 def run_product_extraction(conn):
-    registry, universe = get_registry_and_universe(conn)
+    conn, registry, universe = get_registry_and_universe(conn)
     registry_guide = "\n".join([f"- {code}: {name} ({cat})" for code, (name, cat) in sorted(registry.items())])
     universe_tickers_str = ", ".join(sorted(universe.keys()))
 
@@ -123,10 +253,14 @@ def run_product_extraction(conn):
         """, (BATCH_LIMIT,))
         targets = cur.fetchall()
 
-    for ticker, company_name, sub_sector, _ in targets:
+    print(f"Starting product extraction for {len(targets)} companies (BATCH_LIMIT={BATCH_LIMIT})...", flush=True)
+
+    for idx, (ticker, company_name, sub_sector, _) in enumerate(targets, start=1):
+        print(f"[{idx}/{len(targets)}] Extracting {ticker} ({company_name})...", flush=True)
+        conn = ensure_conn(conn)
         with conn.cursor() as cur:
             cur.execute("""
-                SELECT filing_type, filing_date::text, headline, executive_summary, pricing_and_margins, capex_and_backlog, source_url
+                SELECT filing_type, filing_date::text, headline, executive_summary, pricing_and_margins, capex_and_backlog
                 FROM company_filings_ai
                 WHERE ticker = %s
                 ORDER BY CASE WHEN filing_type = '10-K' THEN 1 WHEN filing_type = '10-Q' THEN 2 ELSE 3 END, filing_date DESC
@@ -139,8 +273,11 @@ def run_product_extraction(conn):
             for f in filings
         ]
         if not context_lines:
-            biz = (yf.Ticker(ticker).info or {}).get("longBusinessSummary", "")[:3000]
-            context_lines.append(f"Business Summary: {biz}")
+            try:
+                biz = (yf.Ticker(ticker).info or {}).get("longBusinessSummary", "")[:3000]
+                context_lines.append(f"Business Summary: {biz}")
+            except Exception as e:
+                print(f"  Warning fetching Yahoo summary for {ticker}: {e}", flush=True)
 
         src_type = "filing" if filings and filings[0][0] in ("10-K", "10-Q") else "inferred"
         src_ref = f"{filings[0][0]} ({filings[0][1]})" if filings and src_type == "filing" else None
@@ -165,21 +302,12 @@ def run_product_extraction(conn):
         {chr(10).join(context_lines)}
         """
 
-        if not client:
-            print("GEMINI_API_KEY required for structured extraction.")
-            return
+        parsed = _call_ai(prompt, CompanyProductsBatch)
+        if not parsed:
+            print("All AI providers exhausted — stopping cleanly.", flush=True)
+            break
 
-        resp = client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=CompanyProductsBatch,
-                temperature=0.1,
-            ),
-        )
-        parsed = json.loads(resp.text)
-
+        conn = ensure_conn(conn)
         with conn.cursor() as cur:
             cur.execute(
                 """
@@ -191,25 +319,40 @@ def run_product_extraction(conn):
             )
 
             for prod in parsed.get("products", []):
-                # Enforce valid registry IDs and valid peer tickers
                 cleaned_rms = []
                 for rm in prod.get("raw_materials", []):
                     cref = rm.get("commodity_ref")
                     if cref not in registry:
                         cref = None
                     cleaned_rms.append({
-                        "name": rm["name"],
+                        "name": rm.get("name", "Unknown material"),
                         "commodity_ref": cref,
-                        "role": rm["role"],
-                        "basis": rm["basis"],
+                        "role": rm.get("role", "input"),
+                        "basis": rm.get("basis") if rm.get("basis") in ("disclosed", "inferred") else "inferred",
                     })
 
-                ds = prod["downstream"]
+                ds = prod.get("downstream") or {}
                 dref = ds.get("demand_proxy_ref")
                 if dref not in registry:
                     dref = None
                 ds["demand_proxy_ref"] = dref
+                ds.setdefault("process_step", "downstream processing")
+                ds.setdefault("end_product", "manufactured component")
+                ds.setdefault("end_demand", "industrial end-demand")
+                ds.setdefault("customers", None)
 
+                adv = prod.get("advanced") or {
+                    "performance_spec": "customer-qualified specification",
+                    "qualification_months": None,
+                    "switching_barrier": "process requalification",
+                }
+                rev = prod.get("revenue") or {"basis": "business_unit", "share_pct": None}
+                src = prod.get("src") or {"type": src_type, "ref": src_ref}
+                if src.get("type") not in ("annual_report", "filing", "product_page", "inferred"):
+                    src["type"] = src_type
+
+                status = prod.get("status") if prod.get("status") in ("active", "divested") else "active"
+                conf = prod.get("conf") if prod.get("conf") in ("high", "med", "low") else "med"
                 valid_peers = [p for p in prod.get("peers", []) if p in universe and p != ticker]
 
                 cur.execute(
@@ -240,17 +383,17 @@ def run_product_extraction(conn):
                         ticker,
                         prod["name"],
                         prod["category"],
-                        prod["business_unit"],
-                        prod["status"],
-                        prod["as_of"],
-                        json.dumps(prod["advanced"]),
+                        prod.get("business_unit", sub_sector or "Core Materials"),
+                        status,
+                        prod.get("as_of", "FY2025"),
+                        json.dumps(adv),
                         json.dumps(cleaned_rms),
                         json.dumps(ds),
                         prod.get("pricing_structure"),
-                        json.dumps(prod["revenue"]),
+                        json.dumps(rev),
                         valid_peers,
-                        json.dumps(prod["src"]),
-                        prod["conf"],
+                        json.dumps(src),
+                        conf,
                     ),
                 )
 
@@ -264,10 +407,22 @@ def run_product_extraction(conn):
                     (ticker, ex["name"], ex["reason"]),
                 )
         conn.commit()
-        print(f"[{ticker}] Saved {len(parsed.get('products', []))} products & {len(parsed.get('excluded', []))} excluded items.")
-        time.sleep(0.5)
+        print(
+            f"[{ticker}] Saved {len(parsed.get('products', []))} products & {len(parsed.get('excluded', []))} excluded items.",
+            flush=True,
+        )
+
+    print(
+        f"Product extraction finished ({gemini_calls_used} Gemini calls, {groq_calls_used} Groq calls used).",
+        flush=True,
+    )
+    return conn
 
 
 if __name__ == "__main__":
-    with psycopg.connect(DATABASE_URL, autocommit=True) as conn:
-        run_product_extraction(conn)
+    conn = connect_db()
+    try:
+        conn = run_product_extraction(conn)
+    finally:
+        if conn and not conn.closed:
+            conn.close()
