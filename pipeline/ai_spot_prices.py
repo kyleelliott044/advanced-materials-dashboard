@@ -9,9 +9,9 @@ from google import genai
 from google.genai import types
 
 DATABASE_URL = os.environ["DATABASE_URL"]
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-client = genai.Client(api_key=GEMINI_API_KEY)
+client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
 SPECIALTY_MATERIALS = [
     ("NDPR_CN", "Neodymium-Praseodymium (NdPr) Oxide Spot", "USD / kg", "Rare Earths"),
@@ -38,6 +38,18 @@ class MaterialSpotBatch(BaseModel):
 
 
 def refresh_ai_material_prices(conn):
+    if not client:
+        print("GEMINI_API_KEY not set — skipping AI spot price refresh.")
+        return
+
+    # Preserve daily Gemini quota if AI spot prices were refreshed within the last 3 days
+    with conn.cursor() as cur:
+        cur.execute("SELECT MAX(observation_date) FROM raw_inputs WHERE is_proxy = TRUE;")
+        row = cur.fetchone()
+        if row and row[0] and (date.today() - row[0]).days < 3:
+            print(f"AI spot prices are current (last updated {row[0]}) — skipping to preserve Gemini quota.")
+            return
+
     today_str = date.today().isoformat()
     mat_list = "\n".join([f"- {code}: {name} (target unit: {unit})" for code, name, unit, _ in SPECIALTY_MATERIALS])
     meta_map = {code: (name, unit, cat) for code, name, unit, cat in SPECIALTY_MATERIALS}
@@ -52,16 +64,27 @@ def refresh_ai_material_prices(conn):
     - Do NOT guess or fabricate prices. If no recent quote (within the last 45 days) is verifiable in search results, set price_usd to null.
     """
 
-    resp = client.models.generate_content(
-        model="gemini-3.8-flash",
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            tools=[types.Tool(google_search=types.GoogleSearch())],
-            response_mime_type="application/json",
-            response_schema=MaterialSpotBatch,
-            temperature=0.1,
-        ),
-    )
+    try:
+        resp = client.models.generate_content(
+            model="gemini-3.8-flash",
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                tools=[types.Tool(google_search=types.GoogleSearch())],
+                response_mime_type="application/json",
+                response_schema=MaterialSpotBatch,
+                temperature=0.1,
+            ),
+        )
+    except Exception as e:
+        err = str(e)
+        if "429" in err or "RESOURCE_EXHAUSTED" in err:
+            print("Gemini daily quota reached — skipping AI spot price refresh for this run.")
+            return
+        if any(k in err for k in ("503", "UNAVAILABLE", "disconnected", "timed out")):
+            print("Gemini temporarily unavailable — skipping AI spot price refresh for this run.")
+            return
+        print(f"Warning during AI spot price search: {e} — continuing pipeline.")
+        return
 
     # Extract grounding URLs returned by Google Search for auditability
     grounding_urls = []
