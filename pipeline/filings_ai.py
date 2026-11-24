@@ -1072,13 +1072,81 @@ def generate_scoped_insights(conn):
     conn = ensure_conn(conn)
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT DISTINCT ON (f.ticker)
-                f.ticker, e.company_name, e.sub_sector, f.filing_type, f.filing_date,
-                f.headline, f.executive_summary, f.pricing_and_margins,
-                f.capex_and_backlog, f.theme_tags
-            FROM company_filings_ai f
-            JOIN equities_universe e ON f.ticker = e.ticker
-            ORDER BY f.ticker, f.filing_date DESC;
+            WITH latest_per_ticker AS (
+                SELECT DISTINCT ON (f.ticker)
+                    f.ticker,
+                    e.company_name,
+                    e.sub_sector,
+                    e.country,
+                    e.market_cap_usd,
+                    e.adv_mat_rev_pct,
+                    e.contract_type,
+                    e.qualification_years,
+                    f.filing_type,
+                    f.filing_date,
+                    f.fiscal_period,
+                    f.headline,
+                    f.executive_summary,
+                    f.pricing_and_margins,
+                    f.capex_and_backlog,
+                    f.key_risks,
+                    f.theme_tags
+                FROM company_filings_ai f
+                JOIN equities_universe e ON f.ticker = e.ticker
+                ORDER BY f.ticker, f.filing_date DESC
+            ),
+            driver_agg AS (
+                SELECT
+                    ticker,
+                    STRING_AGG(
+                        commodity_name || ' (' || exposure_role || ', ' || impact_direction ||
+                        COALESCE(', ' || pass_through_lag, '') ||
+                        COALESCE(', ' || cogs_or_rev_share_pct::text || '% share', '') || ')',
+                        '; ' ORDER BY cogs_or_rev_share_pct DESC NULLS LAST, commodity_name ASC
+                    ) AS drivers_summary
+                FROM equity_commodity_drivers
+                GROUP BY ticker
+            ),
+            sc_agg AS (
+                SELECT
+                    ticker,
+                    STRING_AGG(
+                        CASE direction
+                            WHEN 'upstream_supplier' THEN 'Supplier: '
+                            WHEN 'downstream_customer' THEN 'Customer: '
+                            ELSE 'Competitor: '
+                        END || counterparty_name || ' [' || material_or_product ||
+                        CASE WHEN is_sole_source THEN ', SOLE/10%+' ELSE '' END ||
+                        COALESCE(', ' || exposure_pct::text || '%', '') || ']',
+                        '; ' ORDER BY is_sole_source DESC, exposure_pct DESC NULLS LAST
+                    ) AS supply_chain_summary
+                FROM equity_supply_chain
+                GROUP BY ticker
+            )
+            SELECT
+                l.ticker,
+                l.company_name,
+                l.sub_sector,
+                l.country,
+                l.market_cap_usd,
+                l.adv_mat_rev_pct,
+                l.contract_type,
+                l.qualification_years,
+                l.filing_type,
+                l.filing_date,
+                l.fiscal_period,
+                l.headline,
+                l.executive_summary,
+                l.pricing_and_margins,
+                l.capex_and_backlog,
+                l.key_risks,
+                l.theme_tags,
+                d.drivers_summary,
+                s.supply_chain_summary
+            FROM latest_per_ticker l
+            LEFT JOIN driver_agg d ON l.ticker = d.ticker
+            LEFT JOIN sc_agg s ON l.ticker = s.ticker
+            ORDER BY l.market_cap_usd DESC NULLS LAST, l.filing_date DESC, l.ticker ASC;
         """)
         rows = cur.fetchall()
 
@@ -1094,39 +1162,69 @@ def generate_scoped_insights(conn):
         return conn
 
     by_sub = {}
+    sub_max_mcap = {}
+    sub_latest_ord = {}
+
     by_theme = {}
+    theme_max_mcap = {}
+    theme_latest_ord = {}
+
     all_lines = []
 
-    for ticker, cname, sub_sector, ftype, fdate, headline, summary, margins, capex, tags in rows:
+    for (
+        ticker, cname, sub_sector, country, mcap, rev_pct, contract, qual_yrs,
+        ftype, fdate, fperiod, headline, summary, margins, capex, risks,
+        tags, drivers_str, sc_str
+    ) in rows:
+        mcap_val = float(mcap) if mcap is not None else 0.0
+        date_ord = fdate.toordinal() if hasattr(fdate, "toordinal") else 0
+        period_lbl = fperiod or f"{ftype} {fdate}"
+        meta = (
+            f"Mkt Cap: {_fmt_mcap(mcap)} | Country: {country or 'N/A'} | "
+            f"AdvMat Rev: {f'{rev_pct}%' if rev_pct is not None else 'N/A'} | "
+            f"Contract: {contract or 'N/A'} | Moat: {qual_yrs or 'N/A'}y"
+        )
         line = (
-            f"[{ticker} ({cname}) | {ftype} {fdate}] {headline} | "
-            f"Summary: {summary} | Margins: {margins or 'N/A'} | Capex/Backlog: {capex or 'N/A'}"
+            f"[{ticker} ({cname}) | {meta} | {period_lbl} ({fdate})] {headline} | "
+            f"Summary: {summary} | Margins: {margins or 'N/A'} | Capex/Backlog: {capex or 'N/A'} | "
+            f"Key Risks: {risks or 'N/A'} | Commodity Drivers: {drivers_str or 'N/A'} | "
+            f"Value Chain & Peers: {sc_str or 'N/A'}"
         )
         all_lines.append(line)
+
         if sub_sector:
             by_sub.setdefault(sub_sector, []).append((ticker, line))
+            sub_max_mcap[sub_sector] = max(sub_max_mcap.get(sub_sector, 0.0), mcap_val)
+            sub_latest_ord[sub_sector] = max(sub_latest_ord.get(sub_sector, 0), date_ord)
+
         for tag in (tags or []):
             by_theme.setdefault(tag, []).append((ticker, line))
+            theme_max_mcap[tag] = max(theme_max_mcap.get(tag, 0.0), mcap_val)
+            theme_latest_ord[tag] = max(theme_latest_ord.get(tag, 0), date_ord)
 
     all_insights = []
 
-    # 1. Generate Industry + Top Themes first so they are always refreshed and preserved
-    theme_items = sorted(by_theme.items(), key=lambda x: -len(x[1]))[:8]
+    # 1. Rank themes by largest company size, then most recent filing date
+    theme_items = sorted(
+        by_theme.items(),
+        key=lambda x: (-theme_max_mcap.get(x[0], 0.0), -theme_latest_ord.get(x[0], 0), -len(x[1])),
+    )[:8]
     theme_blocks = []
     allowed_by_theme = {"Advanced Materials": {r[0] for r in rows}}
     for tname, entries in theme_items:
         allowed_by_theme[tname] = {tk for tk, _ in entries}
         joined = "\n  ".join(ln for _, ln in entries[:6])
-        theme_blocks.append(f"=== THEME: {tname} (Filing Count: {len(entries)}) ===\n  {joined}")
+        theme_blocks.append(f"=== THEME: {tname} (Total Covered Companies: {len(entries)}) ===\n  {joined}")
 
     theme_prompt = f"""
     You are a Senior Advanced Materials Equity Strategist.
     Generate:
     1. One ScopeInsight with scope_type='industry' and scope_name='Advanced Materials' summarizing the overall universe below.
-    2. One ScopeInsight with scope_type='theme' for EACH theme block below, using ONLY the filings inside that theme's block.
+    2. One ScopeInsight with scope_type='theme' for EACH theme block below, synthesizing across all filings inside that theme's block (weighing the largest companies and most recent filings at the top most heavily).
+    Incorporate company-level Commodity Drivers (cost pass-through vs. margin headwinds), Value Chain & Peers (sole-source suppliers, OEM concentration), Contract Structures, and Key Risks into your synthesis.
 
     === INDUSTRY: Advanced Materials (Total Covered Companies: {len(rows)}) ===
-    {chr(10).join(all_lines[:20])}
+    {chr(10).join(all_lines[:18])}
 
     {chr(10).join(theme_blocks)}
     """
@@ -1138,26 +1236,32 @@ def generate_scoped_insights(conn):
                 item["top_tickers"] = [t for t in item.get("top_tickers", []) if t in allowed_by_theme[sname]][:5]
                 all_insights.append(item)
 
-    # 2. Process sub-sectors prioritizing missing or oldest-updated sub-sectors first (batches of 8)
+    # 2. Prioritize uncovered sub-sectors first, then largest company size & most recent filing date
     sub_items = sorted(
         by_sub.items(),
-        key=lambda x: (str(existing_sub_dates.get(x[0]) or "0001-01-01"), -len(x[1])),
+        key=lambda x: (
+            0 if x[0] not in existing_sub_dates else 1,
+            -sub_max_mcap.get(x[0], 0.0),
+            -sub_latest_ord.get(x[0], 0),
+            str(existing_sub_dates.get(x[0]) or "0001-01-01"),
+        ),
     )
 
-    for i in range(0, len(sub_items), 8):
-        batch = sub_items[i : i + 8]
+    for i in range(0, len(sub_items), 6):
+        batch = sub_items[i : i + 6]
         blocks = []
         allowed_by_sub = {}
         for sub_name, entries in batch:
             allowed_by_sub[sub_name] = {tk for tk, _ in entries}
             joined = "\n  ".join(ln for _, ln in entries[:6])
-            blocks.append(f"=== SUB-INDUSTRY: {sub_name} (Filing Count: {len(entries)}) ===\n  {joined}")
+            blocks.append(f"=== SUB-INDUSTRY: {sub_name} (Total Covered Companies: {len(entries)}) ===\n  {joined}")
 
         prompt = f"""
         You are a Senior Advanced Materials Equity Strategist.
         Generate one ScopeInsight (with scope_type='sub_industry') for EACH sub-industry block below.
         CRITICAL RULES:
-        - Use ONLY the filings listed inside that sub-industry's block. NEVER reference tickers from another block.
+        - Synthesize across ALL filings listed inside that sub-industry's block (prioritizing the largest companies and most recent filings at the top). NEVER reference tickers from another block.
+        - Incorporate Commodity Drivers, Value Chain counterparties (suppliers, OEMs, competitors), Contract Structures, and Key Risks into key_drivers, pricing_and_margins, and capex_and_supply_chain.
         - Because every block listed below has at least 1 filing, NEVER say there are no filings or no data.
         - Set top_tickers ONLY to tickers present inside that exact block.
 
@@ -1211,7 +1315,6 @@ def generate_scoped_insights(conn):
     conn.commit()
     print(f"Upserted {len(all_insights)} validated industry, sub-industry, and theme insights (zero rows deleted).")
     return conn
-
 
 if __name__ == "__main__":
     conn = connect_db()
