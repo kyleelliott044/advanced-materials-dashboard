@@ -25,6 +25,7 @@ jobs:
       GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
       PRODUCT_BATCH_LIMIT: ${{ inputs.product_batch_limit || '15' }}
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-python
       - name: Extract product-level value chains
         run: python pipeline/extract_products.py
