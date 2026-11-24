@@ -79,7 +79,6 @@ async function DashboardDataLoader() {
       FROM company_filings_ai f
       LEFT JOIN equities_universe e ON f.ticker = e.ticker
       ORDER BY f.filing_date DESC, f.id DESC
-      LIMIT 150
     `,
     sql`
       SELECT
