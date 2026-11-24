@@ -1,1 +1,30 @@
+name: "Task: Extract Product Decomposition"
 
+on:
+  workflow_dispatch:
+    inputs:
+      product_batch_limit:
+        description: "Number of companies to decompose into products"
+        required: false
+        default: "15"
+        type: string
+  workflow_call:
+    inputs:
+      product_batch_limit:
+        required: false
+        default: "10"
+        type: string
+
+jobs:
+  extract-products:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      PRODUCT_BATCH_LIMIT: ${{ inputs.product_batch_limit || '15' }}
+    steps:
+      - uses: ./.github/actions/setup-python
+      - name: Extract product-level value chains
+        run: python pipeline/extract_products.py
