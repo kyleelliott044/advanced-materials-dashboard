@@ -8,6 +8,7 @@ import DashboardClient, {
   FilingRow,
   MacroNarrativeRow,
   SupplyChainRow,
+  CommodityDriverRow,
 } from "./DashboardClient";
 import ScopedInsightsPanel from "./ScopedInsightsPanel";
 
@@ -22,6 +23,7 @@ async function DashboardDataLoader() {
     filings,
     narratives,
     rawSupplyChain,
+    rawDrivers,
     insights,
   ] = await Promise.all([
     sql`
@@ -109,6 +111,22 @@ async function DashboardDataLoader() {
     `,
     sql`
       SELECT
+        ticker,
+        commodity_name,
+        matched_input_code,
+        exposure_role,
+        impact_direction,
+        pass_through_lag,
+        cogs_or_rev_share_pct,
+        mechanism_detail,
+        source_filing_type,
+        source_filing_date::text AS source_filing_date,
+        source_quote
+      FROM equity_commodity_drivers
+      ORDER BY cogs_or_rev_share_pct DESC NULLS LAST, commodity_name ASC
+    `,
+    sql`
+      SELECT
         scope_type,
         scope_name,
         generated_date::text AS generated_date,
@@ -150,6 +168,23 @@ async function DashboardDataLoader() {
     source_quote: row.source_quote,
   }));
 
+  const commodityDrivers: CommodityDriverRow[] = rawDrivers.map((row) => ({
+    ticker: row.ticker,
+    commodity_name: row.commodity_name,
+    matched_input_code: row.matched_input_code,
+    exposure_role: row.exposure_role,
+    impact_direction: row.impact_direction,
+    pass_through_lag: row.pass_through_lag,
+    cogs_or_rev_share_pct:
+      row.cogs_or_rev_share_pct != null
+        ? Number(row.cogs_or_rev_share_pct)
+        : null,
+    mechanism_detail: row.mechanism_detail,
+    source_filing_type: row.source_filing_type,
+    source_filing_date: row.source_filing_date,
+    source_quote: row.source_quote,
+  }));
+
   const narrative = (narratives[0] as MacroNarrativeRow) || null;
 
   return (
@@ -161,6 +196,7 @@ async function DashboardDataLoader() {
         filings={filings as FilingRow[]}
         narrative={narrative}
         supplyChain={supplyChain}
+        commodityDrivers={commodityDrivers}
       />
       <ScopedInsightsPanel insights={insights as any[]} />
     </>
