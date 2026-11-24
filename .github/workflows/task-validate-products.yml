@@ -11,6 +11,7 @@ jobs:
     env:
       DATABASE_URL: ${{ secrets.DATABASE_URL }}
     steps:
+      - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-python
       - name: Validate product refs, rollups & unlogged commodities
         run: python pipeline/validate_products.py
