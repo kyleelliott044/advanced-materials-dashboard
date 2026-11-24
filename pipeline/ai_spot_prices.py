@@ -2,15 +2,18 @@ import os
 import re
 import time
 import json
+import warnings
 from datetime import date
 from typing import List, Optional
 from urllib.parse import quote_plus
 import requests
 import psycopg
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
+
+warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
@@ -35,16 +38,16 @@ SPECIALTY_MATERIALS = [
     ("CARBON_FIBER_T700", "Industrial Standard-Modulus Carbon Fiber Tow", "USD / kg", "Composites"),
 ]
 
-SEARCH_QUERIES = [
-    ("NDPR_CN", "NdPr oxide price USD kg rare earth"),
-    ("LICARB_CN", "lithium carbonate price ton SMM GFEX"),
-    ("GALLIUM_9999", "gallium metal price kg spot"),
-    ("GERMANIUM_INGOT", "germanium ingot price kg spot"),
-    ("POLYSILICON_N", "n-type polysilicon price kg"),
-    ("SPHERICAL_GRAPHITE", "spherical graphite price ton"),
-    ("COBALT_SULFATE", "cobalt sulfate price ton"),
-    ("CARBON_FIBER_T700", "carbon fiber price kg aerospace industrial"),
-]
+SEARCH_QUERIES = {
+    "NDPR_CN": ["NdPr oxide price per kg SMM", "praseodymium neodymium oxide spot price"],
+    "LICARB_CN": ["battery grade lithium carbonate price per ton SMM GFEX", "lithium carbonate spot price yuan ton"],
+    "GALLIUM_9999": ["gallium metal price per kg spot", "refined gallium 99.99 price USD kg"],
+    "GERMANIUM_INGOT": ["germanium ingot price per kg spot", "germanium metal price USD kg"],
+    "POLYSILICON_N": ["n-type polysilicon price per kg InfoLink", "polysilicon spot price USD kg"],
+    "SPHERICAL_GRAPHITE": ["spherical graphite price per ton", "uncoated spherical graphite spot price"],
+    "COBALT_SULFATE": ["cobalt sulfate price per ton SMM", "battery grade cobalt sulfate spot price"],
+    "CARBON_FIBER_T700": ["carbon fiber T700 price per kg", "industrial carbon fiber tow price USD kg"],
+}
 
 
 class MaterialSpotQuote(BaseModel):
@@ -59,48 +62,49 @@ class MaterialSpotBatch(BaseModel):
     quotes: List[MaterialSpotQuote]
 
 
-def _fetch_rss_snippets() -> tuple[str, list[str]]:
-    """Fetches public Google News & Bing News RSS items (unblocked on GitHub Actions)."""
+def _fetch_rss_snippets(target_codes: list[str]) -> tuple[str, list[str]]:
+    """Fetches public Google News & Bing News RSS items for missing/stale materials."""
     headers = {"User-Agent": "Mozilla/5.0 (compatible; MaterialsMacroBot/1.0)"}
     snippets = []
     urls = []
     seen_titles = set()
 
-    for code, query in SEARCH_QUERIES:
-        encoded = quote_plus(query)
-        rss_urls = [
-            f"https://news.google.com/rss/search?q={encoded}&hl=en-US&gl=US&ceid=US:en",
-            f"https://www.bing.com/news/search?q={encoded}&format=rss",
-        ]
-        for rss_url in rss_urls:
-            try:
-                r = requests.get(rss_url, headers=headers, timeout=12)
-                if r.status_code != 200:
-                    continue
-                soup = BeautifulSoup(r.text, "html.parser")
-                for item in soup.find_all("item")[:3]:
-                    title = item.find("title").get_text(strip=True) if item.find("title") else ""
-                    if not title or title in seen_titles:
+    for code in target_codes:
+        for query in SEARCH_QUERIES.get(code, []):
+            encoded = quote_plus(query)
+            rss_urls = [
+                f"https://news.google.com/rss/search?q={encoded}&hl=en-US&gl=US&ceid=US:en",
+                f"https://www.bing.com/news/search?q={encoded}&format=rss",
+            ]
+            for rss_url in rss_urls:
+                try:
+                    r = requests.get(rss_url, headers=headers, timeout=12)
+                    if r.status_code != 200:
                         continue
-                    seen_titles.add(title)
-                    pub_date = item.find("pubdate").get_text(strip=True) if item.find("pubdate") else ""
-                    desc_raw = item.find("description").get_text(" ", strip=True) if item.find("description") else ""
-                    desc_clean = BeautifulSoup(desc_raw, "html.parser").get_text(" ", strip=True)[:220]
-                    snippets.append(f"[{code}] ({pub_date}) {title} — {desc_clean}")
-                    if len(urls) < 4:
-                        urls.append(rss_url.split("?")[0])
-            except Exception:
-                continue
-        time.sleep(0.2)
+                    soup = BeautifulSoup(r.text, "html.parser")
+                    for item in soup.find_all("item")[:3]:
+                        title = item.find("title").get_text(strip=True) if item.find("title") else ""
+                        if not title or title in seen_titles:
+                            continue
+                        seen_titles.add(title)
+                        pub_date = item.find("pubdate").get_text(strip=True) if item.find("pubdate") else ""
+                        desc_raw = item.find("description").get_text(" ", strip=True) if item.find("description") else ""
+                        desc_clean = BeautifulSoup(desc_raw, "html.parser").get_text(" ", strip=True)[:240]
+                        snippets.append(f"[{code}] ({pub_date}) {title} — {desc_clean}")
+                        if len(urls) < 4:
+                            urls.append(rss_url.split("?")[0])
+                except Exception:
+                    continue
+            time.sleep(0.15)
 
-    print(f"Retrieved {len(snippets)} RSS market snippets across {len(SEARCH_QUERIES)} materials.")
+    print(f"Retrieved {len(snippets)} RSS market snippets across {len(target_codes)} materials.")
     return "\n".join(snippets), urls
 
 
-def _search_via_groq(prompt: str) -> tuple[str, list[str]]:
+def _search_via_groq(prompt: str, target_codes: list[str]) -> tuple[str, list[str]]:
     if not GROQ_API_KEY:
         return "", []
-    snippets, urls = _fetch_rss_snippets()
+    snippets, urls = _fetch_rss_snippets(target_codes)
     if not snippets:
         return "", []
 
@@ -148,15 +152,29 @@ def _search_via_groq(prompt: str) -> tuple[str, list[str]]:
 
 def refresh_ai_material_prices(conn):
     with conn.cursor() as cur:
-        cur.execute("SELECT MAX(observation_date) FROM raw_inputs WHERE is_proxy = TRUE;")
-        row = cur.fetchone()
-        if row and row[0] and (date.today() - row[0]).days < 3:
-            print(f"AI spot prices are current (last updated {row[0]}) — skipping.")
-            return
+        cur.execute(
+            """
+            SELECT input_code, MAX(observation_date)
+            FROM raw_inputs
+            WHERE is_proxy = TRUE
+            GROUP BY input_code;
+            """
+        )
+        last_updated = {r[0]: r[1] for r in cur.fetchall()}
+
+    stale_materials = [
+        item for item in SPECIALTY_MATERIALS
+        if item[0] not in last_updated or (date.today() - last_updated[item[0]]).days >= 3
+    ]
+
+    if not stale_materials:
+        print("All AI spot prices are current (< 3 days old) — skipping.")
+        return
 
     today_str = date.today().isoformat()
-    mat_list = "\n".join([f"- {code}: {name} (target unit: {unit})" for code, name, unit, _ in SPECIALTY_MATERIALS])
-    meta_map = {code: (name, unit, cat) for code, name, unit, cat in SPECIALTY_MATERIALS}
+    stale_codes = [m[0] for m in stale_materials]
+    mat_list = "\n".join([f"- {code}: {name} (target unit: {unit})" for code, name, unit, _ in stale_materials])
+    meta_map = {code: (name, unit, cat) for code, name, unit, cat in stale_materials}
 
     prompt = f"""
     Today is {today_str}. Extract the most recent spot or market assessment prices (converted to USD in the exact target unit requested) for these non-exchange specialty materials:
@@ -165,6 +183,7 @@ def refresh_ai_material_prices(conn):
 
     Rules:
     - Convert RMB/CNY quotes to USD (~7.2 RMB/USD) if quoted on Chinese spot markets (SMM, Asian Metal, GFEX).
+    - Convert per-ton quotes to per-kg (divide by 1,000) or per-kg to per-metric-ton (multiply by 1,000) to match the exact target unit.
     - Do NOT guess or fabricate prices. If no recent quote is verifiable in the results, set price_usd to null.
     """
 
@@ -192,7 +211,7 @@ def refresh_ai_material_prices(conn):
 
     if not raw_text:
         provider_label = "Market RSS + Groq"
-        raw_text, grounding_urls = _search_via_groq(prompt)
+        raw_text, grounding_urls = _search_via_groq(prompt, stale_codes)
 
     json_match = re.search(r"\{.*\}", raw_text, re.DOTALL)
     if not json_match:
