@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import requests
 import psycopg
 from datetime import date
 from pydantic import BaseModel, Field
@@ -10,6 +11,7 @@ from google.genai import types
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
+GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
 client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
@@ -37,17 +39,46 @@ class MaterialSpotBatch(BaseModel):
     quotes: List[MaterialSpotQuote]
 
 
-def refresh_ai_material_prices(conn):
-    if not client:
-        print("GEMINI_API_KEY not set — skipping AI spot price refresh.")
-        return
+def _search_via_groq_compound(prompt: str) -> str:
+    if not GROQ_API_KEY:
+        return ""
+    schema_hint = json.dumps(MaterialSpotBatch.model_json_schema())
+    try:
+        resp = requests.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={
+                "Authorization": f"Bearer {GROQ_API_KEY}",
+                "Content-Type": "application/json",
+            },
+            json={
+                "model": "groq/compound-mini",
+                "temperature": 0.1,
+                "messages": [
+                    {
+                        "role": "system",
+                        "content": (
+                            "Use web search to find current spot prices and return ONLY a raw JSON object "
+                            f"matching this schema (no markdown fences):\n{schema_hint}"
+                        ),
+                    },
+                    {"role": "user", "content": prompt},
+                ],
+            },
+            timeout=60,
+        )
+        resp.raise_for_status()
+        return resp.json()["choices"][0]["message"]["content"] or ""
+    except Exception as e:
+        print(f"Groq web-search fallback failed: {e}")
+        return ""
 
-    # Preserve daily Gemini quota if AI spot prices were refreshed within the last 3 days
+
+def refresh_ai_material_prices(conn):
     with conn.cursor() as cur:
         cur.execute("SELECT MAX(observation_date) FROM raw_inputs WHERE is_proxy = TRUE;")
         row = cur.fetchone()
         if row and row[0] and (date.today() - row[0]).days < 3:
-            print(f"AI spot prices are current (last updated {row[0]}) — skipping to preserve Gemini quota.")
+            print(f"AI spot prices are current (last updated {row[0]}) — skipping.")
             return
 
     today_str = date.today().isoformat()
@@ -64,37 +95,32 @@ def refresh_ai_material_prices(conn):
     - Do NOT guess or fabricate prices. If no recent quote (within the last 45 days) is verifiable in search results, set price_usd to null.
     """
 
-    try:
-        resp = client.models.generate_content(
-            model="gemini-3.8-flash",
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                tools=[types.Tool(google_search=types.GoogleSearch())],
-                response_mime_type="application/json",
-                response_schema=MaterialSpotBatch,
-                temperature=0.1,
-            ),
-        )
-    except Exception as e:
-        err = str(e)
-        if "429" in err or "RESOURCE_EXHAUSTED" in err:
-            print("Gemini daily quota reached — skipping AI spot price refresh for this run.")
-            return
-        if any(k in err for k in ("503", "UNAVAILABLE", "disconnected", "timed out")):
-            print("Gemini temporarily unavailable — skipping AI spot price refresh for this run.")
-            return
-        print(f"Warning during AI spot price search: {e} — continuing pipeline.")
-        return
-
-    # Extract grounding URLs returned by Google Search for auditability
+    raw_text = ""
     grounding_urls = []
-    try:
-        chunks = resp.candidates[0].grounding_metadata.grounding_chunks or []
-        grounding_urls = [c.web.uri for c in chunks if getattr(c, "web", None) and c.web.uri][:5]
-    except Exception:
-        pass
+    provider_label = "Gemini Search"
 
-    raw_text = resp.text or ""
+    if client:
+        try:
+            resp = client.models.generate_content(
+                model="gemini-3.8-flash",
+                contents=prompt,
+                config=types.GenerateContentConfig(
+                    tools=[types.Tool(google_search=types.GoogleSearch())],
+                    response_mime_type="application/json",
+                    response_schema=MaterialSpotBatch,
+                    temperature=0.1,
+                ),
+            )
+            raw_text = resp.text or ""
+            chunks = resp.candidates[0].grounding_metadata.grounding_chunks or []
+            grounding_urls = [c.web.uri for c in chunks if getattr(c, "web", None) and c.web.uri][:5]
+        except Exception as e:
+            print(f"Gemini search unavailable ({e}) — falling back to Groq Compound web search.")
+
+    if not raw_text:
+        provider_label = "Groq Web Search"
+        raw_text = _search_via_groq_compound(prompt)
+
     json_match = re.search(r"\{.*\}", raw_text, re.DOTALL)
     if not json_match:
         print("No valid JSON returned from AI spot price search.")
@@ -114,7 +140,8 @@ def refresh_ai_material_prices(conn):
 
             name, unit, category = meta_map[code]
             obs_date = q.get("observation_date") or today_str
-            note = f"AI-Grounded Spot ({q.get('source_name', 'Market Assessment')}) | Refs: {', '.join(grounding_urls[:2])}"
+            refs = f" | Refs: {', '.join(grounding_urls[:2])}" if grounding_urls else ""
+            note = f"{provider_label} ({q.get('source_name', 'Market Assessment')}){refs}"
 
             cur.execute(
                 """
@@ -130,7 +157,7 @@ def refresh_ai_material_prices(conn):
             rows_upserted += 1
 
     conn.commit()
-    print(f"Upserted {rows_upserted} AI-grounded specialty material prices.")
+    print(f"Upserted {rows_upserted} AI-grounded specialty material prices via {provider_label}.")
 
 
 if __name__ == "__main__":
