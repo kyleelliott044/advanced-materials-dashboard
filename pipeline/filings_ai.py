@@ -16,7 +16,6 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
-# SEC EDGAR requires a descriptive User-Agent header with contact email
 SEC_HEADERS = {
     "User-Agent": "AdvancedMaterialsResearchPlatform research@materials-macro.io",
     "Accept-Encoding": "gzip, deflate",
@@ -24,7 +23,7 @@ SEC_HEADERS = {
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-MAX_REQUESTS_PER_RUN = 19  # Leaves 1 request buffer under the 20/day free cap
+MAX_REQUESTS_PER_RUN = 19
 requests_used = 0
 groq_requests_used = 0
 quota_exhausted = False
@@ -35,6 +34,39 @@ GROQ_MODELS = [
     "openai/gpt-oss-20b",
 ]
 exhausted_groq_models = set()
+
+# Canonical mapping so AI-extracted commodities link to dashboard filter cards
+CANONICAL_INPUT_GUIDE = """
+- HG=F: Copper
+- NG=F: Natural Gas
+- CL=F: WTI Crude Oil
+- BZ=F: Brent Crude Oil
+- ALI=F: Aluminum
+- PL=F: Platinum
+- SI=F: Silver
+- PNICKUSDM: Nickel
+- PCOBAUSDM: Cobalt
+- WPU101: Iron & Steel
+- WPU061: Industrial Chemicals
+- WPU066: Plastic Resins & Polymers
+- NDPR_CN: Neodymium-Praseodymium (NdPr) Rare Earths
+- LICARB_CN: Lithium Carbonate / Hydroxide
+- GALLIUM_9999: Gallium
+- GERMANIUM_INGOT: Germanium
+- POLYSILICON_N: Polysilicon / Silicon Wafers
+- SPHERICAL_GRAPHITE: Graphite (Natural / Synthetic)
+- COBALT_SULFATE: Cobalt Sulfate
+- CARBON_FIBER_T700: Carbon Fiber / PAN Precursor
+- SMH: Semiconductor Wafer Fab Demand
+- ITA: Aerospace & Defense Build Rates
+- LIT: Lithium & EV Battery Supply Chain
+- REMX: Rare Earth & Strategic Metals
+- URA: Uranium & Nuclear Fuel
+- SLX: Specialty & Stainless Steel
+- IHI: Medical Devices & Biomaterials
+- INDPRO: US Industrial Production
+- DGS10: 10-Year Treasury Yield / Cost of Capital
+"""
 
 
 class _FallbackResp:
@@ -48,7 +80,6 @@ def _call_groq_fallback(prompt: str, schema):
         return None
 
     schema_json = json.dumps(schema.model_json_schema())
-    # Trim long SEC excerpts to stay under Groq's free tokens-per-minute ceiling
     trimmed_prompt = prompt[:16000]
 
     for model_id in GROQ_MODELS:
@@ -107,7 +138,7 @@ def _call_groq_fallback(prompt: str, schema):
             resp.raise_for_status()
             groq_requests_used += 1
             content = resp.json()["choices"][0]["message"]["content"]
-            time.sleep(3)  # Pacing to stay under free-tier tokens-per-minute cap
+            time.sleep(3)
             return _FallbackResp(content)
 
     return None
@@ -147,15 +178,15 @@ def call_gemini(prompt: str, schema, retries: int = 3):
     return _call_groq_fallback(prompt, schema)
 
 
-# Sub-sector to Commodity / Macro Input Sensitivity Map
+# Sub-sector fallback sensitivity map
 SENSITIVITY_RULES = [
-    # Industrial Gases
     ("Industrial Gases", "NG=F", "Cost Input", "Pass-Through", "Natural gas is primary feedstock for hydrogen/syngas; indexed via take-or-pay pass-through clauses."),
     ("Industrial Gases", "INDPRO", "Revenue Proxy", "Direct (Demand)", "Base merchant gas volumes track industrial manufacturing utilization."),
-    # Specialty Alloys & Titanium
     ("Specialty Alloys", "ITA", "Revenue Proxy", "Direct (Demand)", "Commercial jet engine & airframe build rates drive multi-year vacuum-melted alloy backlogs."),
     ("Specialty Alloys", "WPU101", "Cost Input", "Pass-Through", "Nickel, cobalt, and titanium scrap surcharges pass through with a 1-2 quarter lag."),
     ("Specialty Alloys", "URA", "Revenue Proxy", "Direct (Demand)", "Nuclear fuel cladding and SMR zirconium/nickel alloy demand."),
+    ("Specialty Alloys", "PNICKUSDM", "Cost Input", "Pass-Through", "Nickel is a core alloying element; surcharges pass through with a 1-2 quarter lag."),
+    ("Specialty Alloys", "PCOBAUSDM", "Cost Input", "Pass-Through", "Cobalt superalloy melt costs indexed to aerospace OEM contracts."),
     ("Aerospace & Defense Parts", "ITA", "Revenue Proxy", "Direct (Demand)", "Aftermarket PMA parts and defense spares scale with global flight hours."),
     ("Beryllium & Specialty Alloys", "SMH", "Revenue Proxy", "Direct (Demand)", "Tantalum/precious metal targets and beryllium optics tied to wafer fab & defense spend."),
     ("Aerospace & Auto Aluminum", "ALI=F", "Cost Input", "Pass-Through", "LME aluminum price passes through; conversion spreads depend on aerospace plate tightness."),
@@ -165,88 +196,116 @@ SENSITIVITY_RULES = [
     ("Stainless & High-Perf Alloys", "HG=F", "Revenue Proxy", "Direct (Demand)", "Electrification, LNG, and chemical processing capex drive high-nickel alloy orders."),
     ("Advanced Stainless & Heating Alloys", "HG=F", "Revenue Proxy", "Direct (Demand)", "Industrial electric heating elements benefit from industrial decarbonization."),
     ("Specialty Steel & Alloys", "SLX", "Revenue Proxy", "Direct (Demand)", "Clean bar and seamless mechanical tubing tied to industrial/defense capex."),
-    # Semiconductor & Electronic Materials
     ("Semiconductor Materials", "SMH", "Revenue Proxy", "Direct (Demand)", "Wafer starts and logic/memory node transitions drive filtration and deposition chemical consumption."),
     ("Silicon Wafers", "SMH", "Revenue Proxy", "Direct (Demand)", "300mm wafer shipments governed by long-term LTA take-or-pay volume commitments."),
+    ("Silicon Wafers", "POLYSILICON_N", "Cost Input", "Pass-Through", "Electronic-grade polysilicon feedstock passes through under multi-year wafer LTAs."),
     ("Silicon Wafers & PVC", "SMH", "Revenue Proxy", "Direct (Demand)", "300mm silicon wafer utilization tracks global fab output; PVC tied to construction/rates."),
+    ("Silicon Wafers & PVC", "POLYSILICON_N", "Cost Input", "Pass-Through", "Polysilicon spot trends signal upstream silicon supply-demand tightness."),
     ("Engineered SOI Wafers", "SMH", "Revenue Proxy", "Direct (Demand)", "RF-SOI and FD-SOI wafers scale with 5G smartphone RF content and edge AI."),
     ("Photoresists & Semicon Chem", "SMH", "Revenue Proxy", "Direct (Demand)", "EUV and ArF immersion photoresists scale directly with leading-edge lithography layers."),
     ("Semicon Packaging & Chemicals", "SMH", "Revenue Proxy", "Direct (Demand)", "HBM and advanced 2.5D/3D packaging epoxy/chemical demand."),
+    ("Semicon Packaging & Chemicals", "SI=F", "Cost Input", "Pass-Through", "Silver conductive pastes and plating chemistry for chip packaging."),
     ("IC Substrates & Ceramics", "SMH", "Revenue Proxy", "Direct (Demand)", "AI server GPU package substrates (ABF) drive high-margin mix expansion."),
     ("ABF Build-Up Film & Bio", "SMH", "Revenue Proxy", "Direct (Demand)", "Near-monopoly on Ajinomoto Build-up Film insulating layers for AI accelerators."),
     ("CMP Slurries & Wet Chemicals", "SMH", "Revenue Proxy", "Direct (Demand)", "More CMP planarization steps per wafer in 3D NAND and gate-all-around logic."),
     ("CMP Slurries & Abrasives", "SMH", "Revenue Proxy", "Direct (Demand)", "Ultra-pure colloidal silica and silicon carbide wafer polishing slurries."),
     ("Silicon Carbide Wafers", "LIT", "Revenue Proxy", "Direct (Demand)", "800V EV traction inverters and AI data center power supplies drive 200mm SiC substrate demand."),
     ("Compound Semicon & Photonics", "SMH", "Revenue Proxy", "Direct (Demand)", "800G/1.6T optical transceivers for AI data center clusters."),
+    ("Compound Semicon & Photonics", "GALLIUM_9999", "Cost Input", "Inverse (Cost)", "Refined gallium is the core substrate feedstock for GaAs/GaN RF and optical wafers."),
+    ("Compound Semicon & Photonics", "GERMANIUM_INGOT", "Cost Input", "Inverse (Cost)", "Germanium substrates are required for space solar cells and IR/optical photonics."),
     ("High-Speed CCL (AI Servers)", "HG=F", "Cost Input", "Pass-Through", "Copper foil and glass fabric costs pass through; ultra-low-loss M7/M8 resin grades drive AI server margins."),
     ("High-Frequency CCL", "HG=F", "Cost Input", "Pass-Through", "High-speed networking switch and AI accelerator PCB laminate demand."),
     ("Copper Clad Laminates", "HG=F", "Cost Input", "Pass-Through", "Copper foil price swings directly impact working capital and pass-through pricing."),
-    # Rare Earths & Battery Materials
     ("Rare Earth Mining & Magnets", "REMX", "Revenue Proxy", "Direct (Demand)", "NdPr oxide pricing dictates mining EBITDA; EV traction motors and defense actuators drive magnet demand."),
+    ("Rare Earth Mining & Magnets", "NDPR_CN", "Revenue Proxy", "Direct (Demand)", "NdPr oxide spot pricing directly governs rare earth separation and magnet margins."),
     ("Rare Earth Oxides & Metals", "REMX", "Revenue Proxy", "Direct (Demand)", "Chinese quota allocations and NdPr spot prices govern upstream margins."),
+    ("Rare Earth Oxides & Metals", "NDPR_CN", "Revenue Proxy", "Direct (Demand)", "Spot NdPr oxide benchmarks dictate upstream oxide realization."),
     ("NdFeB Permanent Magnets", "REMX", "Cost Input", "Pass-Through", "NdPr metal cost passes through to EV/wind OEMs with value-add processing fee."),
+    ("NdFeB Permanent Magnets", "NDPR_CN", "Cost Input", "Pass-Through", "NdPr metal feedstock passes through to motor OEMs with a quarterly lag."),
     ("Lithium Chemicals", "LIT", "Revenue Proxy", "Direct (Demand)", "Lithium carbonate/hydroxide spot prices directly drive brine and spodumene conversion margins."),
+    ("Lithium Chemicals", "LICARB_CN", "Revenue Proxy", "Direct (Demand)", "Battery-grade lithium carbonate spot prices drive brine and converter EBITDA."),
     ("Lithium Refining & Batteries", "LIT", "Revenue Proxy", "Direct (Demand)", "Spodumene-to-hydroxide conversion spread determines refining profitability."),
+    ("Lithium Refining & Batteries", "LICARB_CN", "Revenue Proxy", "Direct (Demand)", "Spot lithium carbonate/hydroxide spreads set refining conversion margins."),
     ("High-Nickel Cathodes", "LIT", "Cost Input", "Pass-Through", "Lithium and nickel metal prices are indexed to cell-maker contracts; processing margin is fixed per kg."),
-    ("Cathodes & Synthetic Anodes", "LIT", "Cost Input", "Pass-Through", "Lithium pass-through pricing paired with IRA-compliant North American supply chain premiums."),
-    ("Battery Electrolytes", "LIT", "Revenue Proxy", "Direct (Demand)", "LiPF6 salt spreads and global GWh battery cell production."),
-    ("Elecfoil (Battery Copper Foil)", "HG=F", "Cost Input", "Pass-Through", "LME copper passes through; ultra-thin 4-6 micron foil processing fee drives margin."),
-    ("Natural Graphite Anode Mat.", "LIT", "Revenue Proxy", "Direct (Demand)", "Ex-China spherical graphite qualification for North American EV anode supply."),
-    ("Synthetic Graphite Anodes", "LIT", "Revenue Proxy", "Direct (Demand)", "Graphitization energy costs and IRA-compliant anode localization."),
-    # Composites, Ceramics & Chemicals
-    ("Aerospace Carbon Fiber Composites", "ITA", "Revenue Proxy", "Direct (Demand)", "Widebody (A350/787) and defense composite weight-per-aircraft drives multi-year volume."),
-    ("Aerospace Carbon Fiber Composites", "NG=F", "Cost Input", "Inverse (Cost)", "PAN precursor carbonization ovens are energy-intensive; natural gas spikes compress margins."),
-    ("Carbon Fiber & Advanced Films", "ITA", "Revenue Proxy", "Direct (Demand)", "Aerospace prepreg and pressure vessel tow demand."),
-    ("Optical Fiber & Display Glass", "SMH", "Revenue Proxy", "Direct (Demand)", "AI data center high-density fiber interconnects and Gen 10.5 display glass utilization."),
-    ("Integrated Chemicals & Materials", "NG=F", "Cost Input", "Inverse (Cost)", "European/global natural gas and naphtha cracker spreads dictate base chemical profitability."),
-    ("Integrated Chemicals & Materials", "CL=F", "Cost Input", "Inverse (Cost)", "Crude-to-naphtha feedstock costs impact downstream polyolefin and polyurethane margins."),
-    ("Olefins & Polyolefins", "CL=F", "Margin Spread", "Direct (Demand)", "US ethane-to-crude oil cost advantage widens North American polyethylene margins when oil rises."),
-    ("Packaging & Specialty Plastics", "NG=F", "Cost Input", "Inverse (Cost)", "USGC ethane/natural gas feedstock costs vs. global polyethylene clearing prices."),
-    ("Fluoropolymers & Titanium Tech", "SMH", "Revenue Proxy", "Direct (Demand)", "High-purity PFA fluoropolymers essential for semiconductor fab piping and chemical handling."),
-    # Additional Commodity & Macro Rules
-    ("Specialty Alloys", "PNICKUSDM", "Cost Input", "Pass-Through", "Nickel is a core alloying element; surcharges pass through with a 1-2 quarter lag."),
-    ("Specialty Alloys", "PCOBAUSDM", "Cost Input", "Pass-Through", "Cobalt superalloy melt costs indexed to aerospace OEM contracts."),
     ("High-Nickel Cathodes", "PNICKUSDM", "Cost Input", "Pass-Through", "Nickel sulfate costs pass through to battery cell makers."),
     ("High-Nickel Cathodes", "PCOBAUSDM", "Cost Input", "Pass-Through", "Cobalt feedstock indexed in NMC cathode contracts."),
+    ("High-Nickel Cathodes", "LICARB_CN", "Cost Input", "Pass-Through", "Lithium carbonate spot indices pass through in cathode tolling agreements."),
+    ("High-Nickel Cathodes", "COBALT_SULFATE", "Cost Input", "Pass-Through", "Battery-grade cobalt sulfate costs are indexed to cell-maker contracts."),
+    ("Cathodes & Synthetic Anodes", "LIT", "Cost Input", "Pass-Through", "Lithium pass-through pricing paired with IRA-compliant North American supply chain premiums."),
+    ("Cathodes & Synthetic Anodes", "LICARB_CN", "Cost Input", "Pass-Through", "Lithium feedstock cost passes through with IRA-compliant processing spreads."),
+    ("Battery Electrolytes", "LIT", "Revenue Proxy", "Direct (Demand)", "LiPF6 salt spreads and global GWh battery cell production."),
+    ("Battery Electrolytes", "LICARB_CN", "Cost Input", "Pass-Through", "Lithium carbonate is the primary precursor for LiPF6 electrolyte salts."),
+    ("Elecfoil (Battery Copper Foil)", "HG=F", "Cost Input", "Pass-Through", "LME copper passes through; ultra-thin 4-6 micron foil processing fee drives margin."),
+    ("Natural Graphite Anode Mat.", "LIT", "Revenue Proxy", "Direct (Demand)", "Ex-China spherical graphite qualification for North American EV anode supply."),
+    ("Natural Graphite Anode Mat.", "SPHERICAL_GRAPHITE", "Revenue Proxy", "Direct (Demand)", "Uncoated spherical graphite spot pricing benchmarks ex-China anode economics."),
+    ("Synthetic Graphite Anodes", "LIT", "Revenue Proxy", "Direct (Demand)", "Graphitization energy costs and IRA-compliant anode localization."),
+    ("Synthetic Graphite Anodes", "SPHERICAL_GRAPHITE", "Revenue Proxy", "Direct (Demand)", "Spherical graphite spot benchmarks compete directly with synthetic anode pricing."),
+    ("Aerospace Carbon Fiber Composites", "ITA", "Revenue Proxy", "Direct (Demand)", "Widebody (A350/787) and defense composite weight-per-aircraft drives multi-year volume."),
+    ("Aerospace Carbon Fiber Composites", "NG=F", "Cost Input", "Inverse (Cost)", "PAN precursor carbonization ovens are energy-intensive; natural gas spikes compress margins."),
+    ("Aerospace Carbon Fiber Composites", "CARBON_FIBER_T700", "Revenue Proxy", "Direct (Demand)", "Industrial carbon fiber tow pricing tracks global composite utilization."),
+    ("Carbon Fiber & Advanced Films", "ITA", "Revenue Proxy", "Direct (Demand)", "Aerospace prepreg and pressure vessel tow demand."),
+    ("Carbon Fiber & Advanced Films", "CARBON_FIBER_T700", "Revenue Proxy", "Direct (Demand)", "Standard-modulus carbon fiber spot rates reflect wind and pressure-vessel demand."),
+    ("Optical Fiber & Display Glass", "SMH", "Revenue Proxy", "Direct (Demand)", "AI data center high-density fiber interconnects and Gen 10.5 display glass utilization."),
+    ("Optical Fiber & Display Glass", "PL=F", "Cost Input", "Inverse (Cost)", "Platinum-rhodium bushings are required for high-temp specialty glass drawing."),
+    ("Optical Fiber & Display Glass", "GERMANIUM_INGOT", "Cost Input", "Inverse (Cost)", "Germanium tetrachloride is a critical core dopant in telecom optical fiber preforms."),
+    ("Integrated Chemicals & Materials", "NG=F", "Cost Input", "Inverse (Cost)", "European/global natural gas and naphtha cracker spreads dictate base chemical profitability."),
+    ("Integrated Chemicals & Materials", "CL=F", "Cost Input", "Inverse (Cost)", "Crude-to-naphtha feedstock costs impact downstream polyolefin and polyurethane margins."),
     ("Integrated Chemicals & Materials", "BZ=F", "Cost Input", "Inverse (Cost)", "Brent crude sets European and Asian naphtha cracker feedstock costs."),
     ("Integrated Chemicals & Materials", "PNGASEUUSDM", "Cost Input", "Inverse (Cost)", "European TTF natural gas dictates EU chemical plant competitiveness."),
     ("Integrated Chemicals & Materials", "WPU061", "Revenue Proxy", "Direct (Demand)", "Industrial chemical PPI tracks base chemical pricing power."),
+    ("Olefins & Polyolefins", "CL=F", "Margin Spread", "Direct (Demand)", "US ethane-to-crude oil cost advantage widens North American polyethylene margins when oil rises."),
+    ("Packaging & Specialty Plastics", "NG=F", "Cost Input", "Inverse (Cost)", "USGC ethane/natural gas feedstock costs vs. global polyethylene clearing prices."),
     ("Packaging & Specialty Plastics", "WPU066", "Revenue Proxy", "Direct (Demand)", "Plastic resin PPI tracks polymer conversion spreads."),
-    ("Optical Fiber & Display Glass", "PL=F", "Cost Input", "Inverse (Cost)", "Platinum-rhodium bushings are required for high-temp specialty glass drawing."),
-    ("Semicon Packaging & Chemicals", "SI=F", "Cost Input", "Pass-Through", "Silver conductive pastes and plating chemistry for chip packaging."),
+    ("Fluoropolymers & Titanium Tech", "SMH", "Revenue Proxy", "Direct (Demand)", "High-purity PFA fluoropolymers essential for semiconductor fab piping and chemical handling."),
     ("Medical Devices & Biomaterials", "IHI", "Revenue Proxy", "Direct (Demand)", "Procedure volumes and med-tech capex drive biocompatible polymer & tissue demand."),
-    # AI-Grounded Specialty Material Spot Rules
-    ("Rare Earth Mining & Magnets", "NDPR_CN", "Revenue Proxy", "Direct (Demand)", "NdPr oxide spot pricing directly governs rare earth separation and magnet margins."),
-    ("Rare Earth Oxides & Metals", "NDPR_CN", "Revenue Proxy", "Direct (Demand)", "Spot NdPr oxide benchmarks dictate upstream oxide realization."),
-    ("NdFeB Permanent Magnets", "NDPR_CN", "Cost Input", "Pass-Through", "NdPr metal feedstock passes through to motor OEMs with a quarterly lag."),
-    ("Lithium Chemicals", "LICARB_CN", "Revenue Proxy", "Direct (Demand)", "Battery-grade lithium carbonate spot prices drive brine and converter EBITDA."),
-    ("Lithium Refining & Batteries", "LICARB_CN", "Revenue Proxy", "Direct (Demand)", "Spot lithium carbonate/hydroxide spreads set refining conversion margins."),
-    ("High-Nickel Cathodes", "LICARB_CN", "Cost Input", "Pass-Through", "Lithium carbonate spot indices pass through in cathode tolling agreements."),
-    ("High-Nickel Cathodes", "COBALT_SULFATE", "Cost Input", "Pass-Through", "Battery-grade cobalt sulfate costs are indexed to cell-maker contracts."),
-    ("Cathodes & Synthetic Anodes", "LICARB_CN", "Cost Input", "Pass-Through", "Lithium feedstock cost passes through with IRA-compliant processing spreads."),
-    ("Battery Electrolytes", "LICARB_CN", "Cost Input", "Pass-Through", "Lithium carbonate is the primary precursor for LiPF6 electrolyte salts."),
-    ("Natural Graphite Anode Mat.", "SPHERICAL_GRAPHITE", "Revenue Proxy", "Direct (Demand)", "Uncoated spherical graphite spot pricing benchmarks ex-China anode economics."),
-    ("Synthetic Graphite Anodes", "SPHERICAL_GRAPHITE", "Revenue Proxy", "Direct (Demand)", "Spherical graphite spot benchmarks compete directly with synthetic anode pricing."),
-    ("Compound Semicon & Photonics", "GALLIUM_9999", "Cost Input", "Inverse (Cost)", "Refined gallium is the core substrate feedstock for GaAs/GaN RF and optical wafers."),
-    ("Compound Semicon & Photonics", "GERMANIUM_INGOT", "Cost Input", "Inverse (Cost)", "Germanium substrates are required for space solar cells and IR/optical photonics."),
-    ("Optical Fiber & Display Glass", "GERMANIUM_INGOT", "Cost Input", "Inverse (Cost)", "Germanium tetrachloride is a critical core dopant in telecom optical fiber preforms."),
-    ("Silicon Wafers", "POLYSILICON_N", "Cost Input", "Pass-Through", "Electronic-grade polysilicon feedstock passes through under multi-year wafer LTAs."),
-    ("Silicon Wafers & PVC", "POLYSILICON_N", "Cost Input", "Pass-Through", "Polysilicon spot trends signal upstream silicon supply-demand tightness."),
-    ("Aerospace Carbon Fiber Composites", "CARBON_FIBER_T700", "Revenue Proxy", "Direct (Demand)", "Industrial carbon fiber tow pricing tracks global composite utilization."),
-    ("Carbon Fiber & Advanced Films", "CARBON_FIBER_T700", "Revenue Proxy", "Direct (Demand)", "Standard-modulus carbon fiber spot rates reflect wind and pressure-vessel demand."),
 ]
 
 
-# Pydantic Schemas for Guaranteed Structured Outputs
+# Pydantic Schemas
+class CommodityDriverLink(BaseModel):
+    commodity_name: str = Field(
+        description="Clean, human-readable name of the specific commodity, feedstock, energy input, or end-market driver (e.g., 'High-Purity Nickel', 'Natural Gas', 'Lithium Carbonate', 'Titanium Sponge', 'Copper Foil', 'Epoxy Resins'). Never return a ticker symbol or FRED code here."
+    )
+    matched_input_code: Optional[str] = Field(
+        default=None,
+        description="Closest matching code from the canonical input list if applicable (e.g. 'PNICKUSDM', 'NG=F', 'HG=F', 'LICARB_CN', 'SMH', 'ITA'), otherwise null."
+    )
+    exposure_role: str = Field(
+        description="Must be one of: 'Cost Input', 'Revenue Driver', 'Margin Spread', or 'Byproduct Credit'."
+    )
+    impact_direction: str = Field(
+        description="Must be one of: 'Pass-Through', 'Inverse (Cost)', 'Direct (Demand)', or 'Hedged / Fixed'."
+    )
+    pass_through_lag: str = Field(
+        description="Pricing adjustment speed, e.g. 'Monthly Index', '1-2 Quarter Lag', 'Multi-Year LTA', 'Spot / Unhedged', or 'Take-or-Pay'."
+    )
+    cogs_or_rev_share_pct: Optional[float] = Field(
+        default=None,
+        description="Disclosed % of COGS or revenue if explicitly stated, otherwise null."
+    )
+    mechanism_detail: str = Field(
+        description="2-sentence institutional explanation of how this specific commodity impacts this company's gross margins, surcharges, inventory valuation, or revenue."
+    )
+    source_quote: str = Field(
+        description="Short verbatim phrase from the text referencing this raw material, energy input, or commodity driver."
+    )
+
+
+class DriverBackfillBatch(BaseModel):
+    commodity_drivers: List[CommodityDriverLink] = Field(
+        description="3 to 6 specific, company-level commodity, raw material, and energy drivers."
+    )
+
+
 class SupplyChainLink(BaseModel):
     counterparty_name: str = Field(
-        description="Exact company name if explicitly disclosed (e.g., 'Apple', 'TSMC', 'Boeing', 'Samsung SDI'), OR named end-market/material group if individual names are confidential (e.g., 'Tier-1 Aerospace OEMs')."
+        description="Exact company name if explicitly disclosed (e.g., 'Apple', 'TSMC', 'Boeing'), OR named end-market/material group if confidential."
     )
     is_named_entity: bool = Field(
         description="True ONLY if a specific company/organization name is explicitly stated in the text."
     )
     material_or_product: str = Field(
-        description="Specific raw material purchased (for suppliers) or engineered product sold (for customers)."
+        description="Specific raw material purchased or engineered product sold."
     )
     is_sole_source: bool = Field(
         description="True if text notes single-source, sole-supplier, or 10%+ customer concentration."
@@ -267,6 +326,10 @@ class FilingSummarySchema(BaseModel):
     pricing_and_margins: str = Field(description="Specific details on gross/operating margins, raw material pass-through, surcharges, or price/cost spread.")
     capex_and_backlog: str = Field(description="Details on order backlog, customer qualification milestones, capacity expansion, or capex guidance.")
     key_risks: str = Field(description="Top 1-2 operational, geopolitical, or cyclical risks highlighted in the report.")
+    commodity_drivers: List[CommodityDriverLink] = Field(
+        default_factory=list,
+        description="3 to 6 specific raw materials, energy inputs, feedstocks, and commodity benchmarks that drive this specific company's costs or revenues."
+    )
     upstream_suppliers: List[SupplyChainLink] = Field(
         default_factory=list,
         description="Explicitly disclosed upstream raw material suppliers, feedstock sources, or sole-source inputs found in the text.",
@@ -308,8 +371,58 @@ def _quote_exists(quote: str, source_text: str) -> bool:
     clean_s = " ".join(re.sub(r"[^a-z0-9 ]+", " ", source_text.lower()).split())
     if len(clean_q) < 5:
         return " ".join(clean_q) in clean_s
-    # Verify at least one 6-word exact phrase matches the filing text
     return any(" ".join(clean_q[i : i + 6]) in clean_s for i in range(len(clean_q) - 5))
+
+
+def save_commodity_drivers(conn, ticker: str, filing_type: str, filing_date: str, drivers: list):
+    rows = []
+    for d in (drivers or []):
+        cname = (d.get("commodity_name") or "").strip()
+        mech = (d.get("mechanism_detail") or "").strip()
+        if not cname or not mech:
+            continue
+        code = (d.get("matched_input_code") or "").strip() or None
+        rows.append((
+            ticker,
+            cname[:100],
+            code[:32] if code else None,
+            (d.get("exposure_role") or "Cost Input")[:50],
+            (d.get("impact_direction") or "Pass-Through")[:50],
+            (d.get("pass_through_lag") or "Quarterly")[:60],
+            d.get("cogs_or_rev_share_pct"),
+            mech[:600],
+            filing_type,
+            filing_date,
+            (d.get("source_quote") or "")[:350],
+        ))
+
+    if not rows:
+        return
+
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO equity_commodity_drivers (
+                ticker, commodity_name, matched_input_code, exposure_role,
+                impact_direction, pass_through_lag, cogs_or_rev_share_pct,
+                mechanism_detail, source_filing_type, source_filing_date, source_quote
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (ticker, commodity_name) DO UPDATE SET
+                matched_input_code = COALESCE(EXCLUDED.matched_input_code, equity_commodity_drivers.matched_input_code),
+                exposure_role = EXCLUDED.exposure_role,
+                impact_direction = EXCLUDED.impact_direction,
+                pass_through_lag = EXCLUDED.pass_through_lag,
+                cogs_or_rev_share_pct = COALESCE(EXCLUDED.cogs_or_rev_share_pct, equity_commodity_drivers.cogs_or_rev_share_pct),
+                mechanism_detail = EXCLUDED.mechanism_detail,
+                source_filing_type = EXCLUDED.source_filing_type,
+                source_filing_date = EXCLUDED.source_filing_date,
+                source_quote = EXCLUDED.source_quote,
+                updated_at = NOW();
+            """,
+            rows,
+        )
+    conn.commit()
+    print(f"Saved {len(rows)} AI commodity drivers for {ticker}")
 
 
 def save_supply_chain_links(conn, ticker: str, filing_type: str, filing_date: str, parsed: dict, source_text: str):
@@ -321,7 +434,6 @@ def save_supply_chain_links(conn, ticker: str, filing_type: str, filing_date: st
             if not cname or not mat:
                 continue
             quote = (item.get("source_quote") or "").strip()
-            # Drop unverified named entities so the AI never fabricates customer/supplier names
             if item.get("is_named_entity") and not _quote_exists(quote, source_text):
                 continue
             rows.append((
@@ -360,7 +472,6 @@ def save_supply_chain_links(conn, ticker: str, filing_type: str, filing_date: st
             rows,
         )
     conn.commit()
-    print(f"Saved {len(rows)} verified supply chain links for {ticker}")
 
 
 def seed_sensitivity_map(conn):
@@ -411,7 +522,6 @@ def extract_filing_text(cik_unpadded: str, accession_number: str, primary_doc: s
 
 
 def process_sec_filings(conn, limit_tickers=8):
-    """Fetches last 3 10-K/10-Q filings for US-listed tickers, prioritizing empty stocks first."""
     sec_map = fetch_sec_ticker_map()
     with conn.cursor() as cur:
         cur.execute("""
@@ -448,7 +558,6 @@ def process_sec_filings(conn, limit_tickers=8):
                     doc_name = recent["primaryDocument"][i]
                     source_url = f"https://www.sec.gov/Archives/edgar/data/{cik_unpadded}/{acc_num.replace('-', '')}/{doc_name}"
 
-                    # Skip if already summarized in Neon
                     with conn.cursor() as cur:
                         cur.execute(
                             "SELECT 1 FROM company_filings_ai WHERE ticker = %s AND filing_type = %s AND filing_date = %s;",
@@ -464,7 +573,10 @@ def process_sec_filings(conn, limit_tickers=8):
 
                     prompt = f"""
                     You are an institutional advanced materials equity analyst. Analyze this SEC {form} filing excerpt for {company_name} ({ticker}), sub-sector: {sub_sector}, filed on {f_date}.
-                    Extract concrete operational insights on demand trends, pricing power/raw material pass-through, backlog/capex, risks, and any explicitly disclosed upstream raw material suppliers or downstream customers (with verbatim quotes). Do NOT guess or invent company names not present in the text.
+                    1. Extract operational insights on demand trends, pricing power/raw material pass-through, backlog/capex, and risks.
+                    2. Extract 3 to 6 specific company-level commodity, raw material, feedstock, and energy drivers (using human-readable names like 'High-Purity Nickel' or 'Natural Gas', never ticker symbols) and match them to the closest code in this list when applicable:
+                    {CANONICAL_INPUT_GUIDE}
+                    3. Extract any explicitly disclosed upstream raw material suppliers or downstream customers with verbatim quotes.
 
                     FILING EXCERPT:
                     {excerpt}
@@ -503,6 +615,7 @@ def process_sec_filings(conn, limit_tickers=8):
                             source_url,
                         ))
                     conn.commit()
+                    save_commodity_drivers(conn, ticker, form, f_date, parsed.get("commodity_drivers", []))
                     save_supply_chain_links(conn, ticker, form, f_date, parsed, excerpt)
                     filings_found += 1
                     new_added += 1
@@ -518,7 +631,6 @@ def process_sec_filings(conn, limit_tickers=8):
 
 
 def process_international_briefs(conn, limit_tickers=5):
-    """Generates Earnings/Market Briefs for non-US tickers (Japan, Korea, Taiwan, Europe) using yfinance metadata & news."""
     with conn.cursor() as cur:
         cur.execute("""
             SELECT e.ticker, e.company_name, e.sub_sector, e.contract_type, e.qualification_years
@@ -548,7 +660,9 @@ def process_international_briefs(conn, limit_tickers=5):
             You are an institutional advanced materials equity analyst covering global equities.
             Synthesize a structured research & earnings brief for {company_name} ({ticker}), Sub-sector: {sub_sector}, Contract Type: {contract_type}, Qualification Moat: {qual_years} yrs.
             Financial Metrics: Revenue Growth={rev_growth}, Gross Margin={gross_margin}, EBITDA Margin={ebitda_margin}.
-            Extract any explicitly mentioned upstream raw material suppliers or downstream customers with verbatim quotes. Do NOT guess or invent company names not present in the text.
+            Extract 3 to 6 specific company-level commodity, raw material, and energy drivers (using human-readable names, never ticker codes) matched to this canonical list when applicable:
+            {CANONICAL_INPUT_GUIDE}
+            Also extract any explicitly mentioned upstream suppliers or downstream customers with verbatim quotes.
             Business Profile: {biz_summary}
             Recent News Headlines:
             {headlines_str}
@@ -583,6 +697,7 @@ def process_international_briefs(conn, limit_tickers=5):
                     f"https://finance.yahoo.com/quote/{ticker}",
                 ))
             conn.commit()
+            save_commodity_drivers(conn, ticker, "Earnings Brief", today_str, parsed.get("commodity_drivers", []))
             save_supply_chain_links(conn, ticker, "Earnings Brief", today_str, parsed, source_text)
             print(f"Generated global brief for {ticker}")
             time.sleep(0.3)
@@ -590,8 +705,44 @@ def process_international_briefs(conn, limit_tickers=5):
             print(f"Warning generating international brief for {ticker}: {e}")
 
 
+def backfill_existing_filing_drivers(conn, limit_tickers=8):
+    """Populates per-stock AI commodity drivers for stocks whose filings were already parsed in earlier runs."""
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT DISTINCT ON (f.ticker)
+                f.ticker, e.company_name, e.sub_sector, e.contract_type,
+                f.filing_type, f.filing_date::text, f.executive_summary,
+                f.pricing_and_margins, f.capex_and_backlog, f.key_risks
+            FROM company_filings_ai f
+            JOIN equities_universe e ON f.ticker = e.ticker
+            LEFT JOIN equity_commodity_drivers d ON f.ticker = d.ticker
+            WHERE d.ticker IS NULL
+            ORDER BY f.ticker, f.filing_date DESC
+            LIMIT %s;
+        """, (limit_tickers,))
+        rows = cur.fetchall()
+
+    for ticker, company_name, sub_sector, contract_type, ftype, fdate, summary, margins, capex, risks in rows:
+        prompt = f"""
+        You are an institutional advanced materials commodity & equity analyst.
+        For {company_name} ({ticker}), Sub-sector: {sub_sector}, Contract Type: {contract_type}, identify 4 to 6 specific raw materials, energy inputs, feedstocks, and commodity benchmarks that drive its costs, margins, or revenues.
+        Use clean human-readable commodity names (never ticker symbols or FRED codes) and map each to the closest canonical code when applicable:
+        {CANONICAL_INPUT_GUIDE}
+
+        FILING CONTEXT ({ftype} {fdate}):
+        Summary: {summary}
+        Pricing & Margins: {margins}
+        Capex & Backlog: {capex}
+        Risks: {risks}
+        """
+        ai_resp = call_gemini(prompt, DriverBackfillBatch)
+        if not ai_resp:
+            break
+        parsed = json.loads(ai_resp.text)
+        save_commodity_drivers(conn, ticker, ftype, fdate, parsed.get("commodity_drivers", []))
+
+
 def generate_market_macro_narrative(conn):
-    """Synthesizes all recent company filing summaries + live commodity prices into an overarching market narrative."""
     with conn.cursor() as cur:
         cur.execute("""
             SELECT DISTINCT ON (input_code) input_code, input_name, value, unit, observation_date
@@ -614,7 +765,7 @@ def generate_market_macro_narrative(conn):
         print("No filings available yet to synthesize macro narrative.")
         return
 
-    comm_text = "\n".join([f"- {c[1]} ({c[0]}): {c[2]} {c[3]} (as of {c[4]})" for c in commodities])
+    comm_text = "\n".join([f"- {c[1]}: {c[2]} {c[3]} (as of {c[4]})" for c in commodities])
     filings_text = "\n".join([
         f"[{f[0]} - {f[1]} | {f[2]} | {f[3]} {f[4]}]: {f[5]} Summary: {f[6]} Margins: {f[7]} Backlog/Capex: {f[8]}"
         for f in filings
@@ -664,7 +815,6 @@ def generate_market_macro_narrative(conn):
 
 
 def generate_scoped_insights(conn):
-    """Generates Industry, Sub-Industry, and Theme summaries from parsed SEC filings in 1 AI call."""
     with conn.cursor() as cur:
         cur.execute("""
             SELECT f.ticker, e.sub_sector, f.filing_type, f.filing_date,
@@ -749,6 +899,7 @@ if __name__ == "__main__":
         seed_sensitivity_map(conn)
         process_sec_filings(conn, limit_tickers=8)
         process_international_briefs(conn, limit_tickers=5)
+        backfill_existing_filing_drivers(conn, limit_tickers=8)
         try:
             generate_market_macro_narrative(conn)
             generate_scoped_insights(conn)
