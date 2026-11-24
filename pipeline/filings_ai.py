@@ -23,10 +23,11 @@ SEC_HEADERS = {
 
 client = genai.Client(api_key=GEMINI_API_KEY)
 
-MAX_REQUESTS_PER_RUN = 19
+MAX_REQUESTS_PER_RUN = 18
 requests_used = 0
 groq_requests_used = 0
 quota_exhausted = False
+consecutive_gemini_503 = 0
 
 GROQ_MODELS = [
     "openai/gpt-oss-120b",
@@ -68,6 +69,32 @@ CANONICAL_INPUT_GUIDE = """
 - INDPRO: US Industrial Production
 - DGS10: 10-Year Treasury Yield / Cost of Capital
 """
+
+
+def connect_db():
+    return psycopg.connect(
+        DATABASE_URL,
+        autocommit=True,
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=5,
+    )
+
+
+def ensure_conn(conn):
+    if conn is not None and not conn.closed and not conn.broken:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1;")
+            return conn
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    print("Reconnecting to Neon PostgreSQL...")
+    return connect_db()
 
 
 class _FallbackResp:
@@ -157,14 +184,14 @@ def _call_groq_fallback(prompt: str, schema):
     return None
 
 
-def call_gemini(prompt: str, schema, retries: int = 3):
-    global requests_used, quota_exhausted
+def call_gemini(prompt: str, schema, retries: int = 2):
+    global requests_used, quota_exhausted, consecutive_gemini_503
 
-    if not quota_exhausted and requests_used < MAX_REQUESTS_PER_RUN:
+    if not quota_exhausted and consecutive_gemini_503 < 2 and requests_used < MAX_REQUESTS_PER_RUN:
         for attempt in range(retries):
             try:
                 requests_used += 1
-                return client.models.generate_content(
+                resp = client.models.generate_content(
                     model="gemini-3.8-flash",
                     contents=prompt,
                     config=types.GenerateContentConfig(
@@ -172,6 +199,8 @@ def call_gemini(prompt: str, schema, retries: int = 3):
                         response_schema=schema,
                     ),
                 )
+                consecutive_gemini_503 = 0
+                return resp
             except Exception as e:
                 err = str(e)
                 if "429" in err or "RESOURCE_EXHAUSTED" in err:
@@ -180,11 +209,11 @@ def call_gemini(prompt: str, schema, retries: int = 3):
                     break
                 if any(k in err for k in ("503", "UNAVAILABLE", "disconnected", "timed out")):
                     if attempt < retries - 1:
-                        wait = 3 * (2 ** attempt)
-                        print(f"Gemini 503/transient error — retrying in {wait}s...")
-                        time.sleep(wait)
+                        print("Gemini 503/transient error — retrying in 3s...")
+                        time.sleep(3)
                         continue
-                    print("Gemini still unavailable — switching to Groq fallback.")
+                    consecutive_gemini_503 += 1
+                    print("Gemini unavailable — switching to Groq fallback.")
                     break
                 raise
 
@@ -401,6 +430,7 @@ def _quote_exists(quote: str, source_text: str) -> bool:
 
 
 def save_commodity_drivers(conn, ticker: str, filing_type: str, filing_date: str, drivers: list):
+    conn = ensure_conn(conn)
     rows = []
     for d in (drivers or []):
         cname = (d.get("commodity_name") or "").strip()
@@ -423,7 +453,7 @@ def save_commodity_drivers(conn, ticker: str, filing_type: str, filing_date: str
         ))
 
     if not rows:
-        return
+        return conn
 
     with conn.cursor() as cur:
         cur.executemany(
@@ -449,9 +479,11 @@ def save_commodity_drivers(conn, ticker: str, filing_type: str, filing_date: str
         )
     conn.commit()
     print(f"Saved {len(rows)} AI commodity drivers for {ticker}")
+    return conn
 
 
 def save_supply_chain_links(conn, ticker: str, filing_type: str, filing_date: str, parsed: dict, source_text: str):
+    conn = ensure_conn(conn)
     rows = []
     for direction, key in (
         ("upstream_supplier", "upstream_suppliers"),
@@ -480,7 +512,7 @@ def save_supply_chain_links(conn, ticker: str, filing_type: str, filing_date: st
             ))
 
     if not rows:
-        return
+        return conn
 
     with conn.cursor() as cur:
         cur.executemany(
@@ -502,9 +534,11 @@ def save_supply_chain_links(conn, ticker: str, filing_type: str, filing_date: st
             rows,
         )
     conn.commit()
+    return conn
 
 
 def seed_sensitivity_map(conn):
+    conn = ensure_conn(conn)
     with conn.cursor() as cur:
         cur.executemany("""
             INSERT INTO commodity_sensitivity (sub_sector, input_code, relationship_type, impact_direction, mechanism_note)
@@ -515,9 +549,11 @@ def seed_sensitivity_map(conn):
                 mechanism_note = EXCLUDED.mechanism_note;
         """, SENSITIVITY_RULES)
     print(f"Upserted {len(SENSITIVITY_RULES)} commodity sensitivity rules.")
+    return conn
 
 
 def ensure_ai_tables(conn):
+    conn = ensure_conn(conn)
     with conn.cursor() as cur:
         cur.execute("""
             ALTER TABLE company_filings_ai
@@ -567,6 +603,7 @@ def ensure_ai_tables(conn):
             CREATE INDEX IF NOT EXISTS idx_commodity_drivers_ticker ON equity_commodity_drivers(ticker);
         """)
     conn.commit()
+    return conn
 
 
 def fetch_sec_ticker_map():
@@ -606,7 +643,6 @@ def extract_filing_text(cik_unpadded: str, accession_number: str, primary_doc: s
     text = soup.get_text(separator=" ", strip=True)
     text = re.sub(r"\s+", " ", text)
 
-    # 1. Targeted supply-chain, competition & customer-concentration windows (fits inside Groq's 16K cap)
     sc_windows = _extract_keyword_windows(
         text,
         [
@@ -618,7 +654,6 @@ def extract_filing_text(cik_unpadded: str, accession_number: str, primary_doc: s
         max_total=8000,
     )
 
-    # 2. Skip Table of Contents by taking the last match of Item 1. Business
     item1_matches = list(re.finditer(r"Item\s+1\.\s+Business", text, re.IGNORECASE))
     mda_matches = list(re.finditer(r"(Item\s+2\.|Item\s+7\.)\s+Management.{0,30}Discussion", text, re.IGNORECASE))
 
@@ -638,7 +673,8 @@ def extract_filing_text(cik_unpadded: str, accession_number: str, primary_doc: s
     return combined[:28000]
 
 
-def process_sec_filings(conn, limit_tickers=8):
+def process_sec_filings(conn, limit_tickers=5):
+    conn = ensure_conn(conn)
     sec_map = fetch_sec_ticker_map()
     with conn.cursor() as cur:
         cur.execute("""
@@ -660,6 +696,7 @@ def process_sec_filings(conn, limit_tickers=8):
 
         cik_padded, cik_unpadded = sec_map[clean_ticker]
         try:
+            conn = ensure_conn(conn)
             sub_url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
             sub_resp = requests.get(sub_url, headers=SEC_HEADERS, timeout=15)
             sub_resp.raise_for_status()
@@ -675,6 +712,7 @@ def process_sec_filings(conn, limit_tickers=8):
                     doc_name = recent["primaryDocument"][i]
                     source_url = f"https://www.sec.gov/Archives/edgar/data/{cik_unpadded}/{acc_num.replace('-', '')}/{doc_name}"
 
+                    conn = ensure_conn(conn)
                     with conn.cursor() as cur:
                         cur.execute(
                             "SELECT 1 FROM company_filings_ai WHERE ticker = %s AND filing_type = %s AND filing_date = %s;",
@@ -705,6 +743,7 @@ def process_sec_filings(conn, limit_tickers=8):
                         break
                     parsed = json.loads(ai_resp.text)
 
+                    conn = ensure_conn(conn)
                     with conn.cursor() as cur:
                         cur.execute("""
                             INSERT INTO company_filings_ai (
@@ -734,8 +773,8 @@ def process_sec_filings(conn, limit_tickers=8):
                             source_url,
                         ))
                     conn.commit()
-                    save_commodity_drivers(conn, ticker, form, f_date, parsed.get("commodity_drivers", []))
-                    save_supply_chain_links(conn, ticker, form, f_date, parsed, excerpt)
+                    conn = save_commodity_drivers(conn, ticker, form, f_date, parsed.get("commodity_drivers", []))
+                    conn = save_supply_chain_links(conn, ticker, form, f_date, parsed, excerpt)
                     filings_found += 1
                     new_added += 1
                     print(f"Summarized {ticker} {form} ({f_date})")
@@ -747,9 +786,13 @@ def process_sec_filings(conn, limit_tickers=8):
                 processed += 1
         except Exception as e:
             print(f"Warning processing SEC filings for {ticker}: {e}")
+            conn = ensure_conn(conn)
+
+    return conn
 
 
-def process_international_briefs(conn, limit_tickers=5):
+def process_international_briefs(conn, limit_tickers=4):
+    conn = ensure_conn(conn)
     with conn.cursor() as cur:
         cur.execute("""
             SELECT e.ticker, e.company_name, e.sub_sector, e.contract_type, e.qualification_years
@@ -793,6 +836,7 @@ def process_international_briefs(conn, limit_tickers=5):
                 break
             parsed = json.loads(ai_resp.text)
 
+            conn = ensure_conn(conn)
             with conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO company_filings_ai (
@@ -819,16 +863,20 @@ def process_international_briefs(conn, limit_tickers=5):
                     f"https://finance.yahoo.com/quote/{ticker}",
                 ))
             conn.commit()
-            save_commodity_drivers(conn, ticker, "Earnings Brief", today_str, parsed.get("commodity_drivers", []))
-            save_supply_chain_links(conn, ticker, "Earnings Brief", today_str, parsed, source_text)
+            conn = save_commodity_drivers(conn, ticker, "Earnings Brief", today_str, parsed.get("commodity_drivers", []))
+            conn = save_supply_chain_links(conn, ticker, "Earnings Brief", today_str, parsed, source_text)
             print(f"Generated global brief for {ticker}")
             time.sleep(0.3)
         except Exception as e:
             print(f"Warning generating international brief for {ticker}: {e}")
+            conn = ensure_conn(conn)
+
+    return conn
 
 
-def backfill_existing_filing_drivers(conn, limit_tickers=8):
+def backfill_existing_filing_drivers(conn, limit_tickers=4):
     """Populates per-stock AI commodity drivers for stocks whose filings were already parsed in earlier runs."""
+    conn = ensure_conn(conn)
     with conn.cursor() as cur:
         cur.execute("""
             SELECT DISTINCT ON (f.ticker)
@@ -861,7 +909,9 @@ def backfill_existing_filing_drivers(conn, limit_tickers=8):
         if not ai_resp:
             break
         parsed = json.loads(ai_resp.text)
-        save_commodity_drivers(conn, ticker, ftype, fdate, parsed.get("commodity_drivers", []))
+        conn = save_commodity_drivers(conn, ticker, ftype, fdate, parsed.get("commodity_drivers", []))
+
+    return conn
 
 
 class SupplyChainBackfillBatch(BaseModel):
@@ -870,8 +920,9 @@ class SupplyChainBackfillBatch(BaseModel):
     downstream_customers: List[SupplyChainLink] = Field(default_factory=list)
 
 
-def backfill_existing_supply_chain(conn, limit_tickers=8):
+def backfill_existing_supply_chain(conn, limit_tickers=4):
     """Extracts upstream suppliers, competitors & downstream customers for US stocks whose filings were already parsed."""
+    conn = ensure_conn(conn)
     sec_map = fetch_sec_ticker_map()
     with conn.cursor() as cur:
         cur.execute("""
@@ -899,7 +950,6 @@ def backfill_existing_supply_chain(conn, limit_tickers=8):
             sub_resp.raise_for_status()
             recent = sub_resp.json()["filings"]["recent"]
 
-            # Prefer the most recent 10-K (has full Item 1 Raw Materials, Competition & Customer Concentration)
             target_idx = next((i for i, f in enumerate(recent["form"]) if f == "10-K"), None)
             if target_idx is None:
                 target_idx = next((i for i, f in enumerate(recent["form"]) if f == "10-Q"), None)
@@ -932,15 +982,19 @@ def backfill_existing_supply_chain(conn, limit_tickers=8):
             if not ai_resp:
                 break
             parsed = json.loads(ai_resp.text)
-            save_supply_chain_links(conn, ticker, form, f_date, parsed, excerpt)
+            conn = save_supply_chain_links(conn, ticker, form, f_date, parsed, excerpt)
             processed += 1
             print(f"Backfilled supply chain & competitors for {ticker} ({form} {f_date})")
             time.sleep(0.25)
         except Exception as e:
             print(f"Warning backfilling supply chain for {ticker}: {e}")
+            conn = ensure_conn(conn)
+
+    return conn
 
 
 def generate_market_macro_narrative(conn):
+    conn = ensure_conn(conn)
     with conn.cursor() as cur:
         cur.execute("""
             SELECT DISTINCT ON (input_code) input_code, input_name, value, unit, observation_date
@@ -961,7 +1015,7 @@ def generate_market_macro_narrative(conn):
 
     if not filings:
         print("No filings available yet to synthesize macro narrative.")
-        return
+        return conn
 
     comm_text = "\n".join([f"- {c[1]}: {c[2]} {c[3]} (as of {c[4]})" for c in commodities])
     filings_text = "\n".join([
@@ -983,9 +1037,10 @@ def generate_market_macro_narrative(conn):
 
     ai_resp = call_gemini(prompt, MacroNarrativeSchema)
     if not ai_resp:
-        return
+        return conn
     parsed = json.loads(ai_resp.text)
 
+    conn = ensure_conn(conn)
     with conn.cursor() as cur:
         cur.execute("""
             INSERT INTO macro_narrative (
@@ -1010,9 +1065,11 @@ def generate_market_macro_narrative(conn):
         ))
     conn.commit()
     print("Generated overarching AI Market & Theme Macro Narrative.")
+    return conn
 
 
 def generate_scoped_insights(conn):
+    conn = ensure_conn(conn)
     with conn.cursor() as cur:
         cur.execute("""
             SELECT DISTINCT ON (f.ticker)
@@ -1027,7 +1084,7 @@ def generate_scoped_insights(conn):
 
     if not rows:
         print("No filings available yet for scoped insights.")
-        return
+        return conn
 
     by_sub = {}
     by_theme = {}
@@ -1044,7 +1101,6 @@ def generate_scoped_insights(conn):
         for tag in (tags or []):
             by_theme.setdefault(tag, []).append((ticker, line))
 
-    # Process sub-sectors in isolated batches of 6 so each sub-sector only sees its own filings
     all_insights = []
     sub_items = sorted(by_sub.items(), key=lambda x: -len(x[1]))
 
@@ -1077,7 +1133,6 @@ def generate_scoped_insights(conn):
                 item["top_tickers"] = [t for t in item.get("top_tickers", []) if t in allowed_by_sub[sname]][:5]
                 all_insights.append(item)
 
-    # Generate Industry + Top Themes synthesis
     theme_items = sorted(by_theme.items(), key=lambda x: -len(x[1]))[:8]
     theme_blocks = []
     allowed_by_theme = {"Advanced Materials": {r[0] for r in rows}}
@@ -1105,6 +1160,7 @@ def generate_scoped_insights(conn):
                 item["top_tickers"] = [t for t in item.get("top_tickers", []) if t in allowed_by_theme[sname]][:5]
                 all_insights.append(item)
 
+    conn = ensure_conn(conn)
     with conn.cursor() as cur:
         cur.execute("DELETE FROM sector_theme_insights;")
         for item in all_insights:
@@ -1129,19 +1185,24 @@ def generate_scoped_insights(conn):
             ))
     conn.commit()
     print(f"Upserted {len(all_insights)} validated industry, sub-industry, and theme insights.")
+    return conn
 
 
 if __name__ == "__main__":
-    with psycopg.connect(DATABASE_URL, autocommit=True) as conn:
-        ensure_ai_tables(conn)
-        seed_sensitivity_map(conn)
-        process_sec_filings(conn, limit_tickers=8)
-        process_international_briefs(conn, limit_tickers=5)
-        backfill_existing_filing_drivers(conn, limit_tickers=8)
-        backfill_existing_supply_chain(conn, limit_tickers=8)
+    conn = connect_db()
+    try:
+        conn = ensure_ai_tables(conn)
+        conn = seed_sensitivity_map(conn)
+        conn = process_sec_filings(conn, limit_tickers=5)
+        conn = process_international_briefs(conn, limit_tickers=4)
+        conn = backfill_existing_filing_drivers(conn, limit_tickers=4)
+        conn = backfill_existing_supply_chain(conn, limit_tickers=4)
         try:
-            generate_market_macro_narrative(conn)
-            generate_scoped_insights(conn)
+            conn = generate_market_macro_narrative(conn)
+            conn = generate_scoped_insights(conn)
         except Exception as e:
             print(f"Skipping synthesis due to API error: {e}")
+    finally:
+        if conn and not conn.closed:
+            conn.close()
     print(f"AI Filings & Macro Synthesis pipeline finished ({requests_used} Gemini calls, {groq_requests_used} Groq calls used).")
