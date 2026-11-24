@@ -1,1 +1,30 @@
+name: "Task: Backfill Drivers & Value Chain"
 
+on:
+  workflow_dispatch:
+    inputs:
+      batch_limit:
+        description: "Number of companies to enrich per run"
+        required: false
+        default: "15"
+        type: string
+  workflow_call:
+    inputs:
+      batch_limit:
+        required: false
+        default: "10"
+        type: string
+
+jobs:
+  backfill-enrichment:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+      GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+      BATCH_LIMIT: ${{ inputs.batch_limit || '15' }}
+    steps:
+      - uses: ./.github/actions/setup-python
+      - name: Run commodity & supply-chain backfill
+        run: python pipeline/backfill_enrichment.py
