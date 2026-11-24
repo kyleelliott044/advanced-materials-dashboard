@@ -1,6 +1,15 @@
 "use client";
 
 import { useState, useMemo, useEffect } from "react";
+import {
+  CompanyProduct,
+  ExcludedProduct,
+  CompanyProductProfile,
+  rollupCompanyProducts,
+  buildCommodityReverseIndex,
+  buildCategoryPeerIndex,
+  RolledUpDrivers,
+} from "../lib/productRollup";
 
 export interface EquityRow {
   ticker: string;
@@ -93,6 +102,7 @@ type SortOption =
   | "rev_asc"
   | "country_asc"
   | "moat_desc"
+  | "products_desc"
   | "ticker_asc";
 
 const CONTRACT_BADGES: Record<string, { label: string; style: string }> = {
@@ -122,7 +132,6 @@ const CORE_THEMES = [
   "Pricing Power",
 ];
 
-// Fallback names if a sensitivity rule references an input not yet in raw_inputs
 const FALLBACK_INPUT_NAMES: Record<string, string> = {
   "HG=F": "Copper",
   "NG=F": "Natural Gas",
@@ -173,6 +182,9 @@ export default function DashboardClient({
   narrative,
   supplyChain = [],
   commodityDrivers = [],
+  products = [],
+  excludedProducts = [],
+  productProfiles = [],
 }: {
   equities: EquityRow[];
   inputs: RawInputRow[];
@@ -181,6 +193,9 @@ export default function DashboardClient({
   narrative: MacroNarrativeRow | null;
   supplyChain?: SupplyChainRow[];
   commodityDrivers?: CommodityDriverRow[];
+  products?: CompanyProduct[];
+  excludedProducts?: ExcludedProduct[];
+  productProfiles?: CompanyProductProfile[];
 }) {
   const [activeTab, setActiveTab] = useState<"screener" | "feed">("screener");
   const [narrativeTab, setNarrativeTab] = useState<
@@ -192,6 +207,7 @@ export default function DashboardClient({
   const [contractFilter, setContractFilter] = useState("ALL");
   const [sortBy, setSortBy] = useState<SortOption>("mcap_desc");
   const [selectedCommodity, setSelectedCommodity] = useState<string | null>(null);
+  const [selectedProductCategory, setSelectedProductCategory] = useState<string | null>(null);
   const [minQualYears, setMinQualYears] = useState(0);
   const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
   const [feedThemeFilter, setFeedThemeFilter] = useState("ALL");
@@ -212,17 +228,67 @@ export default function DashboardClient({
     localStorage.setItem("dashboard-theme", next ? "light" : "dark");
   };
 
-  // Map every input_code -> human-readable commodity name
-  const inputNameMap = useMemo(() => {
+  // Registry ID (input_code) -> display name map & valid registry ID set
+  const { inputNameMap, validRegistryCodes } = useMemo(() => {
     const map: Record<string, string> = { ...FALLBACK_INPUT_NAMES };
+    const codes = new Set<string>(Object.keys(FALLBACK_INPUT_NAMES));
     for (const item of inputs) {
       map[item.input_code] = item.input_name;
+      codes.add(item.input_code);
     }
-    return map;
+    return { inputNameMap: map, validRegistryCodes: codes };
   }, [inputs]);
 
   const getCommodityDisplayName = (code: string) =>
     inputNameMap[code] || code;
+
+  // Group products, excluded items, and notes by ticker
+  const tickerProductsMap = useMemo(() => {
+    const map: Record<string, CompanyProduct[]> = {};
+    for (const p of products) {
+      if (!map[p.ticker]) map[p.ticker] = [];
+      map[p.ticker].push(p);
+    }
+    return map;
+  }, [products]);
+
+  const tickerExcludedMap = useMemo(() => {
+    const map: Record<string, ExcludedProduct[]> = {};
+    for (const ex of excludedProducts) {
+      if (!map[ex.ticker]) map[ex.ticker] = [];
+      map[ex.ticker].push(ex);
+    }
+    return map;
+  }, [excludedProducts]);
+
+  const tickerNoteMap = useMemo(() => {
+    const map: Record<string, string> = {};
+    for (const prof of productProfiles) {
+      if (prof.note) map[prof.ticker] = prof.note;
+    }
+    return map;
+  }, [productProfiles]);
+
+  // Product rollup per company (strictly status === 'active'; supersedes legacy rules when present)
+  const tickerRollupMap = useMemo(() => {
+    const map: Record<string, RolledUpDrivers> = {};
+    for (const eq of equities) {
+      const prods = tickerProductsMap[eq.ticker] || [];
+      map[eq.ticker] = rollupCompanyProducts(prods, validRegistryCodes);
+    }
+    return map;
+  }, [equities, tickerProductsMap, validRegistryCodes]);
+
+  // Reverse indexes: commodity_ref -> products -> companies & category -> peers
+  const commodityReverseIndex = useMemo(
+    () => buildCommodityReverseIndex(products, validRegistryCodes),
+    [products, validRegistryCodes]
+  );
+
+  const categoryPeerIndex = useMemo(
+    () => buildCategoryPeerIndex(products),
+    [products]
+  );
 
   const sectors = useMemo(() => {
     const unique = new Set(
@@ -289,10 +355,90 @@ export default function DashboardClient({
     return map;
   }, [supplyChain]);
 
+  // Unified company-level cost_inputs & demand_proxies (rolled up from active products first; legacy fallback only if no products exist)
+  const companyDriversByRole = useMemo(() => {
+    const map: Record<
+      string,
+      {
+        costInputs: { code: string | null; label: string; detail?: string }[];
+        demandProxies: { code: string | null; label: string; detail?: string }[];
+        fromProductRollup: boolean;
+      }
+    > = {};
+
+    for (const eq of equities) {
+      const rollup = tickerRollupMap[eq.ticker];
+      if (rollup && rollup.isProductDerived) {
+        map[eq.ticker] = {
+          costInputs: rollup.costInputCodes.map((code) => ({
+            code,
+            label: getCommodityDisplayName(code),
+          })),
+          demandProxies: rollup.demandProxyCodes.map((code) => ({
+            code,
+            label: getCommodityDisplayName(code),
+          })),
+          fromProductRollup: true,
+        };
+        continue;
+      }
+
+      // Fallback for companies not yet decomposed into products
+      const aiDrivers = tickerDriversMap[eq.ticker] || [];
+      if (aiDrivers.length > 0) {
+        const costInputs = aiDrivers
+          .filter((d) => d.exposure_role === "Cost Input")
+          .map((d) => ({
+            code: d.matched_input_code,
+            label: d.commodity_name,
+            detail: d.mechanism_detail,
+          }));
+        const demandProxies = aiDrivers
+          .filter((d) => d.exposure_role !== "Cost Input")
+          .map((d) => ({
+            code: d.matched_input_code,
+            label: d.commodity_name,
+            detail: d.mechanism_detail,
+          }));
+        map[eq.ticker] = { costInputs, demandProxies, fromProductRollup: false };
+      } else {
+        const subRules = sectorSensitivitiesMap[eq.sub_sector || ""] || [];
+        const costInputs = subRules
+          .filter((r) => r.relationship_type === "Cost Input")
+          .map((r) => ({
+            code: r.input_code,
+            label: getCommodityDisplayName(r.input_code),
+            detail: r.mechanism_note,
+          }));
+        const demandProxies = subRules
+          .filter((r) => r.relationship_type !== "Cost Input")
+          .map((r) => ({
+            code: r.input_code,
+            label: getCommodityDisplayName(r.input_code),
+            detail: r.mechanism_note,
+          }));
+        map[eq.ticker] = { costInputs, demandProxies, fromProductRollup: false };
+      }
+    }
+
+    return map;
+  }, [equities, tickerRollupMap, tickerDriversMap, sectorSensitivitiesMap, inputNameMap]);
+
   const filteredEquities = useMemo(() => {
     const q = search.toLowerCase();
     const filtered = equities.filter((eq) => {
+      const activeProds = (tickerProductsMap[eq.ticker] || []).filter(
+        (p) => p.status === "active"
+      );
       const aiDrivers = tickerDriversMap[eq.ticker] || [];
+
+      const matchesProductSearch = activeProds.some(
+        (p) =>
+          p.name.toLowerCase().includes(q) ||
+          p.category.toLowerCase().includes(q) ||
+          p.downstream.end_demand.toLowerCase().includes(q) ||
+          p.raw_materials.some((rm) => rm.name.toLowerCase().includes(q))
+      );
       const matchesDriverSearch = aiDrivers.some((d) =>
         d.commodity_name.toLowerCase().includes(q)
       );
@@ -301,7 +447,9 @@ export default function DashboardClient({
         eq.company_name.toLowerCase().includes(q) ||
         (eq.sub_sector || "").toLowerCase().includes(q) ||
         (eq.country || "").toLowerCase().includes(q) ||
+        matchesProductSearch ||
         matchesDriverSearch;
+
       const matchesSector =
         sectorFilter === "ALL" || eq.sub_sector === sectorFilter;
       const matchesCountry =
@@ -310,16 +458,29 @@ export default function DashboardClient({
         contractFilter === "ALL" || eq.contract_type === contractFilter;
       const qual = Number(eq.qualification_years || 0);
 
+      // Reverse index: commodity -> products -> companies
       let matchesCommodity = true;
       if (selectedCommodity) {
-        const subRules = sectorSensitivitiesMap[eq.sub_sector || ""] || [];
-        const matchesSubRule = subRules.some(
-          (r) => r.input_code === selectedCommodity
-        );
-        const matchesAiDriver = aiDrivers.some(
-          (d) => d.matched_input_code === selectedCommodity
-        );
-        matchesCommodity = matchesSubRule || matchesAiDriver;
+        const revHit = commodityReverseIndex[selectedCommodity]?.[eq.ticker];
+        if (activeProds.length > 0) {
+          matchesCommodity = Boolean(revHit && revHit.products.length > 0);
+        } else {
+          const subRules = sectorSensitivitiesMap[eq.sub_sector || ""] || [];
+          const matchesSubRule = subRules.some(
+            (r) => r.input_code === selectedCommodity
+          );
+          const matchesAiDriver = aiDrivers.some(
+            (d) => d.matched_input_code === selectedCommodity
+          );
+          matchesCommodity = Boolean(revHit) || matchesSubRule || matchesAiDriver;
+        }
+      }
+
+      // Reverse index: product category -> peers across companies
+      let matchesCategory = true;
+      if (selectedProductCategory) {
+        const catInfo = categoryPeerIndex[selectedProductCategory];
+        matchesCategory = Boolean(catInfo && catInfo.tickers.has(eq.ticker));
       }
 
       return (
@@ -328,11 +489,20 @@ export default function DashboardClient({
         matchesCountry &&
         matchesContract &&
         matchesCommodity &&
+        matchesCategory &&
         qual >= minQualYears
       );
     });
 
     return [...filtered].sort((a, b) => {
+      if (sortBy === "products_desc") {
+        const diff =
+          (tickerRollupMap[b.ticker]?.activeProductCount ?? 0) -
+          (tickerRollupMap[a.ticker]?.activeProductCount ?? 0);
+        return diff !== 0
+          ? diff
+          : (b.market_cap_usd ?? -1) - (a.market_cap_usd ?? -1);
+      }
       if (sortBy === "mcap_desc") {
         const diff = (b.market_cap_usd ?? -1) - (a.market_cap_usd ?? -1);
         return diff !== 0 ? diff : a.ticker.localeCompare(b.ticker);
@@ -350,7 +520,9 @@ export default function DashboardClient({
         return diff !== 0 ? diff : a.ticker.localeCompare(b.ticker);
       }
       if (sortBy === "country_asc") {
-        const countryDiff = (a.country || "ZZZ").localeCompare(b.country || "ZZZ");
+        const countryDiff = (a.country || "ZZZ").localeCompare(
+          b.country || "ZZZ"
+        );
         if (countryDiff !== 0) return countryDiff;
         return (b.market_cap_usd ?? -1) - (a.market_cap_usd ?? -1);
       }
@@ -369,6 +541,11 @@ export default function DashboardClient({
     contractFilter,
     sortBy,
     selectedCommodity,
+    selectedProductCategory,
+    commodityReverseIndex,
+    categoryPeerIndex,
+    tickerProductsMap,
+    tickerRollupMap,
     sectorSensitivitiesMap,
     tickerDriversMap,
     minQualYears,
@@ -383,6 +560,18 @@ export default function DashboardClient({
     () => equities.find((e) => e.ticker === selectedTicker) || null,
     [equities, selectedTicker]
   );
+
+  const selectedEquityProducts = selectedTicker
+    ? tickerProductsMap[selectedTicker] || []
+    : [];
+
+  const selectedEquityExcluded = selectedTicker
+    ? tickerExcludedMap[selectedTicker] || []
+    : [];
+
+  const selectedEquityNote = selectedTicker
+    ? tickerNoteMap[selectedTicker] || null
+    : null;
 
   const selectedEquityFilings = selectedTicker
     ? tickerFilingsMap[selectedTicker] || []
@@ -419,6 +608,22 @@ export default function DashboardClient({
     );
   }, [equities, selectedEquity]);
 
+  // Helper: click a logged commodity chip in the dossier -> filter products -> companies
+  const handleSelectCommodityFromDossier = (code: string) => {
+    setSelectedCommodity(code);
+    setSelectedProductCategory(null);
+    setActiveTab("screener");
+    setSelectedTicker(null);
+  };
+
+  // Helper: click a product category in the dossier -> filter peers across companies
+  const handleSelectCategoryFromDossier = (category: string) => {
+    setSelectedProductCategory(category);
+    setSelectedCommodity(null);
+    setActiveTab("screener");
+    setSelectedTicker(null);
+  };
+
   return (
     <div className="min-h-screen bg-[#090d16] text-slate-100 font-sans selection:bg-sky-500/30">
       {/* Top Bar */}
@@ -432,7 +637,7 @@ export default function DashboardClient({
               </h1>
             </div>
             <p className="text-xs text-slate-400 mt-0.5">
-              {coveredCompanyCount} of {equities.length} Companies Covered • {filings.length} AI-Parsed Filings &amp; Profiles • Commodity Sensitivity Engine
+              {coveredCompanyCount} of {equities.length} Companies Covered • {filings.length} AI-Parsed Filings &amp; Profiles • Product &amp; Commodity Sensitivity Engine
             </p>
           </div>
 
@@ -534,19 +739,27 @@ export default function DashboardClient({
           </div>
         </section>
 
-        {/* Interactive Commodity & Macro Filter Cards (Named Commodities, Not Codes) */}
+        {/* Interactive Commodity & Macro Filter Cards */}
         <section>
-          <div className="flex items-center justify-between mb-3">
-            <div className="flex items-center gap-3">
+          <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+            <div className="flex items-center gap-3 flex-wrap">
               <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                Click Any Commodity or Macro Driver to Filter Exposed Stocks
+                Click Any Commodity or Macro Driver to Filter Products &amp; Exposed Stocks
               </h2>
               {selectedCommodity && (
                 <button
                   onClick={() => setSelectedCommodity(null)}
                   className="text-xs font-mono text-sky-400 hover:text-sky-300 underline"
                 >
-                  Clear Filter ({getCommodityDisplayName(selectedCommodity)})
+                  Clear Commodity ({getCommodityDisplayName(selectedCommodity)})
+                </button>
+              )}
+              {selectedProductCategory && (
+                <button
+                  onClick={() => setSelectedProductCategory(null)}
+                  className="text-xs font-mono text-purple-400 hover:text-purple-300 underline"
+                >
+                  Clear Product Category ({selectedProductCategory})
                 </button>
               )}
             </div>
@@ -556,6 +769,9 @@ export default function DashboardClient({
           <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-4 gap-3">
             {inputs.map((item) => {
               const isSelected = selectedCommodity === item.input_code;
+              const linkedCompanyCount = Object.keys(
+                commodityReverseIndex[item.input_code] || {}
+              ).length;
               return (
                 <button
                   key={item.input_code}
@@ -573,11 +789,18 @@ export default function DashboardClient({
                     <span className="text-[11px] font-medium text-sky-400 truncate">
                       {item.category || "Macro Input"}
                     </span>
-                    {item.is_proxy && (
-                      <span className="px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[9px] font-mono uppercase shrink-0">
-                        AI Spot
-                      </span>
-                    )}
+                    <div className="flex items-center gap-1 shrink-0">
+                      {linkedCompanyCount > 0 && (
+                        <span className="px-1.5 py-0.2 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 text-[9px] font-mono">
+                          {linkedCompanyCount} Prod. Co.
+                        </span>
+                      )}
+                      {item.is_proxy && (
+                        <span className="px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[9px] font-mono uppercase">
+                          AI Spot
+                        </span>
+                      )}
+                    </div>
                   </div>
                   <div className="mt-1 text-xs font-semibold text-white line-clamp-1">
                     {item.input_name}
@@ -599,17 +822,17 @@ export default function DashboardClient({
           </div>
         </section>
 
-        {/* TAB 1: Equity Universe & Commodity Exposure Table */}
+        {/* TAB 1: Equity Universe & Product/Commodity Exposure Table */}
         {activeTab === "screener" && (
           <section className="space-y-4">
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-6 gap-3 bg-[#111827]/80 border border-slate-800 rounded-xl p-4">
               <div className="sm:col-span-2 lg:col-span-2">
                 <label className="block text-[11px] font-mono uppercase text-slate-400 mb-1.5">
-                  Search Ticker, Company, Commodity, or Country
+                  Search Ticker, Company, Product, Commodity, or Country
                 </label>
                 <input
                   type="text"
-                  placeholder="Search e.g. 'Nickel', 'Titanium', 'TSMC', or click row..."
+                  placeholder="Search e.g. 'CMP', 'Cobalt', 'OLED', 'MRK.DE'..."
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
                   className="w-full rounded-lg bg-[#090d16] border border-slate-700/80 px-3.5 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-sky-500"
@@ -677,6 +900,7 @@ export default function DashboardClient({
                 >
                   <option value="mcap_desc">Market Cap USD (High → Low)</option>
                   <option value="mcap_asc">Market Cap USD (Low → High)</option>
+                  <option value="products_desc">Active Products (High → Low)</option>
                   <option value="rev_desc">Adv. Mat. Rev % (High → Low)</option>
                   <option value="rev_asc">Adv. Mat. Rev % (Low → High)</option>
                   <option value="country_asc">Country (A → Z)</option>
@@ -702,6 +926,8 @@ export default function DashboardClient({
                   sectorFilter !== "ALL" ||
                   contractFilter !== "ALL" ||
                   minQualYears > 0 ||
+                  selectedCommodity ||
+                  selectedProductCategory ||
                   search) && (
                   <button
                     onClick={() => {
@@ -710,28 +936,73 @@ export default function DashboardClient({
                       setSectorFilter("ALL");
                       setContractFilter("ALL");
                       setMinQualYears(0);
+                      setSelectedCommodity(null);
+                      setSelectedProductCategory(null);
                     }}
                     className="ml-auto text-xs font-mono text-sky-400 hover:text-sky-300 underline"
                   >
-                    Reset Filters
+                    Reset All Filters
                   </button>
                 )}
               </div>
             </div>
 
+            {/* Active Reverse-Index Banner: Commodity -> Products -> Companies or Category -> Peers */}
+            {(selectedCommodity || selectedProductCategory) && (
+              <div className="rounded-xl border border-sky-500/35 bg-sky-950/25 px-5 py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                <div>
+                  {selectedCommodity && (
+                    <div className="space-y-1">
+                      <div className="font-semibold text-sky-300">
+                        Reverse Index: {getCommodityDisplayName(selectedCommodity)} &rarr; Matching Products &rarr; Companies
+                      </div>
+                      <div className="text-slate-300">
+                        {Object.keys(commodityReverseIndex[selectedCommodity] || {}).length > 0
+                          ? `Matched across ${
+                              Object.values(commodityReverseIndex[selectedCommodity] || {}).reduce(
+                                (acc, h) => acc + h.products.length,
+                                0
+                              )
+                            } active product(s) in ${
+                              Object.keys(commodityReverseIndex[selectedCommodity] || {}).length
+                            } decomposed company/companies (plus legacy sub-sector matches below).`
+                          : "Filtered via sub-sector & filing commodity rules (no decomposed products linked yet)."}
+                      </div>
+                    </div>
+                  )}
+                  {selectedProductCategory && (
+                    <div className="space-y-1">
+                      <div className="font-semibold text-purple-300">
+                        Product Category Peers: {selectedProductCategory}
+                      </div>
+                      <div className="text-slate-300">
+                        Showing all companies with active products in{" "}
+                        <span className="text-white font-medium">{selectedProductCategory}</span>{" "}
+                        and their mapped peer tickers.
+                      </div>
+                    </div>
+                  )}
+                </div>
+                <button
+                  onClick={() => {
+                    setSelectedCommodity(null);
+                    setSelectedProductCategory(null);
+                  }}
+                  className="px-3 py-1 rounded bg-slate-800 hover:bg-slate-700 text-xs font-mono text-slate-200 shrink-0"
+                >
+                  Clear Reverse Filter ✕
+                </button>
+              </div>
+            )}
+
             <div className="rounded-xl border border-slate-800 bg-[#111827]/70 overflow-hidden">
               <div className="px-5 py-3 border-b border-slate-800 flex items-center justify-between text-xs text-slate-400">
                 <span>
                   Showing <strong className="text-white">{filteredEquities.length}</strong> of{" "}
-                  {equities.length} companies{" "}
-                  {selectedCommodity && (
-                    <span className="text-sky-400 font-medium">
-                      — Exposed to {getCommodityDisplayName(selectedCommodity)}
-                    </span>
-                  )}
+                  {equities.length} companies
                 </span>
                 <span className="text-sky-400 font-medium">
-                  Click any company row for AI Commodity, Value-Chain &amp; Filing Dossier &rarr;
+                  Click any company row for Products, Value-Chain &amp; Filing Dossier &rarr;
                 </span>
               </div>
 
@@ -743,13 +1014,24 @@ export default function DashboardClient({
                       <th className="py-3.5 px-4">Company</th>
                       <th className="py-3.5 px-4">Country</th>
                       <th className="py-3.5 px-4 text-right">Market Cap</th>
-                      <th className="py-3.5 px-4 text-right">Adv. Mat. Rev</th>
-                      <th className="py-3.5 px-4">Commodity Drivers</th>
+                      <th className="py-3.5 px-4 text-center">Products</th>
+                      <th
+                        className="py-3.5 px-4"
+                        title="Raw materials -> margin (lagged), rolled up from active products"
+                      >
+                        Cost Inputs (Margin)
+                      </th>
+                      <th
+                        className="py-3.5 px-4"
+                        title="Downstream end-demand -> volume, rolled up from active products"
+                      >
+                        Demand Proxies (Volume)
+                      </th>
                       <th
                         className="py-3.5 px-4"
                         title="Analyst-classified contract pricing structure"
                       >
-                        Est. Pricing Model
+                        Est. Pricing
                       </th>
                       <th className="py-3.5 px-4">AI Filings</th>
                       <th
@@ -768,31 +1050,16 @@ export default function DashboardClient({
                           style: "bg-slate-800 text-slate-300 border-slate-700",
                         };
                       const qual = Number(eq.qualification_years || 0);
-                      const revPct = eq.adv_mat_rev_pct;
-                      const aiDrivers = tickerDriversMap[eq.ticker] || [];
-                      const subRules = sectorSensitivitiesMap[eq.sub_sector || ""] || [];
+                      const rollup = tickerRollupMap[eq.ticker];
+                      const roleDrivers = companyDriversByRole[eq.ticker] || {
+                        costInputs: [],
+                        demandProxies: [],
+                        fromProductRollup: false,
+                      };
                       const eqFilings = tickerFilingsMap[eq.ticker] || [];
-
-                      // Prefer AI-extracted stock-level commodity drivers; fall back to named sub-sector rules
-                      const pillItems =
-                        aiDrivers.length > 0
-                          ? aiDrivers.slice(0, 4).map((d) => ({
-                              label: d.commodity_name,
-                              direction: d.impact_direction,
-                              tooltip: `${d.exposure_role} (${d.impact_direction}): ${d.mechanism_detail}`,
-                            }))
-                          : subRules.slice(0, 4).map((r) => ({
-                              label: getCommodityDisplayName(r.input_code),
-                              direction: r.impact_direction,
-                              tooltip: `${r.relationship_type}: ${r.mechanism_note}`,
-                            }));
-
-                      const extraCount =
-                        aiDrivers.length > 4
-                          ? aiDrivers.length - 4
-                          : aiDrivers.length === 0 && subRules.length > 4
-                          ? subRules.length - 4
-                          : 0;
+                      const matchedCommodityProducts = selectedCommodity
+                        ? commodityReverseIndex[selectedCommodity]?.[eq.ticker]?.products || []
+                        : [];
 
                       return (
                         <tr
@@ -806,6 +1073,18 @@ export default function DashboardClient({
                           <td className="py-3.5 px-4">
                             <div className="font-medium text-white">{eq.company_name}</div>
                             <div className="text-xs text-slate-400">{eq.sub_sector}</div>
+                            {matchedCommodityProducts.length > 0 && (
+                              <div className="mt-1 flex flex-wrap gap-1">
+                                {matchedCommodityProducts.map((mp) => (
+                                  <span
+                                    key={mp.id}
+                                    className="px-1.5 py-0.2 rounded bg-sky-500/20 text-sky-200 border border-sky-400/40 text-[10px] font-mono"
+                                  >
+                                    Match: {mp.name}
+                                  </span>
+                                ))}
+                              </div>
+                            )}
                           </td>
                           <td className="py-3.5 px-4 text-xs text-slate-300 whitespace-nowrap">
                             {eq.country || "—"}
@@ -813,53 +1092,102 @@ export default function DashboardClient({
                           <td className="py-3.5 px-4 text-right font-mono text-xs text-slate-200 whitespace-nowrap">
                             {formatMarketCap(eq.market_cap_usd)}
                           </td>
-                          <td className="py-3.5 px-4 text-right font-mono">
-                            {revPct != null ? (
+                          <td className="py-3.5 px-4 text-center font-mono">
+                            {rollup && rollup.activeProductCount > 0 ? (
                               <span
-                                className={`inline-block px-2 py-0.5 rounded text-xs font-semibold border ${
-                                  revPct >= 80
-                                    ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/30"
-                                    : revPct >= 40
-                                    ? "bg-sky-500/15 text-sky-300 border-sky-500/30"
-                                    : "bg-slate-800 text-slate-300 border-slate-700"
-                                }`}
+                                className="inline-flex items-center px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 text-xs font-semibold"
+                                title={
+                                  rollup.unloggedMaterials.length > 0
+                                    ? `${rollup.activeProductCount} active products (${rollup.unloggedMaterials.length} unlogged raw materials)`
+                                    : `${rollup.activeProductCount} active products`
+                                }
                               >
-                                {revPct}%
+                                {rollup.activeProductCount}
                               </span>
                             ) : (
                               <span className="text-xs text-slate-600">—</span>
                             )}
                           </td>
+
+                          {/* Cost Inputs (Raw Materials -> Margin) */}
                           <td className="py-3.5 px-4">
-                            <div className="flex flex-wrap gap-1.5 max-w-xs">
-                              {pillItems.length === 0 ? (
-                                <span className="text-xs text-slate-500">—</span>
+                            <div className="flex flex-wrap gap-1.5 max-w-[210px]">
+                              {roleDrivers.costInputs.length === 0 ? (
+                                rollup?.unloggedMaterials.length ? (
+                                  <span
+                                    className="px-2 py-0.5 rounded text-[10px] font-mono border border-dashed border-slate-600 text-slate-400"
+                                    title={`Unlogged raw materials: ${rollup.unloggedMaterials.join(", ")}`}
+                                  >
+                                    {rollup.unloggedMaterials.length} unlogged
+                                  </span>
+                                ) : (
+                                  <span className="text-xs text-slate-500">—</span>
+                                )
                               ) : (
                                 <>
-                                  {pillItems.map((p, idx) => (
+                                  {roleDrivers.costInputs.slice(0, 3).map((ci, idx) => (
                                     <span
-                                      key={`${p.label}-${idx}`}
-                                      className={`px-2 py-0.5 rounded text-[11px] font-medium border ${
-                                        p.direction.includes("Inverse")
-                                          ? "bg-rose-500/10 text-rose-300 border-rose-500/30"
-                                          : p.direction.includes("Direct")
-                                          ? "bg-emerald-500/10 text-emerald-300 border-emerald-500/30"
-                                          : "bg-sky-500/10 text-sky-300 border-sky-500/30"
-                                      }`}
-                                      title={p.tooltip}
+                                      key={`${ci.label}-${idx}`}
+                                      className="px-2 py-0.5 rounded text-[11px] font-medium border bg-rose-500/10 text-rose-300 border-rose-500/30"
+                                      title={
+                                        ci.detail ||
+                                        (roleDrivers.fromProductRollup
+                                          ? "Rolled up from active products (cost input -> margin)"
+                                          : undefined)
+                                      }
                                     >
-                                      {p.label}
+                                      {ci.label}
                                     </span>
                                   ))}
-                                  {extraCount > 0 && (
+                                  {roleDrivers.costInputs.length > 3 && (
                                     <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-slate-800 text-slate-400 border border-slate-700">
-                                      +{extraCount}
+                                      +{roleDrivers.costInputs.length - 3}
+                                    </span>
+                                  )}
+                                  {rollup && rollup.unloggedMaterials.length > 0 && (
+                                    <span
+                                      className="px-1.5 py-0.5 rounded text-[10px] font-mono border border-dashed border-slate-600 text-slate-400"
+                                      title={`Unlogged raw materials: ${rollup.unloggedMaterials.join(", ")}`}
+                                    >
+                                      +{rollup.unloggedMaterials.length} unlogged
                                     </span>
                                   )}
                                 </>
                               )}
                             </div>
                           </td>
+
+                          {/* Demand Proxies (Downstream -> Volume) */}
+                          <td className="py-3.5 px-4">
+                            <div className="flex flex-wrap gap-1.5 max-w-[210px]">
+                              {roleDrivers.demandProxies.length === 0 ? (
+                                <span className="text-xs text-slate-500">—</span>
+                              ) : (
+                                <>
+                                  {roleDrivers.demandProxies.slice(0, 3).map((dp, idx) => (
+                                    <span
+                                      key={`${dp.label}-${idx}`}
+                                      className="px-2 py-0.5 rounded text-[11px] font-medium border bg-emerald-500/10 text-emerald-300 border-emerald-500/30"
+                                      title={
+                                        dp.detail ||
+                                        (roleDrivers.fromProductRollup
+                                          ? "Rolled up from active products (downstream -> volume)"
+                                          : undefined)
+                                      }
+                                    >
+                                      {dp.label}
+                                    </span>
+                                  ))}
+                                  {roleDrivers.demandProxies.length > 3 && (
+                                    <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-slate-800 text-slate-400 border border-slate-700">
+                                      +{roleDrivers.demandProxies.length - 3}
+                                    </span>
+                                  )}
+                                </>
+                              )}
+                            </div>
+                          </td>
+
                           <td className="py-3.5 px-4">
                             <span
                               className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border ${badge.style}`}
@@ -978,7 +1306,7 @@ export default function DashboardClient({
       {/* Slide-Over Company Deep-Dive Dossier Drawer */}
       {selectedEquity && (
         <div className="fixed inset-0 z-50 flex justify-end bg-black/70 backdrop-blur-sm">
-          <div className="w-full max-w-2xl bg-[#0c1220] border-l border-slate-800 h-full overflow-y-auto p-6 space-y-6 shadow-2xl">
+          <div className="w-full max-w-3xl bg-[#0c1220] border-l border-slate-800 h-full overflow-y-auto p-6 space-y-6 shadow-2xl">
             <div className="flex items-start justify-between border-b border-slate-800 pb-4">
               <div>
                 <div className="flex items-center gap-2.5 flex-wrap">
@@ -1025,6 +1353,236 @@ export default function DashboardClient({
               >
                 Close ✕
               </button>
+            </div>
+
+            {/* PRODUCTS TABLE: [Raw Material] -> [Product] -> [Downstream] */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between flex-wrap gap-2">
+                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                  Advanced Materials Products ({selectedEquityProducts.filter((p) => p.status === "active").length} Active)
+                </h3>
+                <span className="text-[10px] font-mono text-slate-400">
+                  Click solid raw material to filter companies • Click category for peers
+                </span>
+              </div>
+
+              {selectedEquityNote && (
+                <div className="rounded-lg bg-slate-900/90 border border-slate-800 px-3.5 py-2 text-xs text-slate-300">
+                  {selectedEquityNote}
+                </div>
+              )}
+
+              {selectedEquityProducts.length === 0 ? (
+                <p className="text-xs text-slate-500">
+                  Product-level decomposition not yet populated for this ticker.
+                </p>
+              ) : (
+                <div className="rounded-xl border border-slate-800 bg-[#111827] overflow-hidden">
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-left border-collapse text-xs">
+                      <thead>
+                        <tr className="border-b border-slate-800 bg-[#090d16] text-[10px] font-mono uppercase text-slate-400">
+                          <th className="py-2.5 px-3.5">Value-Chain Flow ([Raw Material] &rarr; [Product] &rarr; [Downstream])</th>
+                          <th className="py-2.5 px-3.5">Category &amp; Specs</th>
+                          <th className="py-2.5 px-3.5 text-right">Status / Conf.</th>
+                        </tr>
+                      </thead>
+                      <tbody className="divide-y divide-slate-800/70">
+                        {selectedEquityProducts.map((prod) => {
+                          const proxyCode = prod.downstream?.demand_proxy_ref;
+                          const isProxyValid = Boolean(
+                            proxyCode && validRegistryCodes.has(proxyCode)
+                          );
+
+                          return (
+                            <tr
+                              key={prod.id}
+                              className={
+                                prod.status === "divested"
+                                  ? "opacity-55 bg-slate-950/50"
+                                  : "hover:bg-slate-800/40"
+                              }
+                            >
+                              {/* Chain Chips: [raw material] -> [product] -> [downstream (emphasized accent fill)] */}
+                              <td className="py-3 px-3.5 align-top space-y-2">
+                                <div className="flex flex-wrap items-center gap-1.5">
+                                  {/* Raw Material Chips */}
+                                  <div className="flex flex-wrap items-center gap-1">
+                                    {(prod.raw_materials || []).map((rm, rIdx) => {
+                                      const isLogged = Boolean(
+                                        rm.commodity_ref &&
+                                          validRegistryCodes.has(rm.commodity_ref)
+                                      );
+                                      if (isLogged && rm.commodity_ref) {
+                                        return (
+                                          <button
+                                            key={`${rm.name}-${rIdx}`}
+                                            type="button"
+                                            onClick={() =>
+                                              handleSelectCommodityFromDossier(
+                                                rm.commodity_ref!
+                                              )
+                                            }
+                                            title={`Logged registry commodity: ${getCommodityDisplayName(
+                                              rm.commodity_ref
+                                            )} (${rm.role} • ${rm.basis}). Click to reverse-filter companies.`}
+                                            className="px-2 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-solid border-amber-400/60 font-medium transition cursor-pointer"
+                                          >
+                                            {rm.name}
+                                          </button>
+                                        );
+                                      }
+                                      return (
+                                        <span
+                                          key={`${rm.name}-${rIdx}`}
+                                          title={`Unlogged raw material (${rm.role} • ${rm.basis}) — not yet in commodity registry`}
+                                          className="px-2 py-0.5 rounded bg-slate-900/70 text-slate-400 border border-dashed border-slate-600 inline-flex items-center gap-1"
+                                        >
+                                          <span>{rm.name}</span>
+                                          <span className="text-[9px] font-mono uppercase text-slate-500">
+                                            unlogged
+                                          </span>
+                                        </span>
+                                      );
+                                    })}
+                                  </div>
+
+                                  <span className="text-slate-500 font-mono">&rarr;</span>
+
+                                  {/* Company Product Chip */}
+                                  <span className="px-2.5 py-0.5 rounded bg-slate-800 text-white border border-slate-600 font-semibold">
+                                    {prod.name}
+                                  </span>
+
+                                  <span className="text-slate-500 font-mono">&rarr;</span>
+
+                                  {/* Downstream Chip (Emphasized Accent Fill) */}
+                                  {isProxyValid && proxyCode ? (
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        handleSelectCommodityFromDossier(proxyCode)
+                                      }
+                                      title={`Downstream demand proxy: ${getCommodityDisplayName(
+                                        proxyCode
+                                      )} (${prod.downstream.process_step} -> ${
+                                        prod.downstream.end_product
+                                      }). Click to reverse-filter companies.`}
+                                      className="px-2.5 py-0.5 rounded bg-sky-500 text-slate-950 font-semibold shadow-sm shadow-sky-500/30 hover:bg-sky-400 transition cursor-pointer"
+                                    >
+                                      {prod.downstream.end_demand}
+                                    </button>
+                                  ) : (
+                                    <span
+                                      title={`${prod.downstream.process_step} -> ${prod.downstream.end_product}`}
+                                      className="px-2.5 py-0.5 rounded bg-sky-500 text-slate-950 font-semibold shadow-sm shadow-sky-500/30"
+                                    >
+                                      {prod.downstream.end_demand}
+                                    </span>
+                                  )}
+                                </div>
+
+                                <div className="text-[11px] text-slate-400">
+                                  <span className="text-slate-500">Process:</span>{" "}
+                                  {prod.downstream.process_step} &bull;{" "}
+                                  <span className="text-slate-500">End Product:</span>{" "}
+                                  {prod.downstream.end_product}
+                                </div>
+
+                                {prod.peers && prod.peers.length > 0 && (
+                                  <div className="flex flex-wrap items-center gap-1 pt-0.5">
+                                    <span className="text-[10px] font-mono text-slate-500">
+                                      Product Peers:
+                                    </span>
+                                    {prod.peers.map((peerTk) => (
+                                      <button
+                                        key={peerTk}
+                                        type="button"
+                                        onClick={() => setSelectedTicker(peerTk)}
+                                        className="px-1.5 py-0.2 rounded bg-[#090d16] hover:bg-slate-800 text-sky-400 border border-slate-700 font-mono text-[10px]"
+                                      >
+                                        {peerTk}
+                                      </button>
+                                    ))}
+                                  </div>
+                                )}
+                              </td>
+
+                              {/* Clickable Category + Advanced Qualification Specs */}
+                              <td className="py-3 px-3.5 align-top space-y-1.5 max-w-[220px]">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleSelectCategoryFromDossier(prod.category)
+                                  }
+                                  title="Click to view all peer companies in this product category"
+                                  className="px-2 py-0.5 rounded bg-purple-500/15 hover:bg-purple-500/25 text-purple-300 border border-purple-500/35 font-medium text-left transition cursor-pointer"
+                                >
+                                  {prod.category}
+                                </button>
+                                <div className="text-[10px] font-mono text-slate-400">
+                                  BU: {prod.business_unit}
+                                </div>
+                                <div className="text-[11px] text-slate-300 leading-snug">
+                                  <span className="text-slate-500">Spec:</span>{" "}
+                                  {prod.advanced.performance_spec}
+                                </div>
+                                <div className="text-[10px] text-slate-400">
+                                  <span className="text-slate-500">Barrier:</span>{" "}
+                                  {prod.advanced.switching_barrier}
+                                </div>
+                              </td>
+
+                              {/* Status, As-Of, Confidence & Source */}
+                              <td className="py-3 px-3.5 align-top text-right font-mono space-y-1 whitespace-nowrap">
+                                <div>
+                                  <span
+                                    className={`px-1.5 py-0.5 rounded text-[10px] uppercase ${
+                                      prod.status === "active"
+                                        ? "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
+                                        : "bg-rose-500/15 text-rose-300 border border-rose-500/30"
+                                    }`}
+                                  >
+                                    {prod.status}
+                                  </span>
+                                </div>
+                                <div className="text-[10px] text-slate-400">
+                                  {prod.as_of}
+                                </div>
+                                <div className="text-[10px] text-slate-500">
+                                  conf: {prod.conf} ({prod.src.type})
+                                </div>
+                                {prod.pricing_structure && (
+                                  <div className="text-[10px] text-sky-300">
+                                    {prod.pricing_structure}
+                                  </div>
+                                )}
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+              )}
+
+              {/* Excluded Non-Materials / Divested Items */}
+              {selectedEquityExcluded.length > 0 && (
+                <div className="rounded-lg bg-[#111827]/70 border border-slate-800/80 p-3 space-y-1.5">
+                  <div className="text-[10px] font-mono uppercase text-slate-400">
+                    Excluded Segments / Non-Material Lines ({selectedEquityExcluded.length})
+                  </div>
+                  <div className="space-y-1">
+                    {selectedEquityExcluded.map((ex, i) => (
+                      <div key={`${ex.name}-${i}`} className="text-xs text-slate-400">
+                        <span className="text-slate-300 font-medium">{ex.name}:</span>{" "}
+                        {ex.reason}
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
             </div>
 
             {/* In-Depth AI Company-Specific Commodity & Input Breakdown */}
@@ -1329,7 +1887,7 @@ export default function DashboardClient({
               </div>
             </div>
 
-            {/* Last Few 10-K / 10-Q / Earnings Reports */}
+            {/* Recent 10-K / 10-Q / Company Profile Intelligence */}
             <div className="space-y-3">
               <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
                 Recent 10-K, 10-Q &amp; Company Profile Intelligence ({selectedEquityFilings.length})
