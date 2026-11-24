@@ -1,0 +1,30 @@
+name: Backfill Commodity Drivers & Supply Chain
+
+on:
+  workflow_dispatch:
+    inputs:
+      batch_size:
+        description: 'Number of already-analyzed stocks to enrich per run'
+        required: false
+        default: '25'
+
+jobs:
+  backfill-enrichment:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install dependencies
+        run: pip install -r pipeline/requirements.txt
+
+      - name: Backfill AI commodity drivers & supply chain links
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          BATCH_LIMIT: ${{ github.event.inputs.batch_size || '25' }}
+        run: python pipeline/backfill_enrichment.py
