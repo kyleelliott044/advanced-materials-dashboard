@@ -106,17 +106,17 @@ class SupplyChainLink(BaseModel):
         description="True ONLY if a specific company or organization name is explicitly stated in the text."
     )
     material_or_product: str = Field(
-        description="Specific raw material/feedstock purchased (for suppliers) or engineered product/material sold (for customers)."
+        description="Specific raw material/feedstock purchased (for suppliers), overlapping product/segment (for competitors), or engineered product/material sold (for customers)."
     )
     is_sole_source: bool = Field(
-        description="True if text notes single-source, sole-supplier, limited-source, or 10%+ customer concentration."
+        description="True if text notes single-source, sole-supplier, limited-source, primary/direct rival, or 10%+ customer concentration."
     )
     exposure_pct: Optional[float] = Field(
         default=None,
-        description="Disclosed % of revenue or raw material spend if stated, otherwise null.",
+        description="Disclosed % of revenue, raw material spend, or market share if stated, otherwise null.",
     )
     source_quote: str = Field(
-        description="Verbatim 10-30 word quote from the source text proving this supplier or customer relationship."
+        description="Verbatim 10-30 word quote from the source text proving this supplier, competitor, or customer relationship."
     )
 
 
@@ -127,6 +127,10 @@ class EnrichmentBackfillSchema(BaseModel):
     upstream_suppliers: List[SupplyChainLink] = Field(
         default_factory=list,
         description="Disclosed upstream raw material suppliers, feedstock sources, or sole-source/limited-source inputs.",
+    )
+    competitors: List[SupplyChainLink] = Field(
+        default_factory=list,
+        description="Explicitly named competitors or rival manufacturers disclosed in Item 1 Competition or MD&A.",
     )
     downstream_customers: List[SupplyChainLink] = Field(
         default_factory=list,
@@ -160,7 +164,7 @@ def ensure_tables(conn):
             CREATE TABLE IF NOT EXISTS equity_supply_chain (
               id SERIAL PRIMARY KEY,
               ticker TEXT NOT NULL REFERENCES equities_universe(ticker) ON DELETE CASCADE,
-              direction TEXT NOT NULL CHECK (direction IN ('upstream_supplier', 'downstream_customer')),
+              direction TEXT NOT NULL,
               counterparty_name TEXT NOT NULL,
               is_named_entity BOOLEAN DEFAULT TRUE,
               material_or_product TEXT NOT NULL,
@@ -172,6 +176,13 @@ def ensure_tables(conn):
               updated_at TIMESTAMPTZ DEFAULT NOW(),
               UNIQUE (ticker, direction, counterparty_name, material_or_product)
             );
+
+            ALTER TABLE equity_supply_chain
+              DROP CONSTRAINT IF EXISTS equity_supply_chain_direction_check;
+
+            ALTER TABLE equity_supply_chain
+              ADD CONSTRAINT equity_supply_chain_direction_check
+              CHECK (direction IN ('upstream_supplier', 'downstream_customer', 'competitor'));
         """)
     conn.commit()
 
@@ -281,7 +292,7 @@ def _call_ai(prompt: str, schema) -> Optional[dict]:
     return None
 
 
-def _extract_keyword_windows(text: str, patterns: list[str], window: int = 1600, max_total: int = 6500) -> str:
+def _extract_keyword_windows(text: str, patterns: list[str], window: int = 1600, max_total: int = 8000) -> str:
     chunks = []
     used_ranges = []
     for pat in patterns:
@@ -303,15 +314,16 @@ def fetch_sec_targeted_excerpt(source_url: str) -> str:
     soup = BeautifulSoup(resp.text, "html.parser")
     text = re.sub(r"\s+", " ", soup.get_text(separator=" ", strip=True))
 
-    # Targeted supply-chain, raw-material, and customer-concentration windows (kept early so Groq sees them)
+    # Targeted supply-chain, competition, and customer-concentration windows (kept early so Groq sees them)
     sc_windows = _extract_keyword_windows(
         text,
         [
             r"(raw materials|sources and availability of raw materials|sole[- ]source|single[- ]source|limited[- ]source|principal suppliers)",
             r"(major customers|customer concentration|accounted for \d+% of (consolidated |total )?(net )?(sales|revenue))",
+            r"(competition|competitive conditions|principal competitors|major competitors|compete directly with)",
         ],
         window=1600,
-        max_total=6500,
+        max_total=8000,
     )
 
     # Skip Table of Contents by taking the last match of Item 1. Business and MD&A
@@ -320,9 +332,9 @@ def fetch_sec_targeted_excerpt(source_url: str) -> str:
 
     item1_slice = text[item1_matches[-1].start() : item1_matches[-1].start() + 6500] if item1_matches else ""
     mda_slice = (
-        text[mda_matches[-1].start() : mda_matches[-1].start() + 12000]
+        text[mda_matches[-1].start() : mda_matches[-1].start() + 11000]
         if mda_matches
-        else text[5000:17000]
+        else text[5000:16000]
     )
 
     combined = f"{sc_windows} ... {item1_slice} ... {mda_slice}".strip(" .")
@@ -386,7 +398,11 @@ def save_enrichment(conn, ticker: str, ftype: str, fdate: str, parsed: dict, sou
             )
 
     sc_rows = []
-    for direction, key in (("upstream_supplier", "upstream_suppliers"), ("downstream_customer", "downstream_customers")):
+    for direction, key in (
+        ("upstream_supplier", "upstream_suppliers"),
+        ("competitor", "competitors"),
+        ("downstream_customer", "downstream_customers"),
+    ):
         for item in (parsed.get(key) or []):
             cname = (item.get("counterparty_name") or "").strip()
             mat = (item.get("material_or_product") or "").strip()
@@ -436,7 +452,7 @@ def save_enrichment(conn, ticker: str, ftype: str, fdate: str, parsed: dict, sou
         )
 
     conn.commit()
-    print(f"[{ticker}] Saved {len(driver_rows)} commodity drivers & {len(sc_rows)} supply-chain links ({ftype} {fdate})")
+    print(f"[{ticker}] Saved {len(driver_rows)} commodity drivers & {len(sc_rows)} value-chain/competitor links ({ftype} {fdate})")
 
 
 def run_backfill(conn):
@@ -488,7 +504,7 @@ def run_backfill(conn):
             WHERE bf.enrichment_backfilled_at IS NULL
               AND (
                   NOT EXISTS (SELECT 1 FROM equity_commodity_drivers d WHERE d.ticker = bf.ticker)
-                  OR NOT EXISTS (SELECT 1 FROM equity_supply_chain sc WHERE sc.ticker = bf.ticker)
+                  OR NOT EXISTS (SELECT 1 FROM equity_supply_chain sc WHERE sc.ticker = bf.ticker AND sc.direction = 'competitor')
               )
             ORDER BY
                 CASE WHEN bf.source_url LIKE '%%sec.gov%%' THEN 0 ELSE 1 END ASC,
@@ -499,7 +515,7 @@ def run_backfill(conn):
         targets = cur.fetchall()
 
     if not targets:
-        print("All already-analyzed filings have been processed for commodity drivers and supply-chain links.")
+        print("All already-analyzed filings have been processed for commodity drivers, competitors, and supply-chain links.")
         return
 
     print(f"Found {len(targets)} analyzed stocks to enrich (batch limit={BATCH_LIMIT})...")
@@ -549,7 +565,11 @@ def run_backfill(conn):
         1. commodity_drivers: 3 to 6 specific raw materials, feedstocks, energy inputs, and commodity benchmarks that drive this company's costs, margins, or revenues. Use clean human-readable names (never ticker symbols or FRED codes) and map each to the closest canonical code when applicable:
         {CANONICAL_INPUT_GUIDE}
 
-        2. upstream_suppliers & downstream_customers: ALL explicitly disclosed upstream raw material suppliers, feedstock sources, sole-source/single-source inputs, and downstream customers, OEMs, or 10%+ customer concentration disclosures. Include named organizations when disclosed (e.g., Boeing, TSMC, Apple, Airbus) OR named counterparty groups when anonymized (e.g., 'Customer A', 'Tier-1 Aerospace OEMs'), backed by verbatim quotes from the text. Do NOT invent company names not present in the text.
+        2. upstream_suppliers, competitors & downstream_customers:
+           - upstream_suppliers: Explicitly disclosed raw material suppliers, feedstock sources, or sole-source/single-source inputs.
+           - competitors: Explicitly named rival companies disclosed in the Competition section or MD&A (noting overlapping product lines and any disclosed market share %).
+           - downstream_customers: Explicitly disclosed downstream customers, OEMs, or 10%+ customer concentration disclosures.
+           Back every named entity with a verbatim quote from the source text. Do NOT invent company names not present in the text.
 
         SOURCE TEXT:
         {full_source_text}
