@@ -46,6 +46,7 @@ CANONICAL_INPUT_GUIDE = """
 - SI=F: Silver
 - PNICKUSDM: Nickel
 - PCOBAUSDM: Cobalt
+- PNGASEUUSDM: European Natural Gas
 - WPU101: Iron & Steel
 - WPU061: Industrial Chemicals
 - WPU066: Plastic Resins & Polymers
@@ -72,6 +73,18 @@ CANONICAL_INPUT_GUIDE = """
 class _FallbackResp:
     def __init__(self, text: str):
         self.text = text
+
+
+def _safe_pct(val) -> Optional[float]:
+    if val is None:
+        return None
+    try:
+        num = float(val)
+        if 0 <= num <= 100:
+            return round(num, 2)
+    except (TypeError, ValueError):
+        pass
+    return None
 
 
 def _call_groq_fallback(prompt: str, schema):
@@ -268,7 +281,7 @@ class CommodityDriverLink(BaseModel):
     )
     matched_input_code: Optional[str] = Field(
         default=None,
-        description="Closest matching code from the canonical input list if applicable (e.g. 'PNICKUSDM', 'NG=F', 'HG=F', 'LICARB_CN', 'SMH', 'ITA'), otherwise null."
+        description="Closest matching code from the canonical input list if applicable (e.g. 'PNICKUSDM', 'NG=F', 'HG=F', 'LICARB_CN', 'SMH', 'ITA'), otherwise null.",
     )
     exposure_role: str = Field(
         description="Must be one of: 'Cost Input', 'Revenue Driver', 'Margin Spread', or 'Byproduct Credit'."
@@ -281,7 +294,7 @@ class CommodityDriverLink(BaseModel):
     )
     cogs_or_rev_share_pct: Optional[float] = Field(
         default=None,
-        description="Disclosed % of COGS or revenue if explicitly stated, otherwise null."
+        description="Disclosed % of COGS or revenue if explicitly stated, otherwise null.",
     )
     mechanism_detail: str = Field(
         description="2-sentence institutional explanation of how this specific commodity impacts this company's gross margins, surcharges, inventory valuation, or revenue."
@@ -305,34 +318,47 @@ class SupplyChainLink(BaseModel):
         description="True ONLY if a specific company/organization name is explicitly stated in the text."
     )
     material_or_product: str = Field(
-        description="Specific raw material purchased or engineered product sold."
+        description="Specific raw material purchased, overlapping product/segment (for competitors), or engineered product sold."
     )
     is_sole_source: bool = Field(
-        description="True if text notes single-source, sole-supplier, or 10%+ customer concentration."
+        description="True if text notes single-source, sole-supplier, primary/direct rival, or 10%+ customer concentration."
     )
     exposure_pct: Optional[float] = Field(
         default=None,
-        description="Disclosed % of revenue or raw material spend if stated, otherwise null.",
+        description="Disclosed % of revenue, raw material spend, or market share if stated, otherwise null.",
     )
     source_quote: str = Field(
-        description="Verbatim 10-30 word quote from the source text proving this supplier or customer link."
+        description="Verbatim 10-30 word quote from the source text proving this supplier, competitor, or customer link."
     )
 
 
 class FilingSummarySchema(BaseModel):
+    fiscal_period: str = Field(
+        description="Exact reporting period covered (e.g., 'FY2025 10-K', 'Q3 2026 10-Q', or 'Business Profile & Recent News')."
+    )
     headline: str = Field(description="Concise 1-sentence institutional headline summarizing the filing/earnings.")
     executive_summary: str = Field(description="3-4 sentence analytical summary of revenue drivers, volume trends, and strategic positioning.")
     theme_tags: List[str] = Field(description="2 to 5 tags from: ['AI Infrastructure', 'Aerospace & Defense', 'Electrification & Grid', 'EV & Batteries', 'Semiconductors', 'Medical Devices', 'Industrial Recovery', 'Commodity Headwind', 'Pricing Power']")
-    pricing_and_margins: str = Field(description="Specific details on gross/operating margins, raw material pass-through, surcharges, or price/cost spread.")
-    capex_and_backlog: str = Field(description="Details on order backlog, customer qualification milestones, capacity expansion, or capex guidance.")
+    pricing_and_margins: Optional[str] = Field(
+        default=None,
+        description="Specific details on gross/operating margins, raw material pass-through, surcharges, or price/cost spread ONLY if stated in text; otherwise null.",
+    )
+    capex_and_backlog: Optional[str] = Field(
+        default=None,
+        description="Details on order backlog, customer qualification milestones, capacity expansion, or capex guidance ONLY if explicitly stated in text; NEVER estimate or use outside memory. Return null if not disclosed.",
+    )
     key_risks: str = Field(description="Top 1-2 operational, geopolitical, or cyclical risks highlighted in the report.")
     commodity_drivers: List[CommodityDriverLink] = Field(
         default_factory=list,
-        description="3 to 6 specific raw materials, energy inputs, feedstocks, and commodity benchmarks that drive this specific company's costs or revenues."
+        description="3 to 6 specific raw materials, energy inputs, feedstocks, and commodity benchmarks that drive this specific company's costs or revenues.",
     )
     upstream_suppliers: List[SupplyChainLink] = Field(
         default_factory=list,
         description="Explicitly disclosed upstream raw material suppliers, feedstock sources, or sole-source inputs found in the text.",
+    )
+    competitors: List[SupplyChainLink] = Field(
+        default_factory=list,
+        description="Explicitly named competitors or rival manufacturers disclosed in Item 1 Competition or MD&A.",
     )
     downstream_customers: List[SupplyChainLink] = Field(
         default_factory=list,
@@ -389,7 +415,7 @@ def save_commodity_drivers(conn, ticker: str, filing_type: str, filing_date: str
             (d.get("exposure_role") or "Cost Input")[:50],
             (d.get("impact_direction") or "Pass-Through")[:50],
             (d.get("pass_through_lag") or "Quarterly")[:60],
-            d.get("cogs_or_rev_share_pct"),
+            _safe_pct(d.get("cogs_or_rev_share_pct")),
             mech[:600],
             filing_type,
             filing_date,
@@ -427,7 +453,11 @@ def save_commodity_drivers(conn, ticker: str, filing_type: str, filing_date: str
 
 def save_supply_chain_links(conn, ticker: str, filing_type: str, filing_date: str, parsed: dict, source_text: str):
     rows = []
-    for direction, key in (("upstream_supplier", "upstream_suppliers"), ("downstream_customer", "downstream_customers")):
+    for direction, key in (
+        ("upstream_supplier", "upstream_suppliers"),
+        ("competitor", "competitors"),
+        ("downstream_customer", "downstream_customers"),
+    ):
         for item in (parsed.get(key) or []):
             cname = (item.get("counterparty_name") or "").strip()
             mat = (item.get("material_or_product") or "").strip()
@@ -443,7 +473,7 @@ def save_supply_chain_links(conn, ticker: str, filing_type: str, filing_date: st
                 bool(item.get("is_named_entity", False)),
                 mat[:180],
                 bool(item.get("is_sole_source", False)),
-                item.get("exposure_pct"),
+                _safe_pct(item.get("exposure_pct")),
                 filing_type,
                 filing_date,
                 quote[:400],
@@ -486,13 +516,34 @@ def seed_sensitivity_map(conn):
         """, SENSITIVITY_RULES)
     print(f"Upserted {len(SENSITIVITY_RULES)} commodity sensitivity rules.")
 
+
 def ensure_ai_tables(conn):
     with conn.cursor() as cur:
         cur.execute("""
+            ALTER TABLE company_filings_ai
+              ADD COLUMN IF NOT EXISTS fiscal_period TEXT;
+
+            CREATE TABLE IF NOT EXISTS equity_commodity_drivers (
+              id SERIAL PRIMARY KEY,
+              ticker TEXT NOT NULL REFERENCES equities_universe(ticker) ON DELETE CASCADE,
+              commodity_name TEXT NOT NULL,
+              matched_input_code TEXT,
+              exposure_role TEXT NOT NULL,
+              impact_direction TEXT NOT NULL,
+              pass_through_lag TEXT,
+              cogs_or_rev_share_pct NUMERIC(5,2),
+              mechanism_detail TEXT NOT NULL,
+              source_filing_type TEXT,
+              source_filing_date DATE,
+              source_quote TEXT,
+              updated_at TIMESTAMPTZ DEFAULT NOW(),
+              UNIQUE (ticker, commodity_name)
+            );
+
             CREATE TABLE IF NOT EXISTS equity_supply_chain (
               id SERIAL PRIMARY KEY,
               ticker TEXT NOT NULL REFERENCES equities_universe(ticker) ON DELETE CASCADE,
-              direction TEXT NOT NULL CHECK (direction IN ('upstream_supplier', 'downstream_customer')),
+              direction TEXT NOT NULL,
               counterparty_name TEXT NOT NULL,
               is_named_entity BOOLEAN DEFAULT TRUE,
               material_or_product TEXT NOT NULL,
@@ -504,7 +555,16 @@ def ensure_ai_tables(conn):
               updated_at TIMESTAMPTZ DEFAULT NOW(),
               UNIQUE (ticker, direction, counterparty_name, material_or_product)
             );
+
+            ALTER TABLE equity_supply_chain
+              DROP CONSTRAINT IF EXISTS equity_supply_chain_direction_check;
+
+            ALTER TABLE equity_supply_chain
+              ADD CONSTRAINT equity_supply_chain_direction_check
+              CHECK (direction IN ('upstream_supplier', 'downstream_customer', 'competitor'));
+
             CREATE INDEX IF NOT EXISTS idx_supply_chain_ticker ON equity_supply_chain(ticker);
+            CREATE INDEX IF NOT EXISTS idx_commodity_drivers_ticker ON equity_commodity_drivers(ticker);
         """)
     conn.commit()
 
@@ -521,7 +581,7 @@ def fetch_sec_ticker_map():
     return mapping
 
 
-def _extract_keyword_windows(text: str, patterns: list[str], window: int = 1800, max_total: int = 6500) -> str:
+def _extract_keyword_windows(text: str, patterns: list[str], window: int = 1800, max_total: int = 8000) -> str:
     chunks = []
     used_ranges = []
     for pat in patterns:
@@ -546,15 +606,16 @@ def extract_filing_text(cik_unpadded: str, accession_number: str, primary_doc: s
     text = soup.get_text(separator=" ", strip=True)
     text = re.sub(r"\s+", " ", text)
 
-    # 1. Targeted supply-chain & customer-concentration windows (fits inside Groq's 16K cap)
+    # 1. Targeted supply-chain, competition & customer-concentration windows (fits inside Groq's 16K cap)
     sc_windows = _extract_keyword_windows(
         text,
         [
-            r"(raw materials|sources and availability of raw materials|sole[- ]source|single[- ]source|principal suppliers)",
+            r"(raw materials|sources and availability of raw materials|sole[- ]source|single[- ]source|limited[- ]source|principal suppliers)",
             r"(major customers|customer concentration|accounted for \d+% of (consolidated |total )?(net )?(sales|revenue))",
+            r"(competition|competitive conditions|principal competitors|major competitors|compete directly with)",
         ],
         window=1600,
-        max_total=6000,
+        max_total=8000,
     )
 
     # 2. Skip Table of Contents by taking the last match of Item 1. Business
@@ -564,14 +625,14 @@ def extract_filing_text(cik_unpadded: str, accession_number: str, primary_doc: s
     item1_slice = ""
     if item1_matches:
         start1 = item1_matches[-1].start()
-        item1_slice = text[start1 : start1 + 7000]
+        item1_slice = text[start1 : start1 + 6500]
 
     mda_slice = ""
     if mda_matches:
         start_mda = mda_matches[-1].start()
-        mda_slice = text[start_mda : start_mda + 14000]
+        mda_slice = text[start_mda : start_mda + 12500]
     else:
-        mda_slice = text[5000:19000]
+        mda_slice = text[5000:17500]
 
     combined = f"{sc_windows} ... {item1_slice} ... {mda_slice}".strip(" .")
     return combined[:28000]
@@ -629,10 +690,10 @@ def process_sec_filings(conn, limit_tickers=8):
 
                     prompt = f"""
                     You are an institutional advanced materials equity analyst. Analyze this SEC {form} filing excerpt for {company_name} ({ticker}), sub-sector: {sub_sector}, filed on {f_date}.
-                    1. Extract operational insights on demand trends, pricing power/raw material pass-through, backlog/capex, and risks.
+                    1. Extract operational insights on demand trends, pricing power/raw material pass-through, backlog/capex (ONLY if stated in the excerpt; return null if not disclosed), and risks.
                     2. Extract 3 to 6 specific company-level commodity, raw material, feedstock, and energy drivers (using human-readable names like 'High-Purity Nickel' or 'Natural Gas', never ticker symbols) and match them to the closest code in this list when applicable:
                     {CANONICAL_INPUT_GUIDE}
-                    3. Extract any explicitly disclosed upstream raw material suppliers or downstream customers with verbatim quotes.
+                    3. Extract any explicitly disclosed upstream raw material suppliers, named competitors, or downstream customers with verbatim quotes.
 
                     FILING EXCERPT:
                     {excerpt}
@@ -647,10 +708,11 @@ def process_sec_filings(conn, limit_tickers=8):
                     with conn.cursor() as cur:
                         cur.execute("""
                             INSERT INTO company_filings_ai (
-                                ticker, filing_type, filing_date, headline, executive_summary,
+                                ticker, filing_type, filing_date, fiscal_period, headline, executive_summary,
                                 theme_tags, pricing_and_margins, capex_and_backlog, key_risks, source_url
-                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                             ON CONFLICT (ticker, filing_type, filing_date) DO UPDATE SET
+                                fiscal_period = EXCLUDED.fiscal_period,
                                 headline = EXCLUDED.headline,
                                 executive_summary = EXCLUDED.executive_summary,
                                 theme_tags = EXCLUDED.theme_tags,
@@ -662,11 +724,12 @@ def process_sec_filings(conn, limit_tickers=8):
                             ticker,
                             form,
                             f_date,
+                            parsed.get("fiscal_period") or f"{form} ({f_date})",
                             parsed["headline"],
                             parsed["executive_summary"],
                             parsed["theme_tags"],
-                            parsed["pricing_and_margins"],
-                            parsed["capex_and_backlog"],
+                            parsed.get("pricing_and_margins"),
+                            parsed.get("capex_and_backlog"),
                             parsed["key_risks"],
                             source_url,
                         ))
@@ -716,9 +779,10 @@ def process_international_briefs(conn, limit_tickers=5):
             You are an institutional advanced materials equity analyst covering global equities.
             Synthesize a structured research & earnings brief for {company_name} ({ticker}), Sub-sector: {sub_sector}, Contract Type: {contract_type}, Qualification Moat: {qual_years} yrs.
             Financial Metrics: Revenue Growth={rev_growth}, Gross Margin={gross_margin}, EBITDA Margin={ebitda_margin}.
+            CRITICAL: Only report capex_and_backlog or pricing_and_margins if explicitly stated in the Business Profile or News Headlines below. NEVER guess or invent capex figures from outside memory—return null if not stated.
             Extract 3 to 6 specific company-level commodity, raw material, and energy drivers (using human-readable names, never ticker codes) matched to this canonical list when applicable:
             {CANONICAL_INPUT_GUIDE}
-            Also extract any explicitly mentioned upstream suppliers or downstream customers with verbatim quotes.
+            Also extract any explicitly mentioned upstream suppliers, named competitors, or downstream customers with verbatim quotes.
             Business Profile: {biz_summary}
             Recent News Headlines:
             {headlines_str}
@@ -732,10 +796,11 @@ def process_international_briefs(conn, limit_tickers=5):
             with conn.cursor() as cur:
                 cur.execute("""
                     INSERT INTO company_filings_ai (
-                        ticker, filing_type, filing_date, headline, executive_summary,
+                        ticker, filing_type, filing_date, fiscal_period, headline, executive_summary,
                         theme_tags, pricing_and_margins, capex_and_backlog, key_risks, source_url
-                    ) VALUES (%s, 'Earnings Brief', CURRENT_DATE, %s, %s, %s, %s, %s, %s, %s)
+                    ) VALUES (%s, 'Earnings Brief', CURRENT_DATE, %s, %s, %s, %s, %s, %s, %s, %s)
                     ON CONFLICT (ticker, filing_type, filing_date) DO UPDATE SET
+                        fiscal_period = EXCLUDED.fiscal_period,
                         headline = EXCLUDED.headline,
                         executive_summary = EXCLUDED.executive_summary,
                         theme_tags = EXCLUDED.theme_tags,
@@ -744,11 +809,12 @@ def process_international_briefs(conn, limit_tickers=5):
                         key_risks = EXCLUDED.key_risks;
                 """, (
                     ticker,
+                    parsed.get("fiscal_period") or "Company Profile & News",
                     parsed["headline"],
                     parsed["executive_summary"],
                     parsed["theme_tags"],
-                    parsed["pricing_and_margins"],
-                    parsed["capex_and_backlog"],
+                    parsed.get("pricing_and_margins"),
+                    parsed.get("capex_and_backlog"),
                     parsed["key_risks"],
                     f"https://finance.yahoo.com/quote/{ticker}",
                 ))
@@ -797,13 +863,15 @@ def backfill_existing_filing_drivers(conn, limit_tickers=8):
         parsed = json.loads(ai_resp.text)
         save_commodity_drivers(conn, ticker, ftype, fdate, parsed.get("commodity_drivers", []))
 
+
 class SupplyChainBackfillBatch(BaseModel):
     upstream_suppliers: List[SupplyChainLink] = Field(default_factory=list)
+    competitors: List[SupplyChainLink] = Field(default_factory=list)
     downstream_customers: List[SupplyChainLink] = Field(default_factory=list)
 
 
 def backfill_existing_supply_chain(conn, limit_tickers=8):
-    """Extracts upstream suppliers & downstream customers for US stocks whose filings were already parsed."""
+    """Extracts upstream suppliers, competitors & downstream customers for US stocks whose filings were already parsed."""
     sec_map = fetch_sec_ticker_map()
     with conn.cursor() as cur:
         cur.execute("""
@@ -831,7 +899,7 @@ def backfill_existing_supply_chain(conn, limit_tickers=8):
             sub_resp.raise_for_status()
             recent = sub_resp.json()["filings"]["recent"]
 
-            # Prefer the most recent 10-K (has full Item 1 Raw Materials & Customer Concentration)
+            # Prefer the most recent 10-K (has full Item 1 Raw Materials, Competition & Customer Concentration)
             target_idx = next((i for i, f in enumerate(recent["form"]) if f == "10-K"), None)
             if target_idx is None:
                 target_idx = next((i for i, f in enumerate(recent["form"]) if f == "10-Q"), None)
@@ -851,8 +919,9 @@ def backfill_existing_supply_chain(conn, limit_tickers=8):
             You are an institutional advanced materials supply-chain analyst.
             Analyze this SEC {form} filing excerpt for {company_name} ({ticker}), sub-sector: {sub_sector}.
             Extract ALL disclosed:
-            1. Upstream raw material suppliers, feedstock sources, or sole-source/single-source inputs.
-            2. Downstream customers, OEMs, or 10%+ customer concentration disclosures.
+            1. upstream_suppliers: Upstream raw material suppliers, feedstock sources, or sole-source/single-source inputs.
+            2. competitors: Explicitly named rival companies disclosed in Item 1 Competition or MD&A.
+            3. downstream_customers: Downstream customers, OEMs, or 10%+ customer concentration disclosures.
             Include named companies when disclosed (e.g. Boeing, TSMC, Apple, Airbus) OR named counterparty groups when anonymized (e.g. 'Customer A', 'Tier-1 Aerospace OEMs'), along with verbatim quotes from the text.
 
             FILING EXCERPT:
@@ -865,7 +934,7 @@ def backfill_existing_supply_chain(conn, limit_tickers=8):
             parsed = json.loads(ai_resp.text)
             save_supply_chain_links(conn, ticker, form, f_date, parsed, excerpt)
             processed += 1
-            print(f"Backfilled supply chain for {ticker} ({form} {f_date})")
+            print(f"Backfilled supply chain & competitors for {ticker} ({form} {f_date})")
             time.sleep(0.25)
         except Exception as e:
             print(f"Warning backfilling supply chain for {ticker}: {e}")
@@ -896,7 +965,7 @@ def generate_market_macro_narrative(conn):
 
     comm_text = "\n".join([f"- {c[1]}: {c[2]} {c[3]} (as of {c[4]})" for c in commodities])
     filings_text = "\n".join([
-        f"[{f[0]} - {f[1]} | {f[2]} | {f[3]} {f[4]}]: {f[5]} Summary: {f[6]} Margins: {f[7]} Backlog/Capex: {f[8]}"
+        f"[{f[0]} - {f[1]} | {f[2]} | {f[3]} {f[4]}]: {f[5]} Summary: {f[6]} Margins: {f[7] or 'N/A'} Backlog/Capex: {f[8] or 'N/A'}"
         for f in filings
     ])
 
@@ -946,13 +1015,13 @@ def generate_market_macro_narrative(conn):
 def generate_scoped_insights(conn):
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT f.ticker, e.sub_sector, f.filing_type, f.filing_date,
-                   f.headline, f.executive_summary, f.pricing_and_margins,
-                   f.capex_and_backlog, f.theme_tags
+            SELECT DISTINCT ON (f.ticker)
+                f.ticker, e.company_name, e.sub_sector, f.filing_type, f.filing_date,
+                f.headline, f.executive_summary, f.pricing_and_margins,
+                f.capex_and_backlog, f.theme_tags
             FROM company_filings_ai f
             JOIN equities_universe e ON f.ticker = e.ticker
-            ORDER BY f.filing_date DESC
-            LIMIT 80;
+            ORDER BY f.ticker, f.filing_date DESC;
         """)
         rows = cur.fetchall()
 
@@ -960,75 +1029,116 @@ def generate_scoped_insights(conn):
         print("No filings available yet for scoped insights.")
         return
 
-    sub_counts, theme_counts = {}, {}
-    filing_lines = []
-    for ticker, sub_sector, ftype, fdate, headline, summary, margins, capex, tags in rows:
-        if sub_sector:
-            sub_counts[sub_sector] = sub_counts.get(sub_sector, 0) + 1
-        for tag in (tags or []):
-            theme_counts[tag] = theme_counts.get(tag, 0) + 1
-        filing_lines.append(
-            f"[{ticker} | Sub-Industry: {sub_sector} | Themes: {', '.join(tags or [])} | {ftype} {fdate}] "
-            f"{headline} | Margins: {margins} | Capex/Backlog: {capex}"
+    by_sub = {}
+    by_theme = {}
+    all_lines = []
+
+    for ticker, cname, sub_sector, ftype, fdate, headline, summary, margins, capex, tags in rows:
+        line = (
+            f"[{ticker} ({cname}) | {ftype} {fdate}] {headline} | "
+            f"Summary: {summary} | Margins: {margins or 'N/A'} | Capex/Backlog: {capex or 'N/A'}"
         )
+        all_lines.append(line)
+        if sub_sector:
+            by_sub.setdefault(sub_sector, []).append((ticker, line))
+        for tag in (tags or []):
+            by_theme.setdefault(tag, []).append((ticker, line))
 
-    active_subs = [k for k, _ in sorted(sub_counts.items(), key=lambda x: -x[1])[:10]]
-    active_themes = [k for k, _ in sorted(theme_counts.items(), key=lambda x: -x[1])[:8]]
+    # Process sub-sectors in isolated batches of 6 so each sub-sector only sees its own filings
+    all_insights = []
+    sub_items = sorted(by_sub.items(), key=lambda x: -len(x[1]))
 
-    prompt = f"""
+    for i in range(0, len(sub_items), 6):
+        batch = sub_items[i : i + 6]
+        blocks = []
+        allowed_by_sub = {}
+        for sub_name, entries in batch:
+            allowed_by_sub[sub_name] = {tk for tk, _ in entries}
+            joined = "\n  ".join(ln for _, ln in entries[:8])
+            blocks.append(f"=== SUB-INDUSTRY: {sub_name} (Filing Count: {len(entries)}) ===\n  {joined}")
+
+        prompt = f"""
+        You are a Senior Advanced Materials Equity Strategist.
+        Generate one ScopeInsight (with scope_type='sub_industry') for EACH sub-industry block below.
+        CRITICAL RULES:
+        - Use ONLY the filings listed inside that sub-industry's block. NEVER reference tickers from another block.
+        - Because every block listed below has at least 1 filing, NEVER say there are no filings or no data.
+        - Set top_tickers ONLY to tickers present inside that exact block.
+
+        {chr(10).join(blocks)}
+        """
+        ai_resp = call_gemini(prompt, InsightBatchSchema)
+        if not ai_resp:
+            break
+        for item in json.loads(ai_resp.text).get("insights", []):
+            sname = item.get("scope_name")
+            if sname in allowed_by_sub:
+                item["scope_type"] = "sub_industry"
+                item["top_tickers"] = [t for t in item.get("top_tickers", []) if t in allowed_by_sub[sname]][:5]
+                all_insights.append(item)
+
+    # Generate Industry + Top Themes synthesis
+    theme_items = sorted(by_theme.items(), key=lambda x: -len(x[1]))[:8]
+    theme_blocks = []
+    allowed_by_theme = {"Advanced Materials": {r[0] for r in rows}}
+    for tname, entries in theme_items:
+        allowed_by_theme[tname] = {tk for tk, _ in entries}
+        joined = "\n  ".join(ln for _, ln in entries[:8])
+        theme_blocks.append(f"=== THEME: {tname} (Filing Count: {len(entries)}) ===\n  {joined}")
+
+    theme_prompt = f"""
     You are a Senior Advanced Materials Equity Strategist.
-    Using ONLY the parsed SEC filings below, generate structured insight summaries for:
-1. Industry (scope_type='industry'): 'Advanced Materials' (synthesizing all filings)
-2. Sub-Industries (scope_type='sub_industry'): {', '.join(active_subs)}
-3. Themes (scope_type='theme'): {', '.join(active_themes)}
+    Generate:
+    1. One ScopeInsight with scope_type='industry' and scope_name='Advanced Materials' summarizing the overall universe below.
+    2. One ScopeInsight with scope_type='theme' for EACH theme block below, using ONLY the filings inside that theme's block.
 
-    Be specific: cite actual company tickers, margin/pass-through mechanics, and backlog trends from the filings.
+    === INDUSTRY: Advanced Materials (Total Covered Companies: {len(rows)}) ===
+    {chr(10).join(all_lines[:25])}
 
-    PARSED FILINGS:
-    {chr(10).join(filing_lines)}
+    {chr(10).join(theme_blocks)}
     """
-
-    ai_resp = call_gemini(prompt, InsightBatchSchema)
-    if not ai_resp:
-        return
-    parsed = json.loads(ai_resp.text)
+    ai_resp = call_gemini(theme_prompt, InsightBatchSchema)
+    if ai_resp:
+        for item in json.loads(ai_resp.text).get("insights", []):
+            sname = item.get("scope_name")
+            if sname in allowed_by_theme:
+                item["top_tickers"] = [t for t in item.get("top_tickers", []) if t in allowed_by_theme[sname]][:5]
+                all_insights.append(item)
 
     with conn.cursor() as cur:
-        for item in parsed["insights"]:
+        cur.execute("DELETE FROM sector_theme_insights;")
+        for item in all_insights:
             stype = item["scope_type"]
             sname = item["scope_name"]
-            count = len(rows) if stype == "industry" else (
-                sub_counts.get(sname, 0) if stype == "sub_industry" else theme_counts.get(sname, 0)
+            count = (
+                len(rows)
+                if stype == "industry"
+                else len(by_sub.get(sname, []))
+                if stype == "sub_industry"
+                else len(by_theme.get(sname, []))
             )
             cur.execute("""
                 INSERT INTO sector_theme_insights (
                     scope_type, scope_name, generated_date, filing_count, sentiment,
                     headline, key_drivers, pricing_and_margins, capex_and_supply_chain, top_tickers
-                ) VALUES (%s, %s, CURRENT_DATE, %s, %s, %s, %s, %s, %s, %s)
-                ON CONFLICT (scope_type, scope_name) DO UPDATE SET
-                    generated_date = CURRENT_DATE,
-                    filing_count = EXCLUDED.filing_count,
-                    sentiment = EXCLUDED.sentiment,
-                    headline = EXCLUDED.headline,
-                    key_drivers = EXCLUDED.key_drivers,
-                    pricing_and_margins = EXCLUDED.pricing_and_margins,
-                    capex_and_supply_chain = EXCLUDED.capex_and_supply_chain,
-                    top_tickers = EXCLUDED.top_tickers;
+                ) VALUES (%s, %s, CURRENT_DATE, %s, %s, %s, %s, %s, %s, %s);
             """, (
                 stype, sname, count, item["sentiment"], item["headline"],
                 item["key_drivers"], item["pricing_and_margins"],
                 item["capex_and_supply_chain"], item["top_tickers"],
             ))
     conn.commit()
-    print(f"Upserted {len(parsed['insights'])} industry, sub-industry, and theme insights.")
+    print(f"Upserted {len(all_insights)} validated industry, sub-industry, and theme insights.")
 
 
 if __name__ == "__main__":
     with psycopg.connect(DATABASE_URL, autocommit=True) as conn:
+        ensure_ai_tables(conn)
         seed_sensitivity_map(conn)
         process_sec_filings(conn, limit_tickers=8)
         process_international_briefs(conn, limit_tickers=5)
         backfill_existing_filing_drivers(conn, limit_tickers=8)
+        backfill_existing_supply_chain(conn, limit_tickers=8)
         try:
             generate_market_macro_narrative(conn)
             generate_scoped_insights(conn)
