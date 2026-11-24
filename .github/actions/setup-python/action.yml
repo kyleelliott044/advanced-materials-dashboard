@@ -1,5 +1,5 @@
 name: Setup Python Pipeline Environment
-description: Sets up Python 3.11 and installs dependencies with pip caching
+description: Sets up Python 3.11 and installs pipeline dependencies
 
 runs:
   using: composite
@@ -14,4 +14,10 @@ runs:
       shell: bash
       run: |
         python -m pip install --upgrade pip
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+        if [ -f requirements.txt ]; then
+          python -m pip install -r requirements.txt
+        elif [ -f pipeline/requirements.txt ]; then
+          python -m pip install -r pipeline/requirements.txt
+        else
+          python -m pip install requests "psycopg[binary]" yfinance beautifulsoup4 pydantic google-genai
+        fi
