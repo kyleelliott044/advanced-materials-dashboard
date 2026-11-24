@@ -1,0 +1,16 @@
+name: "Task: Validate Product Registry & TODOs"
+
+on:
+  workflow_dispatch:
+  workflow_call:
+
+jobs:
+  validate-products:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      DATABASE_URL: ${{ secrets.DATABASE_URL }}
+    steps:
+      - uses: ./.github/actions/setup-python
+      - name: Validate product refs, rollups & unlogged commodities
+        run: python pipeline/validate_products.py
