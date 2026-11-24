@@ -673,7 +673,7 @@ def extract_filing_text(cik_unpadded: str, accession_number: str, primary_doc: s
     return combined[:28000]
 
 
-def process_sec_filings(conn, limit_tickers=5):
+def process_sec_filings(conn, limit_tickers=3):
     conn = ensure_conn(conn)
     sec_map = fetch_sec_ticker_map()
     with conn.cursor() as cur:
@@ -791,7 +791,7 @@ def process_sec_filings(conn, limit_tickers=5):
     return conn
 
 
-def process_international_briefs(conn, limit_tickers=4):
+def process_international_briefs(conn, limit_tickers=3):
     conn = ensure_conn(conn)
     with conn.cursor() as cur:
         cur.execute("""
@@ -874,7 +874,7 @@ def process_international_briefs(conn, limit_tickers=4):
     return conn
 
 
-def backfill_existing_filing_drivers(conn, limit_tickers=4):
+def backfill_existing_filing_drivers(conn, limit_tickers=2):
     """Populates per-stock AI commodity drivers for stocks whose filings were already parsed in earlier runs."""
     conn = ensure_conn(conn)
     with conn.cursor() as cur:
@@ -920,7 +920,7 @@ class SupplyChainBackfillBatch(BaseModel):
     downstream_customers: List[SupplyChainLink] = Field(default_factory=list)
 
 
-def backfill_existing_supply_chain(conn, limit_tickers=4):
+def backfill_existing_supply_chain(conn, limit_tickers=2):
     """Extracts upstream suppliers, competitors & downstream customers for US stocks whose filings were already parsed."""
     conn = ensure_conn(conn)
     sec_map = fetch_sec_ticker_map()
@@ -1082,6 +1082,13 @@ def generate_scoped_insights(conn):
         """)
         rows = cur.fetchall()
 
+        cur.execute("""
+            SELECT scope_name, generated_date::text
+            FROM sector_theme_insights
+            WHERE scope_type = 'sub_industry';
+        """)
+        existing_sub_dates = dict(cur.fetchall())
+
     if not rows:
         print("No filings available yet for scoped insights.")
         return conn
@@ -1102,15 +1109,48 @@ def generate_scoped_insights(conn):
             by_theme.setdefault(tag, []).append((ticker, line))
 
     all_insights = []
-    sub_items = sorted(by_sub.items(), key=lambda x: -len(x[1]))
 
-    for i in range(0, len(sub_items), 6):
-        batch = sub_items[i : i + 6]
+    # 1. Generate Industry + Top Themes first so they are always refreshed and preserved
+    theme_items = sorted(by_theme.items(), key=lambda x: -len(x[1]))[:8]
+    theme_blocks = []
+    allowed_by_theme = {"Advanced Materials": {r[0] for r in rows}}
+    for tname, entries in theme_items:
+        allowed_by_theme[tname] = {tk for tk, _ in entries}
+        joined = "\n  ".join(ln for _, ln in entries[:6])
+        theme_blocks.append(f"=== THEME: {tname} (Filing Count: {len(entries)}) ===\n  {joined}")
+
+    theme_prompt = f"""
+    You are a Senior Advanced Materials Equity Strategist.
+    Generate:
+    1. One ScopeInsight with scope_type='industry' and scope_name='Advanced Materials' summarizing the overall universe below.
+    2. One ScopeInsight with scope_type='theme' for EACH theme block below, using ONLY the filings inside that theme's block.
+
+    === INDUSTRY: Advanced Materials (Total Covered Companies: {len(rows)}) ===
+    {chr(10).join(all_lines[:20])}
+
+    {chr(10).join(theme_blocks)}
+    """
+    ai_resp = call_gemini(theme_prompt, InsightBatchSchema)
+    if ai_resp:
+        for item in json.loads(ai_resp.text).get("insights", []):
+            sname = item.get("scope_name")
+            if sname in allowed_by_theme:
+                item["top_tickers"] = [t for t in item.get("top_tickers", []) if t in allowed_by_theme[sname]][:5]
+                all_insights.append(item)
+
+    # 2. Process sub-sectors prioritizing missing or oldest-updated sub-sectors first (batches of 8)
+    sub_items = sorted(
+        by_sub.items(),
+        key=lambda x: (str(existing_sub_dates.get(x[0]) or "0001-01-01"), -len(x[1])),
+    )
+
+    for i in range(0, len(sub_items), 8):
+        batch = sub_items[i : i + 8]
         blocks = []
         allowed_by_sub = {}
         for sub_name, entries in batch:
             allowed_by_sub[sub_name] = {tk for tk, _ in entries}
-            joined = "\n  ".join(ln for _, ln in entries[:8])
+            joined = "\n  ".join(ln for _, ln in entries[:6])
             blocks.append(f"=== SUB-INDUSTRY: {sub_name} (Filing Count: {len(entries)}) ===\n  {joined}")
 
         prompt = f"""
@@ -1133,36 +1173,12 @@ def generate_scoped_insights(conn):
                 item["top_tickers"] = [t for t in item.get("top_tickers", []) if t in allowed_by_sub[sname]][:5]
                 all_insights.append(item)
 
-    theme_items = sorted(by_theme.items(), key=lambda x: -len(x[1]))[:8]
-    theme_blocks = []
-    allowed_by_theme = {"Advanced Materials": {r[0] for r in rows}}
-    for tname, entries in theme_items:
-        allowed_by_theme[tname] = {tk for tk, _ in entries}
-        joined = "\n  ".join(ln for _, ln in entries[:8])
-        theme_blocks.append(f"=== THEME: {tname} (Filing Count: {len(entries)}) ===\n  {joined}")
-
-    theme_prompt = f"""
-    You are a Senior Advanced Materials Equity Strategist.
-    Generate:
-    1. One ScopeInsight with scope_type='industry' and scope_name='Advanced Materials' summarizing the overall universe below.
-    2. One ScopeInsight with scope_type='theme' for EACH theme block below, using ONLY the filings inside that theme's block.
-
-    === INDUSTRY: Advanced Materials (Total Covered Companies: {len(rows)}) ===
-    {chr(10).join(all_lines[:25])}
-
-    {chr(10).join(theme_blocks)}
-    """
-    ai_resp = call_gemini(theme_prompt, InsightBatchSchema)
-    if ai_resp:
-        for item in json.loads(ai_resp.text).get("insights", []):
-            sname = item.get("scope_name")
-            if sname in allowed_by_theme:
-                item["top_tickers"] = [t for t in item.get("top_tickers", []) if t in allowed_by_theme[sname]][:5]
-                all_insights.append(item)
+    if not all_insights:
+        print("No new scoped insights generated on this run; preserving existing records.")
+        return conn
 
     conn = ensure_conn(conn)
     with conn.cursor() as cur:
-        cur.execute("DELETE FROM sector_theme_insights;")
         for item in all_insights:
             stype = item["scope_type"]
             sname = item["scope_name"]
@@ -1177,14 +1193,23 @@ def generate_scoped_insights(conn):
                 INSERT INTO sector_theme_insights (
                     scope_type, scope_name, generated_date, filing_count, sentiment,
                     headline, key_drivers, pricing_and_margins, capex_and_supply_chain, top_tickers
-                ) VALUES (%s, %s, CURRENT_DATE, %s, %s, %s, %s, %s, %s, %s);
+                ) VALUES (%s, %s, CURRENT_DATE, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (scope_type, scope_name) DO UPDATE SET
+                    generated_date = CURRENT_DATE,
+                    filing_count = EXCLUDED.filing_count,
+                    sentiment = EXCLUDED.sentiment,
+                    headline = EXCLUDED.headline,
+                    key_drivers = EXCLUDED.key_drivers,
+                    pricing_and_margins = EXCLUDED.pricing_and_margins,
+                    capex_and_supply_chain = EXCLUDED.capex_and_supply_chain,
+                    top_tickers = EXCLUDED.top_tickers;
             """, (
                 stype, sname, count, item["sentiment"], item["headline"],
                 item["key_drivers"], item["pricing_and_margins"],
                 item["capex_and_supply_chain"], item["top_tickers"],
             ))
     conn.commit()
-    print(f"Upserted {len(all_insights)} validated industry, sub-industry, and theme insights.")
+    print(f"Upserted {len(all_insights)} validated industry, sub-industry, and theme insights (zero rows deleted).")
     return conn
 
 
@@ -1193,10 +1218,10 @@ if __name__ == "__main__":
     try:
         conn = ensure_ai_tables(conn)
         conn = seed_sensitivity_map(conn)
-        conn = process_sec_filings(conn, limit_tickers=5)
-        conn = process_international_briefs(conn, limit_tickers=4)
-        conn = backfill_existing_filing_drivers(conn, limit_tickers=4)
-        conn = backfill_existing_supply_chain(conn, limit_tickers=4)
+        conn = process_sec_filings(conn, limit_tickers=3)
+        conn = process_international_briefs(conn, limit_tickers=3)
+        conn = backfill_existing_filing_drivers(conn, limit_tickers=2)
+        conn = backfill_existing_supply_chain(conn, limit_tickers=2)
         try:
             conn = generate_market_macro_narrative(conn)
             conn = generate_scoped_insights(conn)
