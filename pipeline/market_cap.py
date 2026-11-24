@@ -22,6 +22,32 @@ FX_PAIRS = {
     "INR": "INRUSD=X",
 }
 
+DEPRECATED_REPLACEMENTS = {
+    "066970.KQ": "066970.KS",
+    "500380.NS": "SRF.NS",
+    "8070.TWO": "8070.TW",
+    "MRSN.PA": "MRN.PA",
+    "4103.T": "4109.T",
+    "QNTY": "Q",
+}
+
+
+def cleanup_duplicate_tickers(conn):
+    """Removes re-seeded legacy tickers when their updated replacement ticker already exists."""
+    with conn.cursor() as cur:
+        for old_tk, new_tk in DEPRECATED_REPLACEMENTS.items():
+            cur.execute("SELECT 1 FROM equities_universe WHERE ticker = %s;", (new_tk,))
+            if cur.fetchone():
+                cur.execute(
+                    """
+                    DELETE FROM equities_universe
+                    WHERE ticker = %s
+                      AND NOT EXISTS (SELECT 1 FROM company_filings_ai WHERE ticker = %s);
+                    """,
+                    (old_tk, old_tk),
+                )
+    conn.commit()
+
 
 def fetch_fx_to_usd() -> dict[str, float]:
     rates = {"USD": 1.0}
@@ -61,29 +87,49 @@ def _get_cap_and_currency(ticker: str):
 
 
 def update_market_caps(conn):
+    cleanup_duplicate_tickers(conn)
     fx_rates = fetch_fx_to_usd()
+
     with conn.cursor() as cur:
         cur.execute("SELECT ticker FROM equities_universe ORDER BY ticker;")
         tickers = [r[0] for r in cur.fetchall()]
 
     updates = []
     for ticker in tickers:
-        raw_cap, ccy = _get_cap_and_currency(ticker)
+        active_ticker = ticker
+        raw_cap, ccy = _get_cap_and_currency(active_ticker)
+
+        # Auto-test KOSDAQ (.KQ) if KOSPI (.KS) returns 404
+        if (not raw_cap or not ccy) and active_ticker.endswith(".KS"):
+            alt_ticker = active_ticker[:-3] + ".KQ"
+            alt_cap, alt_ccy = _get_cap_and_currency(alt_ticker)
+            if alt_cap and alt_ccy:
+                try:
+                    with conn.cursor() as cur:
+                        cur.execute(
+                            "UPDATE equities_universe SET ticker = %s WHERE ticker = %s;",
+                            (alt_ticker, active_ticker),
+                        )
+                    conn.commit()
+                    active_ticker, raw_cap, ccy = alt_ticker, alt_cap, alt_ccy
+                    print(f"Migrated {ticker} -> {alt_ticker}")
+                except Exception:
+                    conn.rollback()
+
         if not raw_cap or not ccy:
             continue
 
-        # London Stock Exchange quotes often use British pence (GBp = 0.01 GBP)
         if ccy == "GBp":
             fx = fx_rates.get("GBP", 1.27) / 100.0
         else:
             fx = fx_rates.get(ccy.upper())
 
         if not fx:
-            print(f"Skipping {ticker}: missing FX rate for {ccy}")
+            print(f"Skipping {active_ticker}: missing FX rate for {ccy}")
             continue
 
         usd_cap = int(round(raw_cap * fx))
-        updates.append((usd_cap, ticker))
+        updates.append((usd_cap, active_ticker))
         time.sleep(0.05)
 
     with conn.cursor() as cur:
