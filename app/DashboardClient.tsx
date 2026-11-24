@@ -39,6 +39,7 @@ export interface FilingRow {
   sub_sector?: string;
   filing_type: string;
   filing_date: string;
+  fiscal_period?: string | null;
   headline: string;
   executive_summary: string;
   theme_tags: string[];
@@ -60,7 +61,7 @@ export interface MacroNarrativeRow {
 
 export interface SupplyChainRow {
   ticker: string;
-  direction: "upstream_supplier" | "downstream_customer" | string;
+  direction: "upstream_supplier" | "downstream_customer" | "competitor" | string;
   counterparty_name: string;
   is_named_entity: boolean;
   material_or_product: string;
@@ -274,6 +275,11 @@ export default function DashboardClient({
     return map;
   }, [filings]);
 
+  const coveredCompanyCount = useMemo(
+    () => Object.keys(tickerFilingsMap).length,
+    [tickerFilingsMap]
+  );
+
   const tickerSupplyChainMap = useMemo(() => {
     const map: Record<string, SupplyChainRow[]> = {};
     for (const sc of supplyChain) {
@@ -397,9 +403,21 @@ export default function DashboardClient({
   const upstreamSuppliers = selectedEquitySupplyChain.filter(
     (s) => s.direction === "upstream_supplier"
   );
+  const filingCompetitors = selectedEquitySupplyChain.filter(
+    (s) => s.direction === "competitor"
+  );
   const downstreamCustomers = selectedEquitySupplyChain.filter(
     (s) => s.direction === "downstream_customer"
   );
+
+  const universePeers = useMemo(() => {
+    if (!selectedEquity?.sub_sector) return [];
+    return equities.filter(
+      (e) =>
+        e.sub_sector === selectedEquity.sub_sector &&
+        e.ticker !== selectedEquity.ticker
+    );
+  }, [equities, selectedEquity]);
 
   return (
     <div className="min-h-screen bg-[#090d16] text-slate-100 font-sans selection:bg-sky-500/30">
@@ -414,7 +432,7 @@ export default function DashboardClient({
               </h1>
             </div>
             <p className="text-xs text-slate-400 mt-0.5">
-              {equities.length} Global Equities • {filings.length} AI-Parsed 10-K/10-Q &amp; Earnings Briefs • Commodity Sensitivity Engine
+              {coveredCompanyCount} of {equities.length} Companies Covered • {filings.length} AI-Parsed Filings &amp; Profiles • Commodity Sensitivity Engine
             </p>
           </div>
 
@@ -509,7 +527,7 @@ export default function DashboardClient({
                 {narrativeTab === "commodities" && <p>{narrative.commodities_theme_summary}</p>}
                 {narrativeTab === "ev" && <p>{narrative.electrification_battery_summary}</p>}
                 <div className="mt-3 text-[11px] font-mono text-slate-500">
-                  Synthesized across {filings.length} company filings &amp; {inputs.length} commodity feeds • Updated {narrative.generated_date}
+                  Synthesized across {coveredCompanyCount} covered companies ({filings.length} filings) &amp; {inputs.length} commodity feeds • Updated {narrative.generated_date}
                 </div>
               </>
             )}
@@ -634,7 +652,7 @@ export default function DashboardClient({
 
               <div>
                 <label className="block text-[11px] font-mono uppercase text-slate-400 mb-1.5">
-                  Contract Type
+                  Est. Pricing Model
                 </label>
                 <select
                   value={contractFilter}
@@ -662,14 +680,14 @@ export default function DashboardClient({
                   <option value="rev_desc">Adv. Mat. Rev % (High → Low)</option>
                   <option value="rev_asc">Adv. Mat. Rev % (Low → High)</option>
                   <option value="country_asc">Country (A → Z)</option>
-                  <option value="moat_desc">Qual. Moat (High → Low)</option>
+                  <option value="moat_desc">Est. Moat (High → Low)</option>
                   <option value="ticker_asc">Ticker (A → Z)</option>
                 </select>
               </div>
 
               <div className="sm:col-span-2 lg:col-span-6 flex items-center gap-4 pt-1 border-t border-slate-800/70">
                 <label className="text-[11px] font-mono uppercase text-slate-400 whitespace-nowrap">
-                  Min Moat: {minQualYears} yrs
+                  Min Est. Moat: {minQualYears} yrs
                 </label>
                 <input
                   type="range"
@@ -713,7 +731,7 @@ export default function DashboardClient({
                   )}
                 </span>
                 <span className="text-sky-400 font-medium">
-                  Click any company row for AI Commodity &amp; Filing Dossier &rarr;
+                  Click any company row for AI Commodity, Value-Chain &amp; Filing Dossier &rarr;
                 </span>
               </div>
 
@@ -727,9 +745,19 @@ export default function DashboardClient({
                       <th className="py-3.5 px-4 text-right">Market Cap</th>
                       <th className="py-3.5 px-4 text-right">Adv. Mat. Rev</th>
                       <th className="py-3.5 px-4">Commodity Drivers</th>
-                      <th className="py-3.5 px-4">Pricing Structure</th>
+                      <th
+                        className="py-3.5 px-4"
+                        title="Analyst-classified contract pricing structure"
+                      >
+                        Est. Pricing Model
+                      </th>
                       <th className="py-3.5 px-4">AI Filings</th>
-                      <th className="py-3.5 px-4 text-right">Qual. Moat</th>
+                      <th
+                        className="py-3.5 px-4 text-right"
+                        title="Analyst-estimated customer qualification timeline"
+                      >
+                        Est. Moat
+                      </th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-800/60 text-sm">
@@ -866,10 +894,10 @@ export default function DashboardClient({
           <section className="space-y-4">
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
               <h2 className="text-sm font-semibold text-white">
-                Latest AI-Parsed 10-K, 10-Q &amp; Global Earnings Summaries
+                Latest AI-Parsed 10-K, 10-Q &amp; Global Company Profiles
               </h2>
               <span className="text-xs text-slate-400">
-                Showing {filteredFilings.length} of {filings.length} briefs • Click any card for full dossier
+                Showing {filteredFilings.length} of {filings.length} briefs across {coveredCompanyCount} companies • Click any card for full dossier
               </span>
             </div>
 
@@ -903,17 +931,19 @@ export default function DashboardClient({
                     onClick={() => setSelectedTicker(f.ticker)}
                     className="rounded-xl border border-slate-800 bg-[#111827]/90 p-5 hover:border-sky-500/40 cursor-pointer transition space-y-3"
                   >
-                    <div className="flex items-center justify-between">
-                      <div className="flex items-center gap-2">
-                        <span className="font-mono font-bold text-sky-400 text-sm">
+                    <div className="flex items-center justify-between gap-2">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="font-mono font-bold text-sky-400 text-sm shrink-0">
                           {f.ticker}
                         </span>
-                        <span className="text-xs font-medium text-slate-300">
+                        <span className="text-xs font-medium text-slate-300 truncate">
                           {f.company_name}
                         </span>
                       </div>
-                      <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 text-[11px] font-mono">
-                        {f.filing_type} • {f.filing_date}
+                      <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 text-[11px] font-mono shrink-0">
+                        {f.filing_type === "Earnings Brief"
+                          ? `Profile & News • ${f.filing_date}`
+                          : `${f.filing_type} • ${f.filing_date}`}
                       </span>
                     </div>
 
@@ -976,9 +1006,9 @@ export default function DashboardClient({
                       <span>•</span>
                     </>
                   )}
-                  <span>Contract: {selectedEquity.contract_type}</span>
+                  <span>Est. Pricing: {selectedEquity.contract_type || "Standard"}</span>
                   <span>•</span>
-                  <span>Qual. Moat: {selectedEquity.qualification_years} yrs</span>
+                  <span>Est. Moat: {selectedEquity.qualification_years} yrs</span>
                   {selectedEquity.adv_mat_rev_pct != null && (
                     <>
                       <span>•</span>
@@ -1104,122 +1134,205 @@ export default function DashboardClient({
               )}
             </div>
 
-            {/* Verified Upstream Suppliers & Downstream Customers */}
-            <div className="space-y-2.5">
+            {/* Value-Chain & Competitive Landscape: 1. Upstream -> 2. Competitors -> 3. Downstream */}
+            <div className="space-y-3">
               <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                Verified Supply Chain &amp; Value-Chain Counterparties
+                Value-Chain &amp; Competitive Landscape (Upstream • Competitors • Downstream)
               </h3>
-              {selectedEquitySupplyChain.length === 0 ? (
-                <p className="text-xs text-slate-500">
-                  No disclosed upstream suppliers or downstream customers extracted from filings yet.
-                </p>
-              ) : (
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  <div className="rounded-lg bg-[#111827] border border-slate-800 p-3.5 space-y-2.5">
-                    <div className="text-[11px] font-mono uppercase tracking-wider text-amber-400">
-                      Upstream Raw Material Suppliers ({upstreamSuppliers.length})
-                    </div>
-                    {upstreamSuppliers.length === 0 ? (
-                      <p className="text-xs text-slate-500">None disclosed in parsed filings.</p>
-                    ) : (
-                      <div className="space-y-2.5">
-                        {upstreamSuppliers.map((sup, idx) => (
-                          <div
-                            key={`${sup.counterparty_name}-${idx}`}
-                            className="rounded bg-[#090d16] border border-slate-800/80 p-2.5 space-y-1"
-                          >
-                            <div className="flex items-center justify-between gap-1.5 flex-wrap">
-                              <span className="text-xs font-semibold text-white">
-                                {sup.counterparty_name}
-                              </span>
-                              <div className="flex items-center gap-1">
-                                {sup.is_sole_source && (
-                                  <span className="px-1.5 py-0.2 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30 text-[10px] font-mono">
-                                    SOLE SOURCE
-                                  </span>
-                                )}
-                                {sup.exposure_pct != null && (
-                                  <span className="px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-300 text-[10px] font-mono">
-                                    {sup.exposure_pct}%
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-                            <div className="text-[11px] text-sky-300 font-medium">
-                              Input: {sup.material_or_product}
-                            </div>
-                            {sup.source_quote && (
-                              <p className="text-[11px] text-slate-400 italic leading-snug">
-                                &ldquo;{sup.source_quote}&rdquo;
-                                {sup.source_filing_type && (
-                                  <span className="not-italic font-mono text-[10px] text-slate-500 ml-1">
-                                    ({sup.source_filing_type} {sup.source_filing_date})
-                                  </span>
-                                )}
-                              </p>
-                            )}
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                  </div>
 
-                  <div className="rounded-lg bg-[#111827] border border-slate-800 p-3.5 space-y-2.5">
-                    <div className="text-[11px] font-mono uppercase tracking-wider text-emerald-400">
-                      Downstream Customers &amp; OEMs ({downstreamCustomers.length})
-                    </div>
-                    {downstreamCustomers.length === 0 ? (
-                      <p className="text-xs text-slate-500">None disclosed in parsed filings.</p>
-                    ) : (
-                      <div className="space-y-2.5">
-                        {downstreamCustomers.map((cust, idx) => (
-                          <div
-                            key={`${cust.counterparty_name}-${idx}`}
-                            className="rounded bg-[#090d16] border border-slate-800/80 p-2.5 space-y-1"
-                          >
-                            <div className="flex items-center justify-between gap-1.5 flex-wrap">
-                              <span className="text-xs font-semibold text-white">
-                                {cust.counterparty_name}
+              {/* 1. Upstream Suppliers */}
+              <div className="rounded-lg bg-[#111827] border border-slate-800 p-3.5 space-y-2.5">
+                <div className="text-[11px] font-mono uppercase tracking-wider text-amber-400">
+                  1. Upstream Raw Material Suppliers ({upstreamSuppliers.length})
+                </div>
+                {upstreamSuppliers.length === 0 ? (
+                  <p className="text-xs text-slate-500">
+                    None disclosed in parsed filings.
+                  </p>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                    {upstreamSuppliers.map((sup, idx) => (
+                      <div
+                        key={`${sup.counterparty_name}-${idx}`}
+                        className="rounded bg-[#090d16] border border-slate-800/80 p-2.5 space-y-1"
+                      >
+                        <div className="flex items-center justify-between gap-1.5 flex-wrap">
+                          <span className="text-xs font-semibold text-white">
+                            {sup.counterparty_name}
+                          </span>
+                          <div className="flex items-center gap-1">
+                            {sup.is_sole_source && (
+                              <span className="px-1.5 py-0.2 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30 text-[10px] font-mono">
+                                SOLE SOURCE
                               </span>
-                              <div className="flex items-center gap-1">
-                                {cust.is_sole_source && (
-                                  <span className="px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[10px] font-mono">
-                                    10%+ CONC.
-                                  </span>
-                                )}
-                                {cust.exposure_pct != null && (
-                                  <span className="px-1.5 py-0.2 rounded bg-emerald-500/15 text-emerald-300 text-[10px] font-mono">
-                                    {cust.exposure_pct}%
-                                  </span>
-                                )}
-                              </div>
-                            </div>
-                            <div className="text-[11px] text-sky-300 font-medium">
-                              Product: {cust.material_or_product}
-                            </div>
-                            {cust.source_quote && (
-                              <p className="text-[11px] text-slate-400 italic leading-snug">
-                                &ldquo;{cust.source_quote}&rdquo;
-                                {cust.source_filing_type && (
-                                  <span className="not-italic font-mono text-[10px] text-slate-500 ml-1">
-                                    ({cust.source_filing_type} {cust.source_filing_date})
-                                  </span>
-                                )}
-                              </p>
+                            )}
+                            {sup.exposure_pct != null && (
+                              <span className="px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-300 text-[10px] font-mono">
+                                {sup.exposure_pct}%
+                              </span>
                             )}
                           </div>
-                        ))}
+                        </div>
+                        <div className="text-[11px] text-sky-300 font-medium">
+                          Input: {sup.material_or_product}
+                        </div>
+                        {sup.source_quote && (
+                          <p className="text-[11px] text-slate-400 italic leading-snug">
+                            &ldquo;{sup.source_quote}&rdquo;
+                            {sup.source_filing_type && (
+                              <span className="not-italic font-mono text-[10px] text-slate-500 ml-1">
+                                ({sup.source_filing_type} {sup.source_filing_date})
+                              </span>
+                            )}
+                          </p>
+                        )}
                       </div>
-                    )}
+                    ))}
                   </div>
+                )}
+              </div>
+
+              {/* 2. Competitors & Sub-Sector Peers */}
+              <div className="rounded-lg bg-[#111827] border border-slate-800 p-3.5 space-y-3">
+                <div className="text-[11px] font-mono uppercase tracking-wider text-purple-400">
+                  2. Competitors &amp; Sub-Sector Peers ({filingCompetitors.length} Filing-Disclosed • {universePeers.length} Universe Peers)
                 </div>
-              )}
+
+                {filingCompetitors.length > 0 && (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                    {filingCompetitors.map((comp, idx) => (
+                      <div
+                        key={`${comp.counterparty_name}-${idx}`}
+                        className="rounded bg-[#090d16] border border-slate-800/80 p-2.5 space-y-1"
+                      >
+                        <div className="flex items-center justify-between gap-1.5 flex-wrap">
+                          <span className="text-xs font-semibold text-white">
+                            {comp.counterparty_name}
+                          </span>
+                          <div className="flex items-center gap-1">
+                            {comp.is_sole_source && (
+                              <span className="px-1.5 py-0.2 rounded bg-purple-500/15 text-purple-300 border border-purple-500/30 text-[10px] font-mono">
+                                PRIMARY RIVAL
+                              </span>
+                            )}
+                            {comp.exposure_pct != null && (
+                              <span className="px-1.5 py-0.2 rounded bg-sky-500/15 text-sky-300 text-[10px] font-mono">
+                                {comp.exposure_pct}% Share
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="text-[11px] text-purple-300 font-medium">
+                          Overlap: {comp.material_or_product}
+                        </div>
+                        {comp.source_quote && (
+                          <p className="text-[11px] text-slate-400 italic leading-snug">
+                            &ldquo;{comp.source_quote}&rdquo;
+                            {comp.source_filing_type && (
+                              <span className="not-italic font-mono text-[10px] text-slate-500 ml-1">
+                                ({comp.source_filing_type} {comp.source_filing_date})
+                              </span>
+                            )}
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {universePeers.length > 0 ? (
+                  <div className={filingCompetitors.length > 0 ? "pt-2 border-t border-slate-800/70" : ""}>
+                    <div className="text-[10px] font-mono uppercase text-slate-500 mb-1.5">
+                      Tracked Peers in {selectedEquity.sub_sector} (Click to Inspect):
+                    </div>
+                    <div className="flex flex-wrap gap-1.5">
+                      {universePeers.map((peer) => (
+                        <button
+                          key={peer.ticker}
+                          onClick={() => setSelectedTicker(peer.ticker)}
+                          className="px-2.5 py-1 rounded bg-[#090d16] hover:bg-slate-800 border border-slate-700/80 text-xs text-left transition flex items-center gap-1.5"
+                        >
+                          <span className="font-mono font-semibold text-sky-400">
+                            {peer.ticker}
+                          </span>
+                          <span className="text-slate-300 truncate max-w-[140px]">
+                            {peer.company_name}
+                          </span>
+                          {peer.market_cap_usd != null && (
+                            <span className="text-[10px] font-mono text-slate-500">
+                              ({formatMarketCap(peer.market_cap_usd)})
+                            </span>
+                          )}
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                ) : (
+                  filingCompetitors.length === 0 && (
+                    <p className="text-xs text-slate-500">
+                      No named competitors extracted from filings yet and no other tracked peers in this sub-sector.
+                    </p>
+                  )
+                )}
+              </div>
+
+              {/* 3. Downstream Customers & OEMs */}
+              <div className="rounded-lg bg-[#111827] border border-slate-800 p-3.5 space-y-2.5">
+                <div className="text-[11px] font-mono uppercase tracking-wider text-emerald-400">
+                  3. Downstream Customers &amp; OEMs ({downstreamCustomers.length})
+                </div>
+                {downstreamCustomers.length === 0 ? (
+                  <p className="text-xs text-slate-500">
+                    None disclosed in parsed filings.
+                  </p>
+                ) : (
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                    {downstreamCustomers.map((cust, idx) => (
+                      <div
+                        key={`${cust.counterparty_name}-${idx}`}
+                        className="rounded bg-[#090d16] border border-slate-800/80 p-2.5 space-y-1"
+                      >
+                        <div className="flex items-center justify-between gap-1.5 flex-wrap">
+                          <span className="text-xs font-semibold text-white">
+                            {cust.counterparty_name}
+                          </span>
+                          <div className="flex items-center gap-1">
+                            {cust.is_sole_source && (
+                              <span className="px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[10px] font-mono">
+                                10%+ CONC.
+                              </span>
+                            )}
+                            {cust.exposure_pct != null && (
+                              <span className="px-1.5 py-0.2 rounded bg-emerald-500/15 text-emerald-300 text-[10px] font-mono">
+                                {cust.exposure_pct}%
+                              </span>
+                            )}
+                          </div>
+                        </div>
+                        <div className="text-[11px] text-sky-300 font-medium">
+                          Product: {cust.material_or_product}
+                        </div>
+                        {cust.source_quote && (
+                          <p className="text-[11px] text-slate-400 italic leading-snug">
+                            &ldquo;{cust.source_quote}&rdquo;
+                            {cust.source_filing_type && (
+                              <span className="not-italic font-mono text-[10px] text-slate-500 ml-1">
+                                ({cust.source_filing_type} {cust.source_filing_date})
+                              </span>
+                            )}
+                          </p>
+                        )}
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
             </div>
 
             {/* Last Few 10-K / 10-Q / Earnings Reports */}
             <div className="space-y-3">
               <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                Recent 10-K, 10-Q &amp; Earnings Intelligence ({selectedEquityFilings.length})
+                Recent 10-K, 10-Q &amp; Company Profile Intelligence ({selectedEquityFilings.length})
               </h3>
               {selectedEquityFilings.length === 0 ? (
                 <div className="rounded-lg bg-[#111827] border border-slate-800 p-4 text-xs text-slate-400">
@@ -1231,9 +1344,13 @@ export default function DashboardClient({
                     key={f.id}
                     className="rounded-xl bg-[#111827] border border-slate-800 p-4 space-y-3"
                   >
-                    <div className="flex items-center justify-between">
+                    <div className="flex items-center justify-between gap-2 flex-wrap">
                       <span className="px-2.5 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-500/30 text-xs font-mono font-semibold">
-                        {f.filing_type} • Filed {f.filing_date}
+                        {f.fiscal_period
+                          ? `${f.fiscal_period} • ${f.filing_date}`
+                          : f.filing_type === "Earnings Brief"
+                          ? `Profile & News • As of ${f.filing_date}`
+                          : `${f.filing_type} • Filed ${f.filing_date}`}
                       </span>
                       {f.source_url && (
                         <a
