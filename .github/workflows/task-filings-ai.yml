@@ -15,5 +15,5 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/setup-python
-      - name: Extract product-level value chains
-        run: python pipeline/extract_products.py
+      - name: Parse filings & synthesize insights
+        run: python pipeline/filings_ai.py
