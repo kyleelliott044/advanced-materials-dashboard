@@ -2,12 +2,13 @@ import os
 import re
 import time
 import json
+from datetime import date
+from typing import List, Optional
 import requests
 import psycopg
 import yfinance as yf
 from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field
-from typing import List
 from google import genai
 from google.genai import types
 
@@ -202,7 +203,7 @@ SENSITIVITY_RULES = [
     ("Olefins & Polyolefins", "CL=F", "Margin Spread", "Direct (Demand)", "US ethane-to-crude oil cost advantage widens North American polyethylene margins when oil rises."),
     ("Packaging & Specialty Plastics", "NG=F", "Cost Input", "Inverse (Cost)", "USGC ethane/natural gas feedstock costs vs. global polyethylene clearing prices."),
     ("Fluoropolymers & Titanium Tech", "SMH", "Revenue Proxy", "Direct (Demand)", "High-purity PFA fluoropolymers essential for semiconductor fab piping and chemical handling."),
-    # New Commodity & Macro Rules
+    # Additional Commodity & Macro Rules
     ("Specialty Alloys", "PNICKUSDM", "Cost Input", "Pass-Through", "Nickel is a core alloying element; surcharges pass through with a 1-2 quarter lag."),
     ("Specialty Alloys", "PCOBAUSDM", "Cost Input", "Pass-Through", "Cobalt superalloy melt costs indexed to aerospace OEM contracts."),
     ("High-Nickel Cathodes", "PNICKUSDM", "Cost Input", "Pass-Through", "Nickel sulfate costs pass through to battery cell makers."),
@@ -214,10 +215,51 @@ SENSITIVITY_RULES = [
     ("Optical Fiber & Display Glass", "PL=F", "Cost Input", "Inverse (Cost)", "Platinum-rhodium bushings are required for high-temp specialty glass drawing."),
     ("Semicon Packaging & Chemicals", "SI=F", "Cost Input", "Pass-Through", "Silver conductive pastes and plating chemistry for chip packaging."),
     ("Medical Devices & Biomaterials", "IHI", "Revenue Proxy", "Direct (Demand)", "Procedure volumes and med-tech capex drive biocompatible polymer & tissue demand."),
+    # AI-Grounded Specialty Material Spot Rules
+    ("Rare Earth Mining & Magnets", "NDPR_CN", "Revenue Proxy", "Direct (Demand)", "NdPr oxide spot pricing directly governs rare earth separation and magnet margins."),
+    ("Rare Earth Oxides & Metals", "NDPR_CN", "Revenue Proxy", "Direct (Demand)", "Spot NdPr oxide benchmarks dictate upstream oxide realization."),
+    ("NdFeB Permanent Magnets", "NDPR_CN", "Cost Input", "Pass-Through", "NdPr metal feedstock passes through to motor OEMs with a quarterly lag."),
+    ("Lithium Chemicals", "LICARB_CN", "Revenue Proxy", "Direct (Demand)", "Battery-grade lithium carbonate spot prices drive brine and converter EBITDA."),
+    ("Lithium Refining & Batteries", "LICARB_CN", "Revenue Proxy", "Direct (Demand)", "Spot lithium carbonate/hydroxide spreads set refining conversion margins."),
+    ("High-Nickel Cathodes", "LICARB_CN", "Cost Input", "Pass-Through", "Lithium carbonate spot indices pass through in cathode tolling agreements."),
+    ("High-Nickel Cathodes", "COBALT_SULFATE", "Cost Input", "Pass-Through", "Battery-grade cobalt sulfate costs are indexed to cell-maker contracts."),
+    ("Cathodes & Synthetic Anodes", "LICARB_CN", "Cost Input", "Pass-Through", "Lithium feedstock cost passes through with IRA-compliant processing spreads."),
+    ("Battery Electrolytes", "LICARB_CN", "Cost Input", "Pass-Through", "Lithium carbonate is the primary precursor for LiPF6 electrolyte salts."),
+    ("Natural Graphite Anode Mat.", "SPHERICAL_GRAPHITE", "Revenue Proxy", "Direct (Demand)", "Uncoated spherical graphite spot pricing benchmarks ex-China anode economics."),
+    ("Synthetic Graphite Anodes", "SPHERICAL_GRAPHITE", "Revenue Proxy", "Direct (Demand)", "Spherical graphite spot benchmarks compete directly with synthetic anode pricing."),
+    ("Compound Semicon & Photonics", "GALLIUM_9999", "Cost Input", "Inverse (Cost)", "Refined gallium is the core substrate feedstock for GaAs/GaN RF and optical wafers."),
+    ("Compound Semicon & Photonics", "GERMANIUM_INGOT", "Cost Input", "Inverse (Cost)", "Germanium substrates are required for space solar cells and IR/optical photonics."),
+    ("Optical Fiber & Display Glass", "GERMANIUM_INGOT", "Cost Input", "Inverse (Cost)", "Germanium tetrachloride is a critical core dopant in telecom optical fiber preforms."),
+    ("Silicon Wafers", "POLYSILICON_N", "Cost Input", "Pass-Through", "Electronic-grade polysilicon feedstock passes through under multi-year wafer LTAs."),
+    ("Silicon Wafers & PVC", "POLYSILICON_N", "Cost Input", "Pass-Through", "Polysilicon spot trends signal upstream silicon supply-demand tightness."),
+    ("Aerospace Carbon Fiber Composites", "CARBON_FIBER_T700", "Revenue Proxy", "Direct (Demand)", "Industrial carbon fiber tow pricing tracks global composite utilization."),
+    ("Carbon Fiber & Advanced Films", "CARBON_FIBER_T700", "Revenue Proxy", "Direct (Demand)", "Standard-modulus carbon fiber spot rates reflect wind and pressure-vessel demand."),
 ]
 
 
 # Pydantic Schemas for Guaranteed Structured Outputs
+class SupplyChainLink(BaseModel):
+    counterparty_name: str = Field(
+        description="Exact company name if explicitly disclosed (e.g., 'Apple', 'TSMC', 'Boeing', 'Samsung SDI'), OR named end-market/material group if individual names are confidential (e.g., 'Tier-1 Aerospace OEMs')."
+    )
+    is_named_entity: bool = Field(
+        description="True ONLY if a specific company/organization name is explicitly stated in the text."
+    )
+    material_or_product: str = Field(
+        description="Specific raw material purchased (for suppliers) or engineered product sold (for customers)."
+    )
+    is_sole_source: bool = Field(
+        description="True if text notes single-source, sole-supplier, or 10%+ customer concentration."
+    )
+    exposure_pct: Optional[float] = Field(
+        default=None,
+        description="Disclosed % of revenue or raw material spend if stated, otherwise null.",
+    )
+    source_quote: str = Field(
+        description="Verbatim 10-30 word quote from the source text proving this supplier or customer link."
+    )
+
+
 class FilingSummarySchema(BaseModel):
     headline: str = Field(description="Concise 1-sentence institutional headline summarizing the filing/earnings.")
     executive_summary: str = Field(description="3-4 sentence analytical summary of revenue drivers, volume trends, and strategic positioning.")
@@ -225,6 +267,14 @@ class FilingSummarySchema(BaseModel):
     pricing_and_margins: str = Field(description="Specific details on gross/operating margins, raw material pass-through, surcharges, or price/cost spread.")
     capex_and_backlog: str = Field(description="Details on order backlog, customer qualification milestones, capacity expansion, or capex guidance.")
     key_risks: str = Field(description="Top 1-2 operational, geopolitical, or cyclical risks highlighted in the report.")
+    upstream_suppliers: List[SupplyChainLink] = Field(
+        default_factory=list,
+        description="Explicitly disclosed upstream raw material suppliers, feedstock sources, or sole-source inputs found in the text.",
+    )
+    downstream_customers: List[SupplyChainLink] = Field(
+        default_factory=list,
+        description="Explicitly disclosed downstream customers, OEMs, or major customer concentration disclosures found in the text.",
+    )
 
 
 class MacroNarrativeSchema(BaseModel):
@@ -249,6 +299,68 @@ class ScopeInsight(BaseModel):
 
 class InsightBatchSchema(BaseModel):
     insights: List[ScopeInsight]
+
+
+def _quote_exists(quote: str, source_text: str) -> bool:
+    if not quote or len(quote.strip()) < 12:
+        return False
+    clean_q = re.sub(r"[^a-z0-9 ]+", " ", quote.lower()).split()
+    clean_s = " ".join(re.sub(r"[^a-z0-9 ]+", " ", source_text.lower()).split())
+    if len(clean_q) < 5:
+        return " ".join(clean_q) in clean_s
+    # Verify at least one 6-word exact phrase matches the filing text
+    return any(" ".join(clean_q[i : i + 6]) in clean_s for i in range(len(clean_q) - 5))
+
+
+def save_supply_chain_links(conn, ticker: str, filing_type: str, filing_date: str, parsed: dict, source_text: str):
+    rows = []
+    for direction, key in (("upstream_supplier", "upstream_suppliers"), ("downstream_customer", "downstream_customers")):
+        for item in (parsed.get(key) or []):
+            cname = (item.get("counterparty_name") or "").strip()
+            mat = (item.get("material_or_product") or "").strip()
+            if not cname or not mat:
+                continue
+            quote = (item.get("source_quote") or "").strip()
+            # Drop unverified named entities so the AI never fabricates customer/supplier names
+            if item.get("is_named_entity") and not _quote_exists(quote, source_text):
+                continue
+            rows.append((
+                ticker,
+                direction,
+                cname[:140],
+                bool(item.get("is_named_entity", False)),
+                mat[:180],
+                bool(item.get("is_sole_source", False)),
+                item.get("exposure_pct"),
+                filing_type,
+                filing_date,
+                quote[:400],
+            ))
+
+    if not rows:
+        return
+
+    with conn.cursor() as cur:
+        cur.executemany(
+            """
+            INSERT INTO equity_supply_chain (
+                ticker, direction, counterparty_name, is_named_entity,
+                material_or_product, is_sole_source, exposure_pct,
+                source_filing_type, source_filing_date, source_quote
+            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (ticker, direction, counterparty_name, material_or_product) DO UPDATE SET
+                is_named_entity = EXCLUDED.is_named_entity,
+                is_sole_source = EXCLUDED.is_sole_source,
+                exposure_pct = COALESCE(EXCLUDED.exposure_pct, equity_supply_chain.exposure_pct),
+                source_filing_type = EXCLUDED.source_filing_type,
+                source_filing_date = EXCLUDED.source_filing_date,
+                source_quote = EXCLUDED.source_quote,
+                updated_at = NOW();
+            """,
+            rows,
+        )
+    conn.commit()
+    print(f"Saved {len(rows)} verified supply chain links for {ticker}")
 
 
 def seed_sensitivity_map(conn):
@@ -285,7 +397,13 @@ def extract_filing_text(cik_unpadded: str, accession_number: str, primary_doc: s
     text = soup.get_text(separator=" ", strip=True)
     text = re.sub(r"\s+", " ", text)
 
+    item1_match = re.search(r"Item\s+1\.\s+Business", text, re.IGNORECASE)
     mda_match = re.search(r"(Item\s+2\.|Item\s+7\.)\s+Management.{0,30}Discussion", text, re.IGNORECASE)
+
+    if item1_match and mda_match and mda_match.start() > item1_match.start():
+        item1_slice = text[item1_match.start() : item1_match.start() + 9000]
+        mda_slice = text[mda_match.start() : mda_match.start() + 19000]
+        return f"{item1_slice} ... {mda_slice}"
     if mda_match:
         start = mda_match.start()
         return text[start : start + 28000]
@@ -346,7 +464,7 @@ def process_sec_filings(conn, limit_tickers=8):
 
                     prompt = f"""
                     You are an institutional advanced materials equity analyst. Analyze this SEC {form} filing excerpt for {company_name} ({ticker}), sub-sector: {sub_sector}, filed on {f_date}.
-                    Extract concrete operational insights on demand trends, pricing power/raw material pass-through, backlog/capex, and risks.
+                    Extract concrete operational insights on demand trends, pricing power/raw material pass-through, backlog/capex, risks, and any explicitly disclosed upstream raw material suppliers or downstream customers (with verbatim quotes). Do NOT guess or invent company names not present in the text.
 
                     FILING EXCERPT:
                     {excerpt}
@@ -385,6 +503,7 @@ def process_sec_filings(conn, limit_tickers=8):
                             source_url,
                         ))
                     conn.commit()
+                    save_supply_chain_links(conn, ticker, form, f_date, parsed, excerpt)
                     filings_found += 1
                     new_added += 1
                     print(f"Summarized {ticker} {form} ({f_date})")
@@ -411,6 +530,7 @@ def process_international_briefs(conn, limit_tickers=5):
         """, (limit_tickers,))
         missing = cur.fetchall()
 
+    today_str = date.today().isoformat()
     for ticker, company_name, sub_sector, contract_type, qual_years in missing:
         try:
             tk = yf.Ticker(ticker)
@@ -422,11 +542,13 @@ def process_international_briefs(conn, limit_tickers=5):
             rev_growth = info.get("revenueGrowth", "N/A")
             gross_margin = info.get("grossMargins", "N/A")
             ebitda_margin = info.get("ebitdaMargins", "N/A")
+            source_text = f"{biz_summary}\n{headlines_str}"
 
             prompt = f"""
             You are an institutional advanced materials equity analyst covering global equities.
             Synthesize a structured research & earnings brief for {company_name} ({ticker}), Sub-sector: {sub_sector}, Contract Type: {contract_type}, Qualification Moat: {qual_years} yrs.
             Financial Metrics: Revenue Growth={rev_growth}, Gross Margin={gross_margin}, EBITDA Margin={ebitda_margin}.
+            Extract any explicitly mentioned upstream raw material suppliers or downstream customers with verbatim quotes. Do NOT guess or invent company names not present in the text.
             Business Profile: {biz_summary}
             Recent News Headlines:
             {headlines_str}
@@ -461,6 +583,7 @@ def process_international_briefs(conn, limit_tickers=5):
                     f"https://finance.yahoo.com/quote/{ticker}",
                 ))
             conn.commit()
+            save_supply_chain_links(conn, ticker, "Earnings Brief", today_str, parsed, source_text)
             print(f"Generated global brief for {ticker}")
             time.sleep(0.3)
         except Exception as e:
