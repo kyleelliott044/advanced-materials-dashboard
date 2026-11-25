@@ -243,7 +243,8 @@ def call_gemini(prompt: str, schema, retries: int = 2):
                     raise
 
     return _call_groq_fallback(prompt, schema)
-    
+
+
 # Sub-sector fallback sensitivity map
 SENSITIVITY_RULES = [
     ("Industrial Gases", "NG=F", "Cost Input", "Pass-Through", "Natural gas is primary feedstock for hydrogen/syngas; indexed via take-or-pay pass-through clauses."),
@@ -387,7 +388,7 @@ class SupplyChainLink(BaseModel):
 
 class FilingSummarySchema(BaseModel):
     fiscal_period: str = Field(
-        description="Exact reporting period covered (e.g., 'FY2025 10-K', 'Q3 2026 10-Q', or 'Business Profile & Recent News')."
+        description="Exact reporting period covered (e.g., 'FY2025 10-K', 'Q3 2026 10-Q', 'FY2025 20-F', 'H1 2026 Half-Year Report', or 'Q3 2026 Quarterly Report')."
     )
     headline: str = Field(description="Concise 1-sentence institutional headline summarizing the filing/earnings.")
     executive_summary: str = Field(description="3-4 sentence analytical summary of revenue drivers, volume trends, and strategic positioning.")
@@ -502,7 +503,7 @@ def save_commodity_drivers(conn, ticker: str, filing_type: str, filing_date: str
             rows,
         )
     conn.commit()
-    print(f"Saved {len(rows)} AI commodity drivers for {ticker}")
+    print(f"Saved {len(rows)} AI commodity drivers for {ticker}", flush=True)
     return conn
 
 
@@ -572,7 +573,7 @@ def seed_sensitivity_map(conn):
                 impact_direction = EXCLUDED.impact_direction,
                 mechanism_note = EXCLUDED.mechanism_note;
         """, SENSITIVITY_RULES)
-    print(f"Upserted {len(SENSITIVITY_RULES)} commodity sensitivity rules.")
+    print(f"Upserted {len(SENSITIVITY_RULES)} commodity sensitivity rules.", flush=True)
     return conn
 
 
@@ -630,16 +631,83 @@ def ensure_ai_tables(conn):
     return conn
 
 
+def _normalize_co_name(name: str) -> str:
+    cleaned = re.sub(
+        r"\b(inc|corp|corporation|co|ltd|limited|plc|ag|se|sa|nv|ab|asa|oyj|kgaa|holdings?|group|materials?|technologies|industries)\b",
+        "",
+        name.lower(),
+    )
+    return re.sub(r"[^a-z0-9]", "", cleaned)
+
+
 def fetch_sec_ticker_map():
     resp = requests.get("https://www.sec.gov/files/company_tickers.json", headers=SEC_HEADERS, timeout=20)
     resp.raise_for_status()
     raw = resp.json()
-    mapping = {}
+    by_ticker = {}
+    by_name = {}
     for entry in raw.values():
         t = entry["ticker"].upper()
         cik_padded = str(entry["cik_str"]).zfill(10)
-        mapping[t] = (cik_padded, str(entry["cik_str"]))
-    return mapping
+        pair = (cik_padded, str(entry["cik_str"]))
+        by_ticker[t] = pair
+        norm = _normalize_co_name(entry.get("title", ""))
+        if len(norm) >= 5 and norm not in by_name:
+            by_name[norm] = pair
+    return by_ticker, by_name
+
+
+def _is_substantive_sec_form(form: str, doc_name: str, doc_size: int) -> bool:
+    if form in ("10-K", "10-Q", "20-F", "40-F"):
+        return True
+    if form == "6-K":
+        doc_l = (doc_name or "").lower()
+        if any(k in doc_l for k in ("earn", "interim", "quarter", "result", "q1", "q2", "q3", "q4", "h1", "h2", "99")):
+            return True
+        return (doc_size or 0) >= 35000
+    return False
+
+
+def _detect_sec_keep_count(forms_and_dates: list[tuple[str, str]]) -> int:
+    """Returns 2 for semi-annual FPI filers (20-F/40-F + H1 6-K), else 3 for quarterly filers."""
+    has_fpi_annual = any(f in ("20-F", "40-F") for f, _ in forms_and_dates)
+    if not has_fpi_annual:
+        return 3
+    parsed_dates = []
+    for f, d in forms_and_dates:
+        if f == "6-K":
+            try:
+                parsed_dates.append(date.fromisoformat(d))
+            except ValueError:
+                continue
+    six_k_dates = sorted(set(parsed_dates), reverse=True)
+    if len(six_k_dates) >= 2:
+        gaps = [(six_k_dates[i] - six_k_dates[i + 1]).days for i in range(len(six_k_dates) - 1)]
+        median_gap = sorted(gaps)[len(gaps) // 2]
+        return 2 if median_gap >= 145 else 3
+    return 2
+
+
+def _prune_old_filings(conn, ticker: str, keep_count: int):
+    """Deletes stale filings beyond the ticker's cadence window (3 for quarterly, 2 for semi-annual)."""
+    conn = ensure_conn(conn)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            DELETE FROM company_filings_ai
+            WHERE ticker = %s
+              AND id NOT IN (
+                  SELECT id
+                  FROM company_filings_ai
+                  WHERE ticker = %s
+                  ORDER BY filing_date DESC, id DESC
+                  LIMIT %s
+              );
+            """,
+            (ticker, ticker, keep_count),
+        )
+    conn.commit()
+    return conn
 
 
 def _extract_keyword_windows(text: str, patterns: list[str], window: int = 1800, max_total: int = 8000) -> str:
@@ -697,16 +765,16 @@ def extract_filing_text(cik_unpadded: str, accession_number: str, primary_doc: s
     return combined[:28000]
 
 
-def process_sec_filings(conn, limit_tickers=3):
+def process_sec_filings(conn, limit_tickers=4):
     conn = ensure_conn(conn)
-    sec_map = fetch_sec_ticker_map()
+    sec_by_ticker, sec_by_name = fetch_sec_ticker_map()
     with conn.cursor() as cur:
         cur.execute("""
             SELECT e.ticker, e.company_name, e.sub_sector
             FROM equities_universe e
             LEFT JOIN company_filings_ai f ON e.ticker = f.ticker
             GROUP BY e.ticker, e.company_name, e.sub_sector, e.qualification_years
-            ORDER BY COUNT(f.id) ASC, e.qualification_years DESC NULLS LAST, e.ticker ASC;
+            ORDER BY COUNT(f.id) ASC, MAX(f.filing_date) ASC NULLS FIRST, e.qualification_years DESC NULLS LAST;
         """)
         all_equities = cur.fetchall()
 
@@ -715,184 +783,327 @@ def process_sec_filings(conn, limit_tickers=3):
         if processed >= limit_tickers:
             break
         clean_ticker = ticker.upper()
-        if clean_ticker not in sec_map:
+        cik_pair = sec_by_ticker.get(clean_ticker) or sec_by_name.get(_normalize_co_name(company_name))
+        if not cik_pair:
             continue
 
-        cik_padded, cik_unpadded = sec_map[clean_ticker]
+        cik_padded, cik_unpadded = cik_pair
         try:
             conn = ensure_conn(conn)
             sub_url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
             sub_resp = requests.get(sub_url, headers=SEC_HEADERS, timeout=15)
             sub_resp.raise_for_status()
             recent = sub_resp.json()["filings"]["recent"]
+            sizes = recent.get("size") or [0] * len(recent["form"])
 
-            filings_found = 0
+            candidates = []
+            for i, form in enumerate(recent["form"]):
+                doc_name = recent["primaryDocument"][i]
+                if _is_substantive_sec_form(form, doc_name, sizes[i]):
+                    candidates.append((form, recent["filingDate"][i], recent["accessionNumber"][i], doc_name))
+                if len(candidates) >= 8:
+                    break
+
+            keep_count = _detect_sec_keep_count([(f, d) for f, d, _, _ in candidates])
+            target_candidates = candidates[:keep_count]
+
             new_added = 0
             all_apis_exhausted = False
-            for i, form in enumerate(recent["form"]):
-                if form in ("10-K", "10-Q") and filings_found < 3:
-                    f_date = recent["filingDate"][i]
-                    acc_num = recent["accessionNumber"][i]
-                    doc_name = recent["primaryDocument"][i]
-                    source_url = f"https://www.sec.gov/Archives/edgar/data/{cik_unpadded}/{acc_num.replace('-', '')}/{doc_name}"
+            for form, f_date, acc_num, doc_name in target_candidates:
+                source_url = f"https://www.sec.gov/Archives/edgar/data/{cik_unpadded}/{acc_num.replace('-', '')}/{doc_name}"
 
-                    conn = ensure_conn(conn)
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            "SELECT 1 FROM company_filings_ai WHERE ticker = %s AND filing_type = %s AND filing_date = %s;",
-                            (ticker, form, f_date),
-                        )
-                        if cur.fetchone():
-                            filings_found += 1
-                            continue
-
-                    excerpt = extract_filing_text(cik_unpadded, acc_num, doc_name)
-                    if len(excerpt) < 500:
+                conn = ensure_conn(conn)
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT 1 FROM company_filings_ai WHERE ticker = %s AND filing_type = %s AND filing_date = %s;",
+                        (ticker, form, f_date),
+                    )
+                    if cur.fetchone():
                         continue
 
-                    prompt = f"""
-                    You are an institutional advanced materials equity analyst. Analyze this SEC {form} filing excerpt for {company_name} ({ticker}), sub-sector: {sub_sector}, filed on {f_date}.
-                    1. Extract operational insights on demand trends, pricing power/raw material pass-through, backlog/capex (ONLY if stated in the excerpt; return null if not disclosed), and risks.
-                    2. Extract 3 to 6 specific company-level commodity, raw material, feedstock, and energy drivers (using human-readable names like 'High-Purity Nickel' or 'Natural Gas', never ticker symbols) and match them to the closest code in this list when applicable:
-                    {CANONICAL_INPUT_GUIDE}
-                    3. Extract any explicitly disclosed upstream raw material suppliers, named competitors, or downstream customers with verbatim quotes.
+                excerpt = extract_filing_text(cik_unpadded, acc_num, doc_name)
+                if len(excerpt) < 500:
+                    continue
 
-                    FILING EXCERPT:
-                    {excerpt}
-                    """
+                prompt = f"""
+                You are an institutional advanced materials equity analyst. Analyze this SEC {form} filing excerpt for {company_name} ({ticker}), sub-sector: {sub_sector}, filed on {f_date}.
+                1. Identify the exact fiscal_period (e.g., 'FY2025 10-K', 'Q3 2026 10-Q', 'FY2025 20-F', 'H1 2026 6-K Interim').
+                2. Extract operational insights on demand trends, pricing power/raw material pass-through, backlog/capex (ONLY if stated; return null if not disclosed), and risks.
+                3. Extract 3 to 6 specific company-level commodity, raw material, feedstock, and energy drivers (clean human-readable names, never ticker symbols) matched to:
+                {CANONICAL_INPUT_GUIDE}
+                4. Extract any explicitly disclosed upstream suppliers, named competitors, or downstream customers with verbatim quotes.
 
-                    ai_resp = call_gemini(prompt, FilingSummarySchema)
-                    if not ai_resp:
-                        all_apis_exhausted = True
-                        break
-                    parsed = json.loads(ai_resp.text)
+                FILING EXCERPT:
+                {excerpt}
+                """
 
-                    conn = ensure_conn(conn)
-                    with conn.cursor() as cur:
-                        cur.execute("""
-                            INSERT INTO company_filings_ai (
-                                ticker, filing_type, filing_date, fiscal_period, headline, executive_summary,
-                                theme_tags, pricing_and_margins, capex_and_backlog, key_risks, source_url
-                            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-                            ON CONFLICT (ticker, filing_type, filing_date) DO UPDATE SET
-                                fiscal_period = EXCLUDED.fiscal_period,
-                                headline = EXCLUDED.headline,
-                                executive_summary = EXCLUDED.executive_summary,
-                                theme_tags = EXCLUDED.theme_tags,
-                                pricing_and_margins = EXCLUDED.pricing_and_margins,
-                                capex_and_backlog = EXCLUDED.capex_and_backlog,
-                                key_risks = EXCLUDED.key_risks,
-                                source_url = EXCLUDED.source_url;
-                        """, (
-                            ticker,
-                            form,
-                            f_date,
-                            parsed.get("fiscal_period") or f"{form} ({f_date})",
-                            parsed["headline"],
-                            parsed["executive_summary"],
-                            parsed["theme_tags"],
-                            parsed.get("pricing_and_margins"),
-                            parsed.get("capex_and_backlog"),
-                            parsed["key_risks"],
-                            source_url,
-                        ))
-                    conn.commit()
-                    conn = save_commodity_drivers(conn, ticker, form, f_date, parsed.get("commodity_drivers", []))
-                    conn = save_supply_chain_links(conn, ticker, form, f_date, parsed, excerpt)
-                    filings_found += 1
-                    new_added += 1
-                    print(f"Summarized {ticker} {form} ({f_date})")
-                    time.sleep(0.25)
+                ai_resp = call_gemini(prompt, FilingSummarySchema)
+                if not ai_resp:
+                    all_apis_exhausted = True
+                    break
+                parsed = json.loads(ai_resp.text)
+
+                conn = ensure_conn(conn)
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO company_filings_ai (
+                            ticker, filing_type, filing_date, fiscal_period, headline, executive_summary,
+                            theme_tags, pricing_and_margins, capex_and_backlog, key_risks, source_url
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (ticker, filing_type, filing_date) DO UPDATE SET
+                            fiscal_period = EXCLUDED.fiscal_period,
+                            headline = EXCLUDED.headline,
+                            executive_summary = EXCLUDED.executive_summary,
+                            theme_tags = EXCLUDED.theme_tags,
+                            pricing_and_margins = EXCLUDED.pricing_and_margins,
+                            capex_and_backlog = EXCLUDED.capex_and_backlog,
+                            key_risks = EXCLUDED.key_risks,
+                            source_url = EXCLUDED.source_url;
+                    """, (
+                        ticker,
+                        form,
+                        f_date,
+                        parsed.get("fiscal_period") or f"{form} ({f_date})",
+                        parsed["headline"],
+                        parsed["executive_summary"],
+                        parsed["theme_tags"],
+                        parsed.get("pricing_and_margins"),
+                        parsed.get("capex_and_backlog"),
+                        parsed["key_risks"],
+                        source_url,
+                    ))
+                conn.commit()
+                conn = save_commodity_drivers(conn, ticker, form, f_date, parsed.get("commodity_drivers", []))
+                conn = save_supply_chain_links(conn, ticker, form, f_date, parsed, excerpt)
+                new_added += 1
+                print(f"Summarized {ticker} {form} ({f_date}) [window={keep_count}]", flush=True)
+                time.sleep(0.25)
+
+            if target_candidates:
+                conn = _prune_old_filings(conn, ticker, keep_count)
 
             if all_apis_exhausted:
                 break
             if new_added > 0:
                 processed += 1
         except Exception as e:
-            print(f"Warning processing SEC filings for {ticker}: {e}")
+            print(f"Warning processing SEC filings for {ticker}: {e}", flush=True)
             conn = ensure_conn(conn)
 
     return conn
 
 
-def process_international_briefs(conn, limit_tickers=3):
+def _build_international_period_plan(tk: yf.Ticker) -> tuple[int, list[tuple[str, str, str]]]:
+    """
+    Detects quarterly vs. semi-annual cadence from Yahoo Finance statements.
+    Returns (keep_count, [(filing_type, period_date_str, statement_context), ...]):
+    - Quarterly companies -> keep_count = 3 (latest 3 yearly/quarterly reports).
+    - Semi-annual companies -> keep_count = 2 (latest Annual + Half-Year, or latest 2 Half-Year reports).
+    """
+    try:
+        q_inc = tk.quarterly_income_stmt
+    except Exception:
+        q_inc = None
+    try:
+        a_inc = tk.income_stmt
+    except Exception:
+        a_inc = None
+
+    q_cols = sorted(list(q_inc.columns), reverse=True) if (q_inc is not None and not q_inc.empty) else []
+    a_cols = sorted(list(a_inc.columns), reverse=True) if (a_inc is not None and not a_inc.empty) else []
+
+    if not q_cols and not a_cols:
+        return 2, []
+
+    is_semi_annual = False
+    if len(q_cols) >= 2:
+        gaps = [(q_cols[i] - q_cols[i + 1]).days for i in range(min(len(q_cols) - 1, 4))]
+        median_gap = sorted(gaps)[len(gaps) // 2]
+        is_semi_annual = median_gap >= 145
+    elif len(q_cols) == 1 and len(a_cols) >= 1:
+        is_semi_annual = True
+
+    keep_count = 2 if is_semi_annual else 3
+    interim_label = "Half-Year Report" if is_semi_annual else "Quarterly Report"
+
+    def _row_val(df, candidates, col):
+        if df is None or df.empty or col not in df.columns:
+            return None
+        for label in candidates:
+            if label in df.index:
+                val = df.loc[label, col]
+                if val is not None and val == val:
+                    return float(val)
+        return None
+
+    def _format_period_block(df, cols_list, target_col, label_prefix: str) -> str:
+        idx = cols_list.index(target_col)
+        window = cols_list[idx : idx + 3]
+        lines = []
+        for c in window:
+            dt_s = c.strftime("%Y-%m-%d")
+            rev = _row_val(df, ["Total Revenue", "Operating Revenue"], c)
+            gp = _row_val(df, ["Gross Profit"], c)
+            op_inc = _row_val(df, ["Operating Income", "Total Operating Income As Reported"], c)
+            gm_pct = f"{(gp / rev) * 100:.1f}%" if (rev and gp is not None and rev != 0) else "N/A"
+            om_pct = f"{(op_inc / rev) * 100:.1f}%" if (rev and op_inc is not None and rev != 0) else "N/A"
+            rev_str = f"{rev / 1e6:,.1f}M" if rev is not None else "N/A"
+            lines.append(
+                f"  - [{label_prefix}] Period Ending {dt_s}: Revenue={rev_str} (local ccy) | Gross Margin={gm_pct} | Op Margin={om_pct}"
+            )
+        return "\n".join(lines)
+
+    merged: dict[str, tuple[str, str]] = {}
+    for col in q_cols[:4]:
+        dt_str = col.strftime("%Y-%m-%d")
+        merged[dt_str] = (interim_label, _format_period_block(q_inc, q_cols, col, interim_label))
+
+    for col in a_cols[:2]:
+        dt_str = col.strftime("%Y-%m-%d")
+        merged[dt_str] = ("Annual Report", _format_period_block(a_inc, a_cols, col, "Annual Report"))
+
+    ordered_dates = sorted(merged.keys(), reverse=True)[:keep_count]
+    plan = [(merged[dt][0], dt, merged[dt][1]) for dt in ordered_dates]
+    return keep_count, plan
+
+
+def process_international_briefs(conn, limit_tickers=4):
+    """
+    Populates recent filings for non-SEC international companies:
+    - Quarterly reporters: 3 most recent filings (Annual or Quarterly).
+    - Semi-annual reporters: 2 most recent filings (Annual + Half-Year, or 2 Half-Year reports).
+    """
     conn = ensure_conn(conn)
+    sec_by_ticker, sec_by_name = fetch_sec_ticker_map()
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT e.ticker, e.company_name, e.sub_sector, e.contract_type, e.qualification_years
+            SELECT
+                e.ticker,
+                e.company_name,
+                e.sub_sector,
+                e.contract_type,
+                e.qualification_years,
+                COUNT(f.id) AS existing_count,
+                MAX(f.filing_date)::text AS last_filing_date
             FROM equities_universe e
             LEFT JOIN company_filings_ai f ON e.ticker = f.ticker
-            WHERE f.ticker IS NULL
-            ORDER BY e.qualification_years DESC NULLS LAST
+            GROUP BY e.ticker, e.company_name, e.sub_sector, e.contract_type, e.qualification_years
+            HAVING COUNT(f.id) < 2
+                OR MAX(f.filing_date) < CURRENT_DATE - INTERVAL '85 days'
+            ORDER BY
+                CASE WHEN COUNT(f.id) = 0 THEN 0 WHEN COUNT(f.id) = 1 THEN 1 ELSE 2 END ASC,
+                MAX(f.filing_date) ASC NULLS FIRST,
+                e.market_cap_usd DESC NULLS LAST
             LIMIT %s;
-        """, (limit_tickers,))
-        missing = cur.fetchall()
+        """, (limit_tickers * 3,))
+        candidates = cur.fetchall()
 
-    today_str = date.today().isoformat()
-    for ticker, company_name, sub_sector, contract_type, qual_years in missing:
+    processed = 0
+    for ticker, company_name, sub_sector, contract_type, qual_years, existing_count, _ in candidates:
+        if processed >= limit_tickers:
+            break
+        # Skip companies already covered directly via SEC EDGAR filings
+        if ticker.upper() in sec_by_ticker or _normalize_co_name(company_name) in sec_by_name:
+            continue
+
         try:
             tk = yf.Ticker(ticker)
+            keep_count, period_plan = _build_international_period_plan(tk)
+
             info = tk.info or {}
             news_items = tk.news or []
-            headlines = [n.get("content", {}).get("title", "") or n.get("title", "") for n in news_items[:6]]
+            headlines = [n.get("content", {}).get("title", "") or n.get("title", "") for n in news_items[:8]]
             headlines_str = "\n".join([f"- {h}" for h in headlines if h])
-            biz_summary = info.get("longBusinessSummary", "")[:2500]
-            rev_growth = info.get("revenueGrowth", "N/A")
-            gross_margin = info.get("grossMargins", "N/A")
-            ebitda_margin = info.get("ebitdaMargins", "N/A")
-            source_text = f"{biz_summary}\n{headlines_str}"
+            biz_summary = info.get("longBusinessSummary", "")[:2200]
 
-            prompt = f"""
-            You are an institutional advanced materials equity analyst covering global equities.
-            Synthesize a structured research & earnings brief for {company_name} ({ticker}), Sub-sector: {sub_sector}, Contract Type: {contract_type}, Qualification Moat: {qual_years} yrs.
-            Financial Metrics: Revenue Growth={rev_growth}, Gross Margin={gross_margin}, EBITDA Margin={ebitda_margin}.
-            CRITICAL: Only report capex_and_backlog or pricing_and_margins if explicitly stated in the Business Profile or News Headlines below. NEVER guess or invent capex figures from outside memory—return null if not stated.
-            Extract 3 to 6 specific company-level commodity, raw material, and energy drivers (using human-readable names, never ticker codes) matched to this canonical list when applicable:
-            {CANONICAL_INPUT_GUIDE}
-            Also extract any explicitly mentioned upstream suppliers, named competitors, or downstream customers with verbatim quotes.
-            Business Profile: {biz_summary}
-            Recent News Headlines:
-            {headlines_str}
-            """
+            if not period_plan:
+                if existing_count > 0:
+                    continue
+                period_plan = [("Earnings Brief", date.today().isoformat(), "Structured statement columns unavailable.")]
 
-            ai_resp = call_gemini(prompt, FilingSummarySchema)
-            if not ai_resp:
+            new_added = 0
+            all_apis_exhausted = False
+            for filing_kind, report_date, metrics_block in period_plan:
+                conn = ensure_conn(conn)
+                with conn.cursor() as cur:
+                    cur.execute(
+                        "SELECT 1 FROM company_filings_ai WHERE ticker = %s AND filing_type = %s AND filing_date = %s;",
+                        (ticker, filing_kind, report_date),
+                    )
+                    if cur.fetchone():
+                        continue
+
+                source_text = f"{metrics_block}\n{biz_summary}\n{headlines_str}"
+                prompt = f"""
+                You are an institutional advanced materials equity analyst covering global equities.
+                Synthesize a structured {filing_kind} for {company_name} ({ticker}), Sub-sector: {sub_sector}, Contract Type: {contract_type}, Qualification Moat: {qual_years} yrs.
+                Target Reporting Period Ending: {report_date} ({filing_kind}).
+
+                FINANCIAL TRAJECTORY FOR THIS & PRIOR PERIODS:
+                {metrics_block}
+
+                CRITICAL RULES:
+                - Set fiscal_period to the exact period label for {report_date} (e.g., 'FY2025 Annual Report', 'H1 2026 Half-Year Report', or 'Q3 2026 Quarterly Report').
+                - Analyze sequential and YoY revenue & margin changes in pricing_and_margins using the reported figures above.
+                - Only report capex_and_backlog if explicitly stated in the financial metrics, profile, or headlines below; return null if not disclosed.
+                - Extract 3 to 6 company-level commodity, raw material, and energy drivers matched to:
+                {CANONICAL_INPUT_GUIDE}
+                - Extract any explicitly named upstream suppliers, competitors, or downstream customers with verbatim quotes.
+
+                Business Profile: {biz_summary}
+                Recent Corporate & Earnings Headlines:
+                {headlines_str}
+                """
+
+                ai_resp = call_gemini(prompt, FilingSummarySchema)
+                if not ai_resp:
+                    all_apis_exhausted = True
+                    break
+                parsed = json.loads(ai_resp.text)
+
+                conn = ensure_conn(conn)
+                with conn.cursor() as cur:
+                    cur.execute("""
+                        INSERT INTO company_filings_ai (
+                            ticker, filing_type, filing_date, fiscal_period, headline, executive_summary,
+                            theme_tags, pricing_and_margins, capex_and_backlog, key_risks, source_url
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ON CONFLICT (ticker, filing_type, filing_date) DO UPDATE SET
+                            fiscal_period = EXCLUDED.fiscal_period,
+                            headline = EXCLUDED.headline,
+                            executive_summary = EXCLUDED.executive_summary,
+                            theme_tags = EXCLUDED.theme_tags,
+                            pricing_and_margins = EXCLUDED.pricing_and_margins,
+                            capex_and_backlog = EXCLUDED.capex_and_backlog,
+                            key_risks = EXCLUDED.key_risks;
+                    """, (
+                        ticker,
+                        filing_kind,
+                        report_date,
+                        parsed.get("fiscal_period") or f"{filing_kind} ({report_date})",
+                        parsed["headline"],
+                        parsed["executive_summary"],
+                        parsed["theme_tags"],
+                        parsed.get("pricing_and_margins"),
+                        parsed.get("capex_and_backlog"),
+                        parsed["key_risks"],
+                        f"https://finance.yahoo.com/quote/{ticker}/financials",
+                    ))
+                conn.commit()
+                conn = save_commodity_drivers(conn, ticker, filing_kind, report_date, parsed.get("commodity_drivers", []))
+                conn = save_supply_chain_links(conn, ticker, filing_kind, report_date, parsed, source_text)
+                new_added += 1
+                print(f"Generated {filing_kind} for {ticker} ({report_date}) [window={keep_count}]", flush=True)
+                time.sleep(0.3)
+
+            conn = _prune_old_filings(conn, ticker, keep_count)
+
+            if all_apis_exhausted:
                 break
-            parsed = json.loads(ai_resp.text)
-
-            conn = ensure_conn(conn)
-            with conn.cursor() as cur:
-                cur.execute("""
-                    INSERT INTO company_filings_ai (
-                        ticker, filing_type, filing_date, fiscal_period, headline, executive_summary,
-                        theme_tags, pricing_and_margins, capex_and_backlog, key_risks, source_url
-                    ) VALUES (%s, 'Earnings Brief', CURRENT_DATE, %s, %s, %s, %s, %s, %s, %s, %s)
-                    ON CONFLICT (ticker, filing_type, filing_date) DO UPDATE SET
-                        fiscal_period = EXCLUDED.fiscal_period,
-                        headline = EXCLUDED.headline,
-                        executive_summary = EXCLUDED.executive_summary,
-                        theme_tags = EXCLUDED.theme_tags,
-                        pricing_and_margins = EXCLUDED.pricing_and_margins,
-                        capex_and_backlog = EXCLUDED.capex_and_backlog,
-                        key_risks = EXCLUDED.key_risks;
-                """, (
-                    ticker,
-                    parsed.get("fiscal_period") or "Company Profile & News",
-                    parsed["headline"],
-                    parsed["executive_summary"],
-                    parsed["theme_tags"],
-                    parsed.get("pricing_and_margins"),
-                    parsed.get("capex_and_backlog"),
-                    parsed["key_risks"],
-                    f"https://finance.yahoo.com/quote/{ticker}",
-                ))
-            conn.commit()
-            conn = save_commodity_drivers(conn, ticker, "Earnings Brief", today_str, parsed.get("commodity_drivers", []))
-            conn = save_supply_chain_links(conn, ticker, "Earnings Brief", today_str, parsed, source_text)
-            print(f"Generated global brief for {ticker}")
-            time.sleep(0.3)
+            if new_added > 0:
+                processed += 1
         except Exception as e:
-            print(f"Warning generating international brief for {ticker}: {e}")
+            print(f"Warning generating international report for {ticker}: {e}", flush=True)
             conn = ensure_conn(conn)
 
     return conn
@@ -945,9 +1156,9 @@ class SupplyChainBackfillBatch(BaseModel):
 
 
 def backfill_existing_supply_chain(conn, limit_tickers=2):
-    """Extracts upstream suppliers, competitors & downstream customers for US stocks whose filings were already parsed."""
+    """Extracts upstream suppliers, competitors & downstream customers for SEC stocks whose filings were already parsed."""
     conn = ensure_conn(conn)
-    sec_map = fetch_sec_ticker_map()
+    sec_by_ticker, sec_by_name = fetch_sec_ticker_map()
     with conn.cursor() as cur:
         cur.execute("""
             SELECT DISTINCT e.ticker, e.company_name, e.sub_sector, e.qualification_years
@@ -964,19 +1175,28 @@ def backfill_existing_supply_chain(conn, limit_tickers=2):
         if processed >= limit_tickers:
             break
         clean_ticker = ticker.upper()
-        if clean_ticker not in sec_map:
+        cik_pair = sec_by_ticker.get(clean_ticker) or sec_by_name.get(_normalize_co_name(company_name))
+        if not cik_pair:
             continue
 
-        cik_padded, cik_unpadded = sec_map[clean_ticker]
+        cik_padded, cik_unpadded = cik_pair
         try:
             sub_url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
             sub_resp = requests.get(sub_url, headers=SEC_HEADERS, timeout=15)
             sub_resp.raise_for_status()
             recent = sub_resp.json()["filings"]["recent"]
+            sizes = recent.get("size") or [0] * len(recent["form"])
 
-            target_idx = next((i for i, f in enumerate(recent["form"]) if f == "10-K"), None)
+            target_idx = next((i for i, f in enumerate(recent["form"]) if f in ("10-K", "20-F", "40-F")), None)
             if target_idx is None:
-                target_idx = next((i for i, f in enumerate(recent["form"]) if f == "10-Q"), None)
+                target_idx = next(
+                    (
+                        i
+                        for i, f in enumerate(recent["form"])
+                        if f in ("10-Q", "6-K") and _is_substantive_sec_form(f, recent["primaryDocument"][i], sizes[i])
+                    ),
+                    None,
+                )
             if target_idx is None:
                 continue
 
@@ -1008,14 +1228,15 @@ def backfill_existing_supply_chain(conn, limit_tickers=2):
             parsed = json.loads(ai_resp.text)
             conn = save_supply_chain_links(conn, ticker, form, f_date, parsed, excerpt)
             processed += 1
-            print(f"Backfilled supply chain & competitors for {ticker} ({form} {f_date})")
+            print(f"Backfilled supply chain & competitors for {ticker} ({form} {f_date})", flush=True)
             time.sleep(0.25)
         except Exception as e:
-            print(f"Warning backfilling supply chain for {ticker}: {e}")
+            print(f"Warning backfilling supply chain for {ticker}: {e}", flush=True)
             conn = ensure_conn(conn)
 
     return conn
-    
+
+
 def _fmt_mcap(mcap) -> str:
     if mcap is None:
         return "N/A"
@@ -1027,6 +1248,7 @@ def _fmt_mcap(mcap) -> str:
     if val >= 1e6:
         return f"${val / 1e6:.0f}M"
     return f"${val:,.0f}"
+
 
 def generate_market_macro_narrative(conn):
     conn = ensure_conn(conn)
@@ -1049,7 +1271,7 @@ def generate_market_macro_narrative(conn):
         filings = cur.fetchall()
 
     if not filings:
-        print("No filings available yet to synthesize macro narrative.")
+        print("No filings available yet to synthesize macro narrative.", flush=True)
         return conn
 
     comm_text = "\n".join([f"- {c[1]}: {c[2]} {c[3]} (as of {c[4]})" for c in commodities])
@@ -1099,7 +1321,7 @@ def generate_market_macro_narrative(conn):
             parsed["electrification_battery_summary"],
         ))
     conn.commit()
-    print("Generated overarching AI Market & Theme Macro Narrative.")
+    print("Generated overarching AI Market & Theme Macro Narrative.", flush=True)
     return conn
 
 
@@ -1193,7 +1415,7 @@ def generate_scoped_insights(conn):
         existing_sub_dates = dict(cur.fetchall())
 
     if not rows:
-        print("No filings available yet for scoped insights.")
+        print("No filings available yet for scoped insights.", flush=True)
         return conn
 
     by_sub = {}
@@ -1313,7 +1535,7 @@ def generate_scoped_insights(conn):
                 all_insights.append(item)
 
     if not all_insights:
-        print("No new scoped insights generated on this run; preserving existing records.")
+        print("No new scoped insights generated on this run; preserving existing records.", flush=True)
         return conn
 
     conn = ensure_conn(conn)
@@ -1348,24 +1570,25 @@ def generate_scoped_insights(conn):
                 item["capex_and_supply_chain"], item["top_tickers"],
             ))
     conn.commit()
-    print(f"Upserted {len(all_insights)} validated industry, sub-industry, and theme insights (zero rows deleted).")
+    print(f"Upserted {len(all_insights)} validated industry, sub-industry, and theme insights (zero rows deleted).", flush=True)
     return conn
+
 
 if __name__ == "__main__":
     conn = connect_db()
     try:
         conn = ensure_ai_tables(conn)
         conn = seed_sensitivity_map(conn)
-        conn = process_sec_filings(conn, limit_tickers=3)
-        conn = process_international_briefs(conn, limit_tickers=3)
+        conn = process_sec_filings(conn, limit_tickers=4)
+        conn = process_international_briefs(conn, limit_tickers=4)
         conn = backfill_existing_filing_drivers(conn, limit_tickers=2)
         conn = backfill_existing_supply_chain(conn, limit_tickers=2)
         try:
             conn = generate_market_macro_narrative(conn)
             conn = generate_scoped_insights(conn)
         except Exception as e:
-            print(f"Skipping synthesis due to API error: {e}")
+            print(f"Skipping synthesis due to API error: {e}", flush=True)
     finally:
         if conn and not conn.closed:
             conn.close()
-    print(f"AI Filings & Macro Synthesis pipeline finished ({requests_used} Gemini calls, {groq_requests_used} Groq calls used).")
+    print(f"AI Filings & Macro Synthesis pipeline finished ({requests_used} Gemini calls, {groq_requests_used} Groq calls used).", flush=True)
