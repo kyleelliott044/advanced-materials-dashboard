@@ -7,7 +7,7 @@ import requests
 import psycopg
 import yfinance as yf
 from bs4 import BeautifulSoup
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 from google import genai
 from google.genai import types
 
@@ -72,6 +72,7 @@ GEMINI_MODELS = [
     "gemini-3.5-flash-lite",
 ]
 exhausted_gemini_models = set()
+gemini_503_counts: dict[str, int] = {}
 
 GROQ_MODELS = [
     "openai/gpt-oss-120b",
@@ -305,6 +306,8 @@ def _call_ai(prompt: str, schema) -> Optional[dict]:
                             temperature=0.1,
                         ),
                     )
+                    validated = schema.model_validate(json.loads(resp.text)).model_dump()
+                    gemini_503_counts[g_model] = 0
                     tok_total = getattr(getattr(resp, "usage_metadata", None), "total_token_count", 0) or 0
                     record_ai_usage(
                         DATABASE_URL,
@@ -313,7 +316,7 @@ def _call_ai(prompt: str, schema) -> Optional[dict]:
                         calls_delta=1,
                         tokens_delta=tok_total,
                     )
-                    return json.loads(resp.text)
+                    return validated
                 except Exception as e:
                     err = str(e)
                     if "429" in err or "RESOURCE_EXHAUSTED" in err or "404" in err or "NOT_FOUND" in err:
@@ -328,9 +331,15 @@ def _call_ai(prompt: str, schema) -> Optional[dict]:
                             )
                         print(f"Gemini {g_model} quota/unavailable — trying next model.", flush=True)
                         break
-                    if any(k in err for k in ("503", "UNAVAILABLE", "disconnected", "timed out")) and attempt == 0:
-                        time.sleep(3)
-                        continue
+                    if any(k in err for k in ("503", "UNAVAILABLE", "disconnected", "timed out")):
+                        if attempt == 0:
+                            time.sleep(3)
+                            continue
+                        gemini_503_counts[g_model] = gemini_503_counts.get(g_model, 0) + 1
+                        if gemini_503_counts[g_model] >= 3:
+                            exhausted_gemini_models.add(g_model)
+                        print(f"Gemini {g_model} transient 503 — switching model for this call.", flush=True)
+                        break
                     exhausted_gemini_models.add(g_model)
                     print(f"Gemini {g_model} error ({e}) — trying next model.", flush=True)
                     break
@@ -362,7 +371,7 @@ def _call_ai(prompt: str, schema) -> Optional[dict]:
                                 "role": "system",
                                 "content": (
                                     "You are an institutional advanced materials analyst. "
-                                    "Return ONLY a valid JSON object matching this exact schema:\n"
+                                    "Return ONLY a valid JSON object matching this exact schema (every item in arrays must be a JSON object, never a string):\n"
                                     f"{schema_json}"
                                 ),
                             },
@@ -422,8 +431,16 @@ def _call_ai(prompt: str, schema) -> Optional[dict]:
                 tokens_delta=tok_total,
                 headers=resp_headers,
             )
+            raw_content = data["choices"][0]["message"]["content"]
+            try:
+                validated = schema.model_validate(json.loads(raw_content)).model_dump()
+            except (json.JSONDecodeError, ValidationError, TypeError) as ve:
+                print(f"Groq schema mismatch on {model_id} ({ve.__class__.__name__}) — switching model.", flush=True)
+                time.sleep(1)
+                break
+
             time.sleep(2)
-            return json.loads(data["choices"][0]["message"]["content"])
+            return validated
 
     return None
 
@@ -486,9 +503,18 @@ def _quote_exists(quote: str, source_text: str) -> bool:
 
 
 def save_enrichment(conn, ticker: str, ftype: str, fdate: str, parsed: dict, source_text: str):
+    if not isinstance(parsed, dict):
+        return conn
+
     driver_rows = []
     seen_commodities = set()
-    for d in (parsed.get("commodity_drivers") or []):
+    raw_drivers = parsed.get("commodity_drivers")
+    if not isinstance(raw_drivers, list):
+        raw_drivers = []
+
+    for d in raw_drivers:
+        if not isinstance(d, dict):
+            continue
         cname = (d.get("commodity_name") or "").strip()
         mech = (d.get("mechanism_detail") or "").strip()
         if not cname or not mech:
@@ -522,7 +548,12 @@ def save_enrichment(conn, ticker: str, ftype: str, fdate: str, parsed: dict, sou
         ("competitor", "competitors"),
         ("downstream_customer", "downstream_customers"),
     ):
-        for item in (parsed.get(key) or []):
+        raw_items = parsed.get(key)
+        if not isinstance(raw_items, list):
+            continue
+        for item in raw_items:
+            if not isinstance(item, dict):
+                continue
             cname = (item.get("counterparty_name") or "").strip()
             mat = (item.get("material_or_product") or "").strip()
             if not cname or not mat:
@@ -655,6 +686,9 @@ def run_backfill(conn=None):
                     f.source_url
                 FROM company_filings_ai f
                 JOIN equities_universe e ON f.ticker = e.ticker
+                WHERE f.filing_date >= '2025-01-01'
+                  AND COALESCE(f.fiscal_period, '') !~* '\m202[0-4]\M'
+                  AND NOT (f.filing_type IN ('10-K', '20-F', '40-F') AND f.filing_date < '2025-04-01')
                 ORDER BY
                     f.ticker,
                     CASE
