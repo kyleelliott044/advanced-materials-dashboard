@@ -33,12 +33,18 @@ INVALID_COMMODITY_RE = re.compile(
 
 NON_MATERIALS_SC_RE = re.compile(
     r"\b("
-    r"pharmaceuticals?|oncology|biologics?|vaccines?|therapeutics?|clinical\s+trials?|"
-    r"prescription\s+drugs?|fertility\s+drugs?|monoclonal\s+antibod(y|ies)|"
+    r"pharmaceuticals?|biotherapeutics?|oncology|biologics?|vaccines?|therapeutics?|"
+    r"antiviral|covid-?19|clinical\s+trials?|prescription\s+drugs?|fertility\s+drugs?|"
+    r"monoclonal\s+antibod(y|ies)|innovative\s+medicine|license\s+agreement|"
     r"frozen\s+foods?|seasonings?|beverages?|snacks?|grocery|supermarkets?|consumer\s+retail|"
     r"post-?it|scotch\s+tape|building\s+automation|avionics|enterprise\s+software|"
     r"insurance|banking|walmart|target|cvs|walgreens|kroger|costco"
     r")\b",
+    re.IGNORECASE,
+)
+
+NON_US_EXCHANGE_SUFFIX_RE = re.compile(
+    r"\.(DE|F|PA|AS|BR|SW|L|MI|MC|ST|HE|OL|CO|VI|WA|T|KS|KQ|TW|TWO|HK|SS|SZ|SI|AX|TO|V|SA|MX|JO|TA|SR)$",
     re.IGNORECASE,
 )
 
@@ -760,6 +766,21 @@ def fetch_sec_ticker_map():
     return by_ticker, by_name
 
 
+def _lookup_sec_cik(
+    ticker: str,
+    company_name: str,
+    sec_by_ticker: dict,
+    sec_by_name: dict,
+):
+    clean_ticker = ticker.upper().strip()
+    if clean_ticker in sec_by_ticker:
+        return sec_by_ticker[clean_ticker]
+    # Never match foreign-exchange tickers (e.g. MRK.DE) to US SEC registrants by name
+    if "." in clean_ticker and NON_US_EXCHANGE_SUFFIX_RE.search(clean_ticker):
+        return None
+    return sec_by_name.get(_normalize_co_name(company_name))
+
+
 def _is_substantive_sec_form(form: str, doc_name: str, doc_size: int) -> bool:
     if form in ("10-K", "10-Q", "20-F", "40-F"):
         return True
@@ -885,8 +906,7 @@ def process_sec_filings(conn, limit_tickers=4):
     for ticker, company_name, sub_sector, adv_mat_rev_pct in all_equities:
         if processed >= limit_tickers:
             break
-        clean_ticker = ticker.upper()
-        cik_pair = sec_by_ticker.get(clean_ticker) or sec_by_name.get(_normalize_co_name(company_name))
+        cik_pair = _lookup_sec_cik(ticker, company_name, sec_by_ticker, sec_by_name)
         if not cik_pair:
             continue
 
@@ -1113,7 +1133,7 @@ def process_international_briefs(conn, limit_tickers=4):
         if processed >= limit_tickers:
             break
         # Skip companies already covered directly via SEC EDGAR filings
-        if ticker.upper() in sec_by_ticker or _normalize_co_name(company_name) in sec_by_name:
+        if _lookup_sec_cik(ticker, company_name, sec_by_ticker, sec_by_name):
             continue
 
         rev_share_note = f"{adv_mat_rev_pct}% of company revenue" if adv_mat_rev_pct is not None else "specialist segment"
@@ -1290,8 +1310,7 @@ def backfill_existing_supply_chain(conn, limit_tickers=2):
     for ticker, company_name, sub_sector, _, adv_mat_rev_pct in candidates:
         if processed >= limit_tickers:
             break
-        clean_ticker = ticker.upper()
-        cik_pair = sec_by_ticker.get(clean_ticker) or sec_by_name.get(_normalize_co_name(company_name))
+        cik_pair = _lookup_sec_cik(ticker, company_name, sec_by_ticker, sec_by_name)
         if not cik_pair:
             continue
 
