@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useMemo, useEffect } from "react";
+import { useState, useMemo, useEffect, useRef } from "react";
 import {
   CompanyProduct,
   ExcludedProduct,
@@ -105,6 +105,8 @@ type SortOption =
   | "products_desc"
   | "ticker_asc";
 
+type DossierTab = "products" | "value_chain" | "commodities" | "filings";
+
 const CONTRACT_BADGES: Record<string, { label: string; style: string }> = {
   take_or_pay: {
     label: "Take-or-Pay",
@@ -166,12 +168,285 @@ const FALLBACK_INPUT_NAMES: Record<string, string> = {
   CARBON_FIBER_T700: "Carbon Fiber Tow",
 };
 
+const SHORT_COST_INPUT_NAMES: Record<string, string> = {
+  "HG=F": "Copper",
+  "NG=F": "Natural Gas",
+  "CL=F": "WTI Crude",
+  "BZ=F": "Brent Crude",
+  "ALI=F": "Aluminum",
+  "PL=F": "Platinum",
+  "SI=F": "Silver",
+  "PA=F": "Palladium",
+  "GC=F": "Gold",
+  PNICKUSDM: "Nickel",
+  PCOBAUSDM: "Cobalt",
+  PNGASEUUSDM: "EU Natural Gas",
+  WPU101: "Iron & Steel",
+  WPU061: "Industrial Chemicals",
+  WPU066: "Plastic Resins",
+  NDPR_CN: "NdPr Rare Earths",
+  LICARB_CN: "Lithium Carbonate",
+  GALLIUM_9999: "Gallium",
+  GERMANIUM_INGOT: "Germanium",
+  POLYSILICON_N: "Polysilicon",
+  SPHERICAL_GRAPHITE: "Graphite",
+  COBALT_SULFATE: "Cobalt Sulfate",
+  CARBON_FIBER_T700: "Carbon Fiber",
+};
+
+function formatShortCostInput(rawLabel: string, code?: string | null): string {
+  if (code && SHORT_COST_INPUT_NAMES[code]) {
+    return SHORT_COST_INPUT_NAMES[code];
+  }
+  return rawLabel
+    .replace(/\s*\([^)]*\)/g, "")
+    .replace(
+      /\s+(Futures|Spot|Prices?|Index|Benchmark|Ingot|Oxide|Tow)$/i,
+      ""
+    )
+    .replace(/^(Global|Refined|N-Type)\s+/i, "")
+    .trim();
+}
+
+const MACRO_DRIVER_CODES = new Set([
+  "INDPRO",
+  "PCUOMFGOMFG",
+  "DGS10",
+  "SMH",
+  "ITA",
+  "LIT",
+  "REMX",
+  "URA",
+  "SLX",
+  "IHI",
+]);
+
+function isMacroDriverItem(item: RawInputRow): boolean {
+  if (MACRO_DRIVER_CODES.has(item.input_code)) return true;
+  const cat = (item.category || "").toLowerCase();
+  return (
+    cat.includes("macro") ||
+    cat.includes("demand") ||
+    cat.includes("rate") ||
+    cat.includes("yield") ||
+    cat.includes("index") ||
+    cat.includes("sector") ||
+    cat.includes("end-market") ||
+    cat.includes("etf")
+  );
+}
+
+const COUNTRY_FLAGS: Record<string, string> = {
+  "united states": "🇺🇸",
+  usa: "🇺🇸",
+  us: "🇺🇸",
+  japan: "🇯🇵",
+  jp: "🇯🇵",
+  germany: "🇩🇪",
+  de: "🇩🇪",
+  "south korea": "🇰🇷",
+  korea: "🇰🇷",
+  "republic of korea": "🇰🇷",
+  kr: "🇰🇷",
+  taiwan: "🇹🇼",
+  tw: "🇹🇼",
+  china: "🇨🇳",
+  cn: "🇨🇳",
+  "hong kong": "🇭🇰",
+  hk: "🇭🇰",
+  "united kingdom": "🇬🇧",
+  uk: "🇬🇧",
+  "great britain": "🇬🇧",
+  gb: "🇬🇧",
+  france: "🇫🇷",
+  fr: "🇫🇷",
+  switzerland: "🇨🇭",
+  ch: "🇨🇭",
+  sweden: "🇸🇪",
+  se: "🇸🇪",
+  netherlands: "🇳🇱",
+  "the netherlands": "🇳🇱",
+  nl: "🇳🇱",
+  belgium: "🇧🇪",
+  be: "🇧🇪",
+  austria: "🇦🇹",
+  at: "🇦🇹",
+  norway: "🇳🇴",
+  no: "🇳🇴",
+  finland: "🇫🇮",
+  fi: "🇫🇮",
+  denmark: "🇩🇰",
+  dk: "🇩🇰",
+  ireland: "🇮🇪",
+  ie: "🇮🇪",
+  luxembourg: "🇱🇺",
+  lu: "🇱🇺",
+  italy: "🇮🇹",
+  it: "🇮🇹",
+  spain: "🇪🇸",
+  es: "🇪🇸",
+  canada: "🇨🇦",
+  ca: "🇨🇦",
+  australia: "🇦🇺",
+  au: "🇦🇺",
+  india: "🇮🇳",
+  in: "🇮🇳",
+  brazil: "🇧🇷",
+  br: "🇧🇷",
+  chile: "🇨🇱",
+  cl: "🇨🇱",
+  "south africa": "🇿🇦",
+  za: "🇿🇦",
+  israel: "🇮🇱",
+  il: "🇮🇱",
+  singapore: "🇸🇬",
+  sg: "🇸🇬",
+  "saudi arabia": "🇸🇦",
+  sa: "🇸🇦",
+  mexico: "🇲🇽",
+  mx: "🇲🇽",
+  poland: "🇵🇱",
+  pl: "🇵🇱",
+  jersey: "🇯🇪",
+  je: "🇯🇪",
+  bermuda: "🇧🇲",
+  bm: "🇧🇲",
+};
+
+function getCountryFlag(country: string | null | undefined): string {
+  if (!country) return "";
+  return COUNTRY_FLAGS[country.trim().toLowerCase()] || "🌐";
+}
+
 function formatMarketCap(usd: number | null): string {
   if (usd == null || usd <= 0) return "—";
   if (usd >= 1e12) return `$${(usd / 1e12).toFixed(2)}T`;
   if (usd >= 1e9) return `$${(usd / 1e9).toFixed(1)}B`;
   if (usd >= 1e6) return `$${(usd / 1e6).toFixed(0)}M`;
   return `$${usd.toLocaleString()}`;
+}
+
+interface SleekOption {
+  value: string;
+  label: string;
+  prefix?: string;
+}
+
+function SleekSelect({
+  value,
+  onChange,
+  options,
+  placeholder = "Select...",
+  isFiltered = false,
+}: {
+  value: string;
+  onChange: (val: string) => void;
+  options: SleekOption[];
+  placeholder?: string;
+  isFiltered?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const handleClickOutside = (e: MouseEvent) => {
+      if (
+        containerRef.current &&
+        !containerRef.current.contains(e.target as Node)
+      ) {
+        setOpen(false);
+      }
+    };
+    const handleKey = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setOpen(false);
+    };
+    document.addEventListener("mousedown", handleClickOutside);
+    document.addEventListener("keydown", handleKey);
+    return () => {
+      document.removeEventListener("mousedown", handleClickOutside);
+      document.removeEventListener("keydown", handleKey);
+    };
+  }, [open]);
+
+  const selected = options.find((o) => o.value === value);
+
+  return (
+    <div ref={containerRef} className="relative">
+      <button
+        type="button"
+        onClick={() => setOpen((prev) => !prev)}
+        className={`w-full flex items-center justify-between gap-2 rounded-lg px-3 py-2 text-sm transition-all border ${
+          open
+            ? "bg-[#0b1120] border-sky-500 ring-2 ring-sky-500/20 text-white"
+            : isFiltered
+            ? "bg-sky-950/30 border-sky-500/50 text-sky-200 hover:border-sky-400"
+            : "bg-[#090d16] border-slate-700/80 text-slate-200 hover:border-slate-600 hover:bg-[#0c1220]"
+        }`}
+      >
+        <span className="flex items-center gap-2 truncate">
+          {selected?.prefix && (
+            <span className="text-sm leading-none shrink-0">
+              {selected.prefix}
+            </span>
+          )}
+          <span className="truncate">{selected?.label || placeholder}</span>
+        </span>
+        <svg
+          className={`w-3.5 h-3.5 text-slate-400 shrink-0 transition-transform duration-150 ${
+            open ? "rotate-180 text-sky-400" : ""
+          }`}
+          viewBox="0 0 20 20"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+        >
+          <path
+            d="M6 8l4 4 4-4"
+            strokeLinecap="round"
+            strokeLinejoin="round"
+          />
+        </svg>
+      </button>
+
+      {open && (
+        <div className="absolute left-0 right-0 mt-1.5 z-40 rounded-xl bg-[#0d1424]/95 backdrop-blur-xl border border-slate-700/90 shadow-2xl py-1 max-h-64 overflow-y-auto">
+          {options.map((opt) => {
+            const active = opt.value === value;
+            return (
+              <button
+                key={opt.value}
+                type="button"
+                onClick={() => {
+                  onChange(opt.value);
+                  setOpen(false);
+                }}
+                className={`w-full flex items-center justify-between gap-2 px-3 py-2 text-left text-xs transition-colors ${
+                  active
+                    ? "bg-sky-500/15 text-sky-300 font-medium"
+                    : "text-slate-300 hover:bg-slate-800/80 hover:text-white"
+                }`}
+              >
+                <span className="flex items-center gap-2 truncate">
+                  {opt.prefix && (
+                    <span className="text-sm leading-none shrink-0">
+                      {opt.prefix}
+                    </span>
+                  )}
+                  <span className="truncate">{opt.label}</span>
+                </span>
+                {active && (
+                  <span className="text-sky-400 font-mono text-[11px] shrink-0">
+                    ✓
+                  </span>
+                )}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
 }
 
 export default function DashboardClient({
@@ -201,13 +476,23 @@ export default function DashboardClient({
   const [narrativeTab, setNarrativeTab] = useState<
     "executive" | "ai" | "aero" | "commodities" | "ev"
   >("executive");
+  const [driverFilterTab, setDriverFilterTab] = useState<
+    "commodities" | "macro"
+  >("commodities");
+  const [dossierTab, setDossierTab] = useState<DossierTab>("products");
+  const [showExcluded, setShowExcluded] = useState(false);
+
   const [search, setSearch] = useState("");
   const [sectorFilter, setSectorFilter] = useState("ALL");
   const [countryFilter, setCountryFilter] = useState("ALL");
   const [contractFilter, setContractFilter] = useState("ALL");
   const [sortBy, setSortBy] = useState<SortOption>("mcap_desc");
-  const [selectedCommodity, setSelectedCommodity] = useState<string | null>(null);
-  const [selectedProductCategory, setSelectedProductCategory] = useState<string | null>(null);
+  const [selectedCommodity, setSelectedCommodity] = useState<string | null>(
+    null
+  );
+  const [selectedProductCategory, setSelectedProductCategory] = useState<
+    string | null
+  >(null);
   const [minQualYears, setMinQualYears] = useState(0);
   const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
   const [feedThemeFilter, setFeedThemeFilter] = useState("ALL");
@@ -220,6 +505,37 @@ export default function DashboardClient({
       setIsLight(true);
     }
   }, []);
+
+  // Open company dossier when a Key Ticker chip is clicked in ScopedInsightsPanel
+  useEffect(() => {
+    const handleSelectTicker = (e: Event) => {
+      const customEvent = e as CustomEvent<string>;
+      if (customEvent.detail) {
+        setSelectedTicker(customEvent.detail);
+      }
+    };
+    window.addEventListener("terminal:select-ticker", handleSelectTicker);
+    return () =>
+      window.removeEventListener("terminal:select-ticker", handleSelectTicker);
+  }, []);
+
+  // Close company dossier on Escape key
+  useEffect(() => {
+    if (!selectedTicker) return;
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") setSelectedTicker(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [selectedTicker]);
+
+  // Reset dossier sub-tab when switching companies
+  useEffect(() => {
+    if (selectedTicker) {
+      setDossierTab("products");
+      setShowExcluded(false);
+    }
+  }, [selectedTicker]);
 
   const toggleTheme = () => {
     const next = !isLight;
@@ -241,6 +557,23 @@ export default function DashboardClient({
 
   const getCommodityDisplayName = (code: string) =>
     inputNameMap[code] || code;
+
+  // Separate filter cards into Commodities vs. Macro Drivers
+  const { commodityInputs, macroDriverInputs } = useMemo(() => {
+    const commodities: RawInputRow[] = [];
+    const macro: RawInputRow[] = [];
+    for (const item of inputs) {
+      if (isMacroDriverItem(item)) {
+        macro.push(item);
+      } else {
+        commodities.push(item);
+      }
+    }
+    return { commodityInputs: commodities, macroDriverInputs: macro };
+  }, [inputs]);
+
+  const displayedFilterInputs =
+    driverFilterTab === "commodities" ? commodityInputs : macroDriverInputs;
 
   // Group products, excluded items, and notes by ticker
   const tickerProductsMap = useMemo(() => {
@@ -269,7 +602,7 @@ export default function DashboardClient({
     return map;
   }, [productProfiles]);
 
-  // Product rollup per company (strictly status === 'active'; supersedes legacy rules when present)
+  // Product rollup per company (strictly status === 'active')
   const tickerRollupMap = useMemo(() => {
     const map: Record<string, RolledUpDrivers> = {};
     for (const eq of equities) {
@@ -290,19 +623,51 @@ export default function DashboardClient({
     [products]
   );
 
-  const sectors = useMemo(() => {
+  const sectorOptions = useMemo<SleekOption[]>(() => {
     const unique = new Set(
       equities.map((e) => e.sub_sector).filter((s): s is string => Boolean(s))
     );
-    return ["ALL", ...Array.from(unique).sort()];
+    return [
+      { value: "ALL", label: "All Sub-Sectors" },
+      ...Array.from(unique)
+        .sort()
+        .map((sec) => ({ value: sec, label: sec })),
+    ];
   }, [equities]);
 
-  const countries = useMemo(() => {
+  const countryOptions = useMemo<SleekOption[]>(() => {
     const unique = new Set(
       equities.map((e) => e.country).filter((c): c is string => Boolean(c))
     );
-    return ["ALL", ...Array.from(unique).sort()];
+    return [
+      { value: "ALL", label: "All Countries", prefix: "🌍" },
+      ...Array.from(unique)
+        .sort()
+        .map((c) => ({
+          value: c,
+          label: c,
+          prefix: getCountryFlag(c),
+        })),
+    ];
   }, [equities]);
+
+  const contractOptions: SleekOption[] = [
+    { value: "ALL", label: "All Contracts" },
+    { value: "take_or_pay", label: "Take-or-Pay" },
+    { value: "pass_through", label: "Pass-Through" },
+    { value: "fixed_spread", label: "Fixed Spread" },
+  ];
+
+  const sortOptions: SleekOption[] = [
+    { value: "mcap_desc", label: "Market Cap USD (High → Low)" },
+    { value: "mcap_asc", label: "Market Cap USD (Low → High)" },
+    { value: "products_desc", label: "Active Products (High → Low)" },
+    { value: "rev_desc", label: "Adv. Mat. Rev % (High → Low)" },
+    { value: "rev_asc", label: "Adv. Mat. Rev % (Low → High)" },
+    { value: "country_asc", label: "Country (A → Z)" },
+    { value: "moat_desc", label: "Est. Moat (High → Low)" },
+    { value: "ticker_asc", label: "Ticker (A → Z)" },
+  ];
 
   const feedThemes = useMemo(() => {
     const unique = new Set<string>(CORE_THEMES);
@@ -355,7 +720,7 @@ export default function DashboardClient({
     return map;
   }, [supplyChain]);
 
-  // Unified company-level cost_inputs & demand_proxies (rolled up from active products first; legacy fallback only if no products exist)
+  // Unified company-level cost_inputs (short names) & demand_proxies
   const companyDriversByRole = useMemo(() => {
     const map: Record<
       string,
@@ -366,14 +731,28 @@ export default function DashboardClient({
       }
     > = {};
 
+    const dedupeByLabel = (
+      items: { code: string | null; label: string; detail?: string }[]
+    ) => {
+      const seen = new Set<string>();
+      return items.filter((it) => {
+        const key = it.label.toLowerCase();
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    };
+
     for (const eq of equities) {
       const rollup = tickerRollupMap[eq.ticker];
       if (rollup && rollup.isProductDerived) {
         map[eq.ticker] = {
-          costInputs: rollup.costInputCodes.map((code) => ({
-            code,
-            label: getCommodityDisplayName(code),
-          })),
+          costInputs: dedupeByLabel(
+            rollup.costInputCodes.map((code) => ({
+              code,
+              label: formatShortCostInput(getCommodityDisplayName(code), code),
+            }))
+          ),
           demandProxies: rollup.demandProxyCodes.map((code) => ({
             code,
             label: getCommodityDisplayName(code),
@@ -383,16 +762,20 @@ export default function DashboardClient({
         continue;
       }
 
-      // Fallback for companies not yet decomposed into products
       const aiDrivers = tickerDriversMap[eq.ticker] || [];
       if (aiDrivers.length > 0) {
-        const costInputs = aiDrivers
-          .filter((d) => d.exposure_role === "Cost Input")
-          .map((d) => ({
-            code: d.matched_input_code,
-            label: d.commodity_name,
-            detail: d.mechanism_detail,
-          }));
+        const costInputs = dedupeByLabel(
+          aiDrivers
+            .filter((d) => d.exposure_role === "Cost Input")
+            .map((d) => ({
+              code: d.matched_input_code,
+              label: formatShortCostInput(
+                d.commodity_name,
+                d.matched_input_code
+              ),
+              detail: d.mechanism_detail,
+            }))
+        );
         const demandProxies = aiDrivers
           .filter((d) => d.exposure_role !== "Cost Input")
           .map((d) => ({
@@ -403,13 +786,18 @@ export default function DashboardClient({
         map[eq.ticker] = { costInputs, demandProxies, fromProductRollup: false };
       } else {
         const subRules = sectorSensitivitiesMap[eq.sub_sector || ""] || [];
-        const costInputs = subRules
-          .filter((r) => r.relationship_type === "Cost Input")
-          .map((r) => ({
-            code: r.input_code,
-            label: getCommodityDisplayName(r.input_code),
-            detail: r.mechanism_note,
-          }));
+        const costInputs = dedupeByLabel(
+          subRules
+            .filter((r) => r.relationship_type === "Cost Input")
+            .map((r) => ({
+              code: r.input_code,
+              label: formatShortCostInput(
+                getCommodityDisplayName(r.input_code),
+                r.input_code
+              ),
+              detail: r.mechanism_note,
+            }))
+        );
         const demandProxies = subRules
           .filter((r) => r.relationship_type !== "Cost Input")
           .map((r) => ({
@@ -422,7 +810,13 @@ export default function DashboardClient({
     }
 
     return map;
-  }, [equities, tickerRollupMap, tickerDriversMap, sectorSensitivitiesMap, inputNameMap]);
+  }, [
+    equities,
+    tickerRollupMap,
+    tickerDriversMap,
+    sectorSensitivitiesMap,
+    inputNameMap,
+  ]);
 
   const filteredEquities = useMemo(() => {
     const q = search.toLowerCase();
@@ -458,7 +852,6 @@ export default function DashboardClient({
         contractFilter === "ALL" || eq.contract_type === contractFilter;
       const qual = Number(eq.qualification_years || 0);
 
-      // Reverse index: commodity -> products -> companies
       let matchesCommodity = true;
       if (selectedCommodity) {
         const revHit = commodityReverseIndex[selectedCommodity]?.[eq.ticker];
@@ -472,11 +865,11 @@ export default function DashboardClient({
           const matchesAiDriver = aiDrivers.some(
             (d) => d.matched_input_code === selectedCommodity
           );
-          matchesCommodity = Boolean(revHit) || matchesSubRule || matchesAiDriver;
+          matchesCommodity =
+            Boolean(revHit) || matchesSubRule || matchesAiDriver;
         }
       }
 
-      // Reverse index: product category -> peers across companies
       let matchesCategory = true;
       if (selectedProductCategory) {
         const catInfo = categoryPeerIndex[selectedProductCategory];
@@ -608,21 +1001,40 @@ export default function DashboardClient({
     );
   }, [equities, selectedEquity]);
 
-  // Helper: click a logged commodity chip in the dossier -> filter products -> companies
   const handleSelectCommodityFromDossier = (code: string) => {
+    const matchedInput = inputs.find((i) => i.input_code === code);
+    if (matchedInput) {
+      setDriverFilterTab(isMacroDriverItem(matchedInput) ? "macro" : "commodities");
+    } else if (MACRO_DRIVER_CODES.has(code)) {
+      setDriverFilterTab("macro");
+    } else {
+      setDriverFilterTab("commodities");
+    }
     setSelectedCommodity(code);
     setSelectedProductCategory(null);
     setActiveTab("screener");
     setSelectedTicker(null);
   };
 
-  // Helper: click a product category in the dossier -> filter peers across companies
   const handleSelectCategoryFromDossier = (category: string) => {
     setSelectedProductCategory(category);
     setSelectedCommodity(null);
     setActiveTab("screener");
     setSelectedTicker(null);
   };
+
+  const activeProductsCount = selectedEquityProducts.filter(
+    (p) => p.status === "active"
+  ).length;
+  const totalValueChainCount =
+    upstreamSuppliers.length +
+    filingCompetitors.length +
+    downstreamCustomers.length +
+    universePeers.length;
+  const totalCommodityCount =
+    selectedEquityDrivers.length > 0
+      ? selectedEquityDrivers.length
+      : selectedEquitySensitivities.length;
 
   return (
     <div className="min-h-screen bg-[#090d16] text-slate-100 font-sans selection:bg-sky-500/30">
@@ -739,19 +1151,65 @@ export default function DashboardClient({
           </div>
         </section>
 
-        {/* Interactive Commodity & Macro Filter Cards */}
+        {/* Interactive Commodities & Macro Drivers Filter Tabs */}
         <section>
-          <div className="flex items-center justify-between mb-3 flex-wrap gap-2">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3">
             <div className="flex items-center gap-3 flex-wrap">
-              <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                Click Any Commodity or Macro Driver to Filter Products &amp; Exposed Stocks
-              </h2>
+              <div className="inline-flex rounded-xl bg-[#111827] border border-slate-800 p-1">
+                <button
+                  type="button"
+                  onClick={() => setDriverFilterTab("commodities")}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1.5 ${
+                    driverFilterTab === "commodities"
+                      ? "bg-sky-500 text-white shadow-sm"
+                      : "text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  <span>Commodities</span>
+                  <span
+                    className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
+                      driverFilterTab === "commodities"
+                        ? "bg-sky-950/50 text-white"
+                        : "bg-slate-800 text-slate-400"
+                    }`}
+                  >
+                    {commodityInputs.length}
+                  </span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setDriverFilterTab("macro")}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1.5 ${
+                    driverFilterTab === "macro"
+                      ? "bg-sky-500 text-white shadow-sm"
+                      : "text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  <span>Macro Drivers</span>
+                  <span
+                    className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
+                      driverFilterTab === "macro"
+                        ? "bg-sky-950/50 text-white"
+                        : "bg-slate-800 text-slate-400"
+                    }`}
+                  >
+                    {macroDriverInputs.length}
+                  </span>
+                </button>
+              </div>
+
+              <span className="text-xs text-slate-400">
+                {driverFilterTab === "commodities"
+                  ? "Click a raw material or feedstock to filter exposed products & companies"
+                  : "Click a macro indicator or end-market proxy to filter exposed companies"}
+              </span>
+
               {selectedCommodity && (
                 <button
                   onClick={() => setSelectedCommodity(null)}
                   className="text-xs font-mono text-sky-400 hover:text-sky-300 underline"
                 >
-                  Clear Commodity ({getCommodityDisplayName(selectedCommodity)})
+                  Clear Filter ({getCommodityDisplayName(selectedCommodity)})
                 </button>
               )}
               {selectedProductCategory && (
@@ -767,7 +1225,7 @@ export default function DashboardClient({
           </div>
 
           <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-4 gap-3">
-            {inputs.map((item) => {
+            {displayedFilterInputs.map((item) => {
               const isSelected = selectedCommodity === item.input_code;
               const linkedCompanyCount = Object.keys(
                 commodityReverseIndex[item.input_code] || {}
@@ -787,7 +1245,10 @@ export default function DashboardClient({
                 >
                   <div className="flex items-center justify-between gap-1.5">
                     <span className="text-[11px] font-medium text-sky-400 truncate">
-                      {item.category || "Macro Input"}
+                      {item.category ||
+                        (driverFilterTab === "macro"
+                          ? "Macro Driver"
+                          : "Commodity")}
                     </span>
                     <div className="flex items-center gap-1 shrink-0">
                       {linkedCompanyCount > 0 && (
@@ -835,7 +1296,7 @@ export default function DashboardClient({
                   placeholder="Search e.g. 'CMP', 'Cobalt', 'OLED', 'MRK.DE'..."
                   value={search}
                   onChange={(e) => setSearch(e.target.value)}
-                  className="w-full rounded-lg bg-[#090d16] border border-slate-700/80 px-3.5 py-2 text-sm text-white placeholder-slate-500 focus:outline-none focus:border-sky-500"
+                  className="w-full rounded-lg bg-[#090d16] border border-slate-700/80 px-3.5 py-2 text-sm text-white placeholder-slate-500 hover:border-slate-600 focus:outline-none focus:border-sky-500 focus:ring-2 focus:ring-sky-500/20 transition"
                 />
               </div>
 
@@ -843,70 +1304,47 @@ export default function DashboardClient({
                 <label className="block text-[11px] font-mono uppercase text-slate-400 mb-1.5">
                   Country
                 </label>
-                <select
+                <SleekSelect
                   value={countryFilter}
-                  onChange={(e) => setCountryFilter(e.target.value)}
-                  className="w-full rounded-lg bg-[#090d16] border border-slate-700/80 px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-sky-500"
-                >
-                  {countries.map((c) => (
-                    <option key={c} value={c}>
-                      {c === "ALL" ? "All Countries" : c}
-                    </option>
-                  ))}
-                </select>
+                  onChange={setCountryFilter}
+                  options={countryOptions}
+                  isFiltered={countryFilter !== "ALL"}
+                />
               </div>
 
               <div>
                 <label className="block text-[11px] font-mono uppercase text-slate-400 mb-1.5">
                   Sub-Sector
                 </label>
-                <select
+                <SleekSelect
                   value={sectorFilter}
-                  onChange={(e) => setSectorFilter(e.target.value)}
-                  className="w-full rounded-lg bg-[#090d16] border border-slate-700/80 px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-sky-500"
-                >
-                  {sectors.map((sec) => (
-                    <option key={sec} value={sec}>
-                      {sec === "ALL" ? "All Sub-Sectors" : sec}
-                    </option>
-                  ))}
-                </select>
+                  onChange={setSectorFilter}
+                  options={sectorOptions}
+                  isFiltered={sectorFilter !== "ALL"}
+                />
               </div>
 
               <div>
                 <label className="block text-[11px] font-mono uppercase text-slate-400 mb-1.5">
                   Est. Pricing Model
                 </label>
-                <select
+                <SleekSelect
                   value={contractFilter}
-                  onChange={(e) => setContractFilter(e.target.value)}
-                  className="w-full rounded-lg bg-[#090d16] border border-slate-700/80 px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-sky-500"
-                >
-                  <option value="ALL">All Contracts</option>
-                  <option value="take_or_pay">Take-or-Pay</option>
-                  <option value="pass_through">Pass-Through</option>
-                  <option value="fixed_spread">Fixed Spread</option>
-                </select>
+                  onChange={setContractFilter}
+                  options={contractOptions}
+                  isFiltered={contractFilter !== "ALL"}
+                />
               </div>
 
               <div>
                 <label className="block text-[11px] font-mono uppercase text-slate-400 mb-1.5">
                   Sort By
                 </label>
-                <select
+                <SleekSelect
                   value={sortBy}
-                  onChange={(e) => setSortBy(e.target.value as SortOption)}
-                  className="w-full rounded-lg bg-[#090d16] border border-slate-700/80 px-3 py-2 text-sm text-slate-200 focus:outline-none focus:border-sky-500"
-                >
-                  <option value="mcap_desc">Market Cap USD (High → Low)</option>
-                  <option value="mcap_asc">Market Cap USD (Low → High)</option>
-                  <option value="products_desc">Active Products (High → Low)</option>
-                  <option value="rev_desc">Adv. Mat. Rev % (High → Low)</option>
-                  <option value="rev_asc">Adv. Mat. Rev % (Low → High)</option>
-                  <option value="country_asc">Country (A → Z)</option>
-                  <option value="moat_desc">Est. Moat (High → Low)</option>
-                  <option value="ticker_asc">Ticker (A → Z)</option>
-                </select>
+                  onChange={(val) => setSortBy(val as SortOption)}
+                  options={sortOptions}
+                />
               </div>
 
               <div className="sm:col-span-2 lg:col-span-6 flex items-center gap-4 pt-1 border-t border-slate-800/70">
@@ -947,7 +1385,7 @@ export default function DashboardClient({
               </div>
             </div>
 
-            {/* Active Reverse-Index Banner: Commodity -> Products -> Companies or Category -> Peers */}
+            {/* Active Reverse-Index Banner */}
             {(selectedCommodity || selectedProductCategory) && (
               <div className="rounded-xl border border-sky-500/35 bg-sky-950/25 px-5 py-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
                 <div>
@@ -959,12 +1397,13 @@ export default function DashboardClient({
                       <div className="text-slate-300">
                         {Object.keys(commodityReverseIndex[selectedCommodity] || {}).length > 0
                           ? `Matched across ${
-                              Object.values(commodityReverseIndex[selectedCommodity] || {}).reduce(
-                                (acc, h) => acc + h.products.length,
-                                0
-                              )
+                              Object.values(
+                                commodityReverseIndex[selectedCommodity] || {}
+                              ).reduce((acc, h) => acc + h.products.length, 0)
                             } active product(s) in ${
-                              Object.keys(commodityReverseIndex[selectedCommodity] || {}).length
+                              Object.keys(
+                                commodityReverseIndex[selectedCommodity] || {}
+                              ).length
                             } decomposed company/companies (plus legacy sub-sector matches below).`
                           : "Filtered via sub-sector & filing commodity rules (no decomposed products linked yet)."}
                       </div>
@@ -977,7 +1416,9 @@ export default function DashboardClient({
                       </div>
                       <div className="text-slate-300">
                         Showing all companies with active products in{" "}
-                        <span className="text-white font-medium">{selectedProductCategory}</span>{" "}
+                        <span className="text-white font-medium">
+                          {selectedProductCategory}
+                        </span>{" "}
                         and their mapped peer tickers.
                       </div>
                     </div>
@@ -1058,7 +1499,8 @@ export default function DashboardClient({
                       };
                       const eqFilings = tickerFilingsMap[eq.ticker] || [];
                       const matchedCommodityProducts = selectedCommodity
-                        ? commodityReverseIndex[selectedCommodity]?.[eq.ticker]?.products || []
+                        ? commodityReverseIndex[selectedCommodity]?.[eq.ticker]
+                            ?.products || []
                         : [];
 
                       return (
@@ -1071,8 +1513,12 @@ export default function DashboardClient({
                             {eq.ticker}
                           </td>
                           <td className="py-3.5 px-4">
-                            <div className="font-medium text-white">{eq.company_name}</div>
-                            <div className="text-xs text-slate-400">{eq.sub_sector}</div>
+                            <div className="font-medium text-white">
+                              {eq.company_name}
+                            </div>
+                            <div className="text-xs text-slate-400">
+                              {eq.sub_sector}
+                            </div>
                             {matchedCommodityProducts.length > 0 && (
                               <div className="mt-1 flex flex-wrap gap-1">
                                 {matchedCommodityProducts.map((mp) => (
@@ -1087,7 +1533,16 @@ export default function DashboardClient({
                             )}
                           </td>
                           <td className="py-3.5 px-4 text-xs text-slate-300 whitespace-nowrap">
-                            {eq.country || "—"}
+                            {eq.country ? (
+                              <span className="inline-flex items-center gap-1.5">
+                                <span className="text-sm leading-none">
+                                  {getCountryFlag(eq.country)}
+                                </span>
+                                <span>{eq.country}</span>
+                              </span>
+                            ) : (
+                              "—"
+                            )}
                           </td>
                           <td className="py-3.5 px-4 text-right font-mono text-xs text-slate-200 whitespace-nowrap">
                             {formatMarketCap(eq.market_cap_usd)}
@@ -1109,7 +1564,7 @@ export default function DashboardClient({
                             )}
                           </td>
 
-                          {/* Cost Inputs (Raw Materials -> Margin) */}
+                          {/* Cost Inputs (Short Names, Raw Materials -> Margin) */}
                           <td className="py-3.5 px-4">
                             <div className="flex flex-wrap gap-1.5 max-w-[210px]">
                               {roleDrivers.costInputs.length === 0 ? (
@@ -1125,33 +1580,36 @@ export default function DashboardClient({
                                 )
                               ) : (
                                 <>
-                                  {roleDrivers.costInputs.slice(0, 3).map((ci, idx) => (
-                                    <span
-                                      key={`${ci.label}-${idx}`}
-                                      className="px-2 py-0.5 rounded text-[11px] font-medium border bg-rose-500/10 text-rose-300 border-rose-500/30"
-                                      title={
-                                        ci.detail ||
-                                        (roleDrivers.fromProductRollup
-                                          ? "Rolled up from active products (cost input -> margin)"
-                                          : undefined)
-                                      }
-                                    >
-                                      {ci.label}
-                                    </span>
-                                  ))}
+                                  {roleDrivers.costInputs
+                                    .slice(0, 3)
+                                    .map((ci, idx) => (
+                                      <span
+                                        key={`${ci.label}-${idx}`}
+                                        className="px-2 py-0.5 rounded text-[11px] font-medium border bg-rose-500/10 text-rose-300 border-rose-500/30"
+                                        title={
+                                          ci.detail ||
+                                          (roleDrivers.fromProductRollup
+                                            ? "Rolled up from active products (cost input -> margin)"
+                                            : undefined)
+                                        }
+                                      >
+                                        {ci.label}
+                                      </span>
+                                    ))}
                                   {roleDrivers.costInputs.length > 3 && (
                                     <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-slate-800 text-slate-400 border border-slate-700">
                                       +{roleDrivers.costInputs.length - 3}
                                     </span>
                                   )}
-                                  {rollup && rollup.unloggedMaterials.length > 0 && (
-                                    <span
-                                      className="px-1.5 py-0.5 rounded text-[10px] font-mono border border-dashed border-slate-600 text-slate-400"
-                                      title={`Unlogged raw materials: ${rollup.unloggedMaterials.join(", ")}`}
-                                    >
-                                      +{rollup.unloggedMaterials.length} unlogged
-                                    </span>
-                                  )}
+                                  {rollup &&
+                                    rollup.unloggedMaterials.length > 0 && (
+                                      <span
+                                        className="px-1.5 py-0.5 rounded text-[10px] font-mono border border-dashed border-slate-600 text-slate-400"
+                                        title={`Unlogged raw materials: ${rollup.unloggedMaterials.join(", ")}`}
+                                      >
+                                        +{rollup.unloggedMaterials.length} unlogged
+                                      </span>
+                                    )}
                                 </>
                               )}
                             </div>
@@ -1164,20 +1622,22 @@ export default function DashboardClient({
                                 <span className="text-xs text-slate-500">—</span>
                               ) : (
                                 <>
-                                  {roleDrivers.demandProxies.slice(0, 3).map((dp, idx) => (
-                                    <span
-                                      key={`${dp.label}-${idx}`}
-                                      className="px-2 py-0.5 rounded text-[11px] font-medium border bg-emerald-500/10 text-emerald-300 border-emerald-500/30"
-                                      title={
-                                        dp.detail ||
-                                        (roleDrivers.fromProductRollup
-                                          ? "Rolled up from active products (downstream -> volume)"
-                                          : undefined)
-                                      }
-                                    >
-                                      {dp.label}
-                                    </span>
-                                  ))}
+                                  {roleDrivers.demandProxies
+                                    .slice(0, 3)
+                                    .map((dp, idx) => (
+                                      <span
+                                        key={`${dp.label}-${idx}`}
+                                        className="px-2 py-0.5 rounded text-[11px] font-medium border bg-emerald-500/10 text-emerald-300 border-emerald-500/30"
+                                        title={
+                                          dp.detail ||
+                                          (roleDrivers.fromProductRollup
+                                            ? "Rolled up from active products (downstream -> volume)"
+                                            : undefined)
+                                        }
+                                      >
+                                        {dp.label}
+                                      </span>
+                                    ))}
                                   {roleDrivers.demandProxies.length > 3 && (
                                     <span className="px-1.5 py-0.5 rounded text-[10px] font-mono bg-slate-800 text-slate-400 border border-slate-700">
                                       +{roleDrivers.demandProxies.length - 3}
@@ -1198,10 +1658,13 @@ export default function DashboardClient({
                           <td className="py-3.5 px-4">
                             {eqFilings.length > 0 ? (
                               <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-purple-500/15 text-purple-300 border border-purple-500/30 text-xs font-mono">
-                                {eqFilings.length} Brief{eqFilings.length > 1 ? "s" : ""}
+                                {eqFilings.length} Brief
+                                {eqFilings.length > 1 ? "s" : ""}
                               </span>
                             ) : (
-                              <span className="text-xs text-slate-600 font-mono">Queued</span>
+                              <span className="text-xs text-slate-600 font-mono">
+                                Queued
+                              </span>
                             )}
                           </td>
                           <td className="py-3.5 px-4 text-right font-mono text-slate-200">
@@ -1225,7 +1688,8 @@ export default function DashboardClient({
                 Latest AI-Parsed 10-K, 10-Q &amp; Global Company Profiles
               </h2>
               <span className="text-xs text-slate-400">
-                Showing {filteredFilings.length} of {filings.length} briefs across {coveredCompanyCount} companies • Click any card for full dossier
+                Showing {filteredFilings.length} of {filings.length} briefs across{" "}
+                {coveredCompanyCount} companies • Click any card for full dossier
               </span>
             </div>
 
@@ -1303,91 +1767,186 @@ export default function DashboardClient({
         )}
       </main>
 
-      {/* Slide-Over Company Deep-Dive Dossier Drawer */}
+      {/* Clean Tabbed Slide-Over Company Dossier Drawer */}
       {selectedEquity && (
-        <div className="fixed inset-0 z-50 flex justify-end bg-black/70 backdrop-blur-sm">
-          <div className="w-full max-w-3xl bg-[#0c1220] border-l border-slate-800 h-full overflow-y-auto p-6 space-y-6 shadow-2xl">
-            <div className="flex items-start justify-between border-b border-slate-800 pb-4">
-              <div>
-                <div className="flex items-center gap-2.5 flex-wrap">
-                  <span className="text-xl font-mono font-bold text-sky-400">
-                    {selectedEquity.ticker}
-                  </span>
-                  <span className="px-2.5 py-0.5 rounded-full text-xs bg-slate-800 text-slate-300">
-                    {selectedEquity.sub_sector}
-                  </span>
-                  {selectedEquity.country && (
-                    <span className="px-2.5 py-0.5 rounded-full text-xs bg-slate-800/80 text-slate-300 border border-slate-700">
-                      {selectedEquity.country}
+        <div
+          onClick={() => setSelectedTicker(null)}
+          className="fixed inset-0 z-50 flex justify-end bg-black/75 backdrop-blur-sm"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-3xl bg-[#0b111e] border-l border-slate-800 h-full flex flex-col shadow-2xl"
+          >
+            {/* Sticky Clean Dossier Header */}
+            <div className="px-6 pt-5 pb-4 bg-[#0d1424] border-b border-slate-800/90 space-y-4 shrink-0">
+              <div className="flex items-start justify-between gap-4">
+                <div className="space-y-1">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span className="text-xl font-mono font-bold text-sky-400">
+                      {selectedEquity.ticker}
                     </span>
-                  )}
+                    {selectedEquity.sub_sector && (
+                      <span className="px-2.5 py-0.5 rounded-full text-xs bg-slate-800/90 text-slate-300 border border-slate-700/70">
+                        {selectedEquity.sub_sector}
+                      </span>
+                    )}
+                    {selectedEquity.country && (
+                      <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded-full text-xs bg-slate-800/90 text-slate-300 border border-slate-700/70">
+                        <span>{getCountryFlag(selectedEquity.country)}</span>
+                        <span>{selectedEquity.country}</span>
+                      </span>
+                    )}
+                  </div>
+                  <h2 className="text-lg font-semibold text-white">
+                    {selectedEquity.company_name}
+                  </h2>
                 </div>
-                <h2 className="text-lg font-semibold text-white mt-1">
-                  {selectedEquity.company_name}
-                </h2>
-                <div className="flex flex-wrap items-center gap-3 mt-2 text-xs font-mono text-slate-400">
-                  {selectedEquity.market_cap_usd != null && (
-                    <>
-                      <span className="text-white font-semibold">
-                        Mkt Cap: {formatMarketCap(selectedEquity.market_cap_usd)}
-                      </span>
-                      <span>•</span>
-                    </>
-                  )}
-                  <span>Est. Pricing: {selectedEquity.contract_type || "Standard"}</span>
-                  <span>•</span>
-                  <span>Est. Moat: {selectedEquity.qualification_years} yrs</span>
-                  {selectedEquity.adv_mat_rev_pct != null && (
-                    <>
-                      <span>•</span>
-                      <span className="text-emerald-400">
-                        Adv. Mat. Rev: {selectedEquity.adv_mat_rev_pct}%
-                      </span>
-                    </>
-                  )}
+
+                <button
+                  onClick={() => setSelectedTicker(null)}
+                  className="px-3 py-1.5 rounded-lg bg-slate-800/90 hover:bg-slate-700 text-xs font-medium text-slate-200 border border-slate-700/80 transition shrink-0"
+                >
+                  Close ✕
+                </button>
+              </div>
+
+              {/* Compact 4-Metric KPI Strip */}
+              <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
+                <div className="rounded-lg bg-[#090d16] border border-slate-800/80 px-3 py-2">
+                  <div className="text-[10px] font-mono uppercase text-slate-500">
+                    Market Cap
+                  </div>
+                  <div className="text-xs font-mono font-semibold text-white mt-0.5">
+                    {formatMarketCap(selectedEquity.market_cap_usd)}
+                  </div>
+                </div>
+                <div className="rounded-lg bg-[#090d16] border border-slate-800/80 px-3 py-2">
+                  <div className="text-[10px] font-mono uppercase text-slate-500">
+                    Adv. Mat. Rev
+                  </div>
+                  <div className="text-xs font-mono font-semibold text-emerald-400 mt-0.5">
+                    {selectedEquity.adv_mat_rev_pct != null
+                      ? `${selectedEquity.adv_mat_rev_pct}%`
+                      : "—"}
+                  </div>
+                </div>
+                <div className="rounded-lg bg-[#090d16] border border-slate-800/80 px-3 py-2">
+                  <div className="text-[10px] font-mono uppercase text-slate-500">
+                    Est. Pricing
+                  </div>
+                  <div className="text-xs font-medium text-slate-200 mt-0.5 truncate">
+                    {CONTRACT_BADGES[selectedEquity.contract_type || ""]
+                      ?.label ||
+                      selectedEquity.contract_type ||
+                      "Standard"}
+                  </div>
+                </div>
+                <div className="rounded-lg bg-[#090d16] border border-slate-800/80 px-3 py-2">
+                  <div className="text-[10px] font-mono uppercase text-slate-500">
+                    Est. Moat
+                  </div>
+                  <div className="text-xs font-mono font-semibold text-sky-300 mt-0.5">
+                    {selectedEquity.qualification_years != null
+                      ? `${Number(selectedEquity.qualification_years).toFixed(1)} yrs`
+                      : "—"}
+                  </div>
                 </div>
               </div>
-              <button
-                onClick={() => setSelectedTicker(null)}
-                className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs text-slate-200"
-              >
-                Close ✕
-              </button>
+
+              {/* Clean Segmented Navigation Tabs */}
+              <div className="flex items-center gap-1.5 overflow-x-auto pt-0.5">
+                {[
+                  {
+                    id: "products" as DossierTab,
+                    label: "Products",
+                    count: activeProductsCount,
+                  },
+                  {
+                    id: "value_chain" as DossierTab,
+                    label: "Value Chain & Peers",
+                    count: totalValueChainCount,
+                  },
+                  {
+                    id: "commodities" as DossierTab,
+                    label: "Commodity Exposure",
+                    count: totalCommodityCount,
+                  },
+                  {
+                    id: "filings" as DossierTab,
+                    label: "Filings & Briefs",
+                    count: selectedEquityFilings.length,
+                  },
+                ].map((tab) => {
+                  const active = dossierTab === tab.id;
+                  return (
+                    <button
+                      key={tab.id}
+                      type="button"
+                      onClick={() => setDossierTab(tab.id)}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1.5 whitespace-nowrap ${
+                        active
+                          ? "bg-sky-500 text-white shadow-sm"
+                          : "bg-[#090d16] text-slate-400 border border-slate-800 hover:text-slate-200 hover:border-slate-700"
+                      }`}
+                    >
+                      <span>{tab.label}</span>
+                      <span
+                        className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
+                          active
+                            ? "bg-sky-950/50 text-white"
+                            : "bg-slate-800 text-slate-400"
+                        }`}
+                      >
+                        {tab.count}
+                      </span>
+                    </button>
+                  );
+                })}
+              </div>
             </div>
 
-            {/* PRODUCTS TABLE: [Raw Material] -> [Product] -> [Downstream] */}
-            <div className="space-y-3">
-              <div className="flex items-center justify-between flex-wrap gap-2">
-                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                  Advanced Materials Products ({selectedEquityProducts.filter((p) => p.status === "active").length} Active)
-                </h3>
-                <span className="text-[10px] font-mono text-slate-400">
-                  Click solid raw material to filter companies • Click category for peers
-                </span>
-              </div>
+            {/* Scrollable Dossier Tab Body */}
+            <div className="flex-1 overflow-y-auto p-6 space-y-5">
+              {/* TAB 1: PRODUCTS */}
+              {dossierTab === "products" && (
+                <div className="space-y-4">
+                  {selectedEquityNote && (
+                    <div className="rounded-xl bg-slate-900/80 border border-slate-800 px-4 py-3 text-xs text-slate-300 leading-relaxed">
+                      {selectedEquityNote}
+                    </div>
+                  )}
 
-              {selectedEquityNote && (
-                <div className="rounded-lg bg-slate-900/90 border border-slate-800 px-3.5 py-2 text-xs text-slate-300">
-                  {selectedEquityNote}
-                </div>
-              )}
+                  {selectedEquityProducts.length === 0 ? (
+                    <div className="rounded-xl bg-[#111827] border border-slate-800 p-6 text-center space-y-2">
+                      <p className="text-xs text-slate-400">
+                        Product-level decomposition has not been generated for{" "}
+                        <span className="text-white font-mono">
+                          {selectedEquity.ticker}
+                        </span>{" "}
+                        yet.
+                      </p>
+                      <button
+                        type="button"
+                        onClick={() => setDossierTab("filings")}
+                        className="text-xs font-mono text-sky-400 hover:underline"
+                      >
+                        View parsed filings &amp; briefs &rarr;
+                      </button>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="flex items-center justify-between text-[11px] text-slate-400">
+                        <span>
+                          Chain: <strong className="text-amber-300">Raw Material</strong> &rarr;{" "}
+                          <strong className="text-white">Product</strong> &rarr;{" "}
+                          <strong className="text-sky-400">Downstream End-Demand</strong>
+                        </span>
+                        <span className="font-mono text-[10px]">
+                          Click solid chips to filter
+                        </span>
+                      </div>
 
-              {selectedEquityProducts.length === 0 ? (
-                <p className="text-xs text-slate-500">
-                  Product-level decomposition not yet populated for this ticker.
-                </p>
-              ) : (
-                <div className="rounded-xl border border-slate-800 bg-[#111827] overflow-hidden">
-                  <div className="overflow-x-auto">
-                    <table className="w-full text-left border-collapse text-xs">
-                      <thead>
-                        <tr className="border-b border-slate-800 bg-[#090d16] text-[10px] font-mono uppercase text-slate-400">
-                          <th className="py-2.5 px-3.5">Value-Chain Flow ([Raw Material] &rarr; [Product] &rarr; [Downstream])</th>
-                          <th className="py-2.5 px-3.5">Category &amp; Specs</th>
-                          <th className="py-2.5 px-3.5 text-right">Status / Conf.</th>
-                        </tr>
-                      </thead>
-                      <tbody className="divide-y divide-slate-800/70">
+                      <div className="space-y-3">
                         {selectedEquityProducts.map((prod) => {
                           const proxyCode = prod.downstream?.demand_proxy_ref;
                           const isProxyValid = Boolean(
@@ -1395,23 +1954,68 @@ export default function DashboardClient({
                           );
 
                           return (
-                            <tr
+                            <div
                               key={prod.id}
-                              className={
+                              className={`rounded-xl border p-4 space-y-3 transition ${
                                 prod.status === "divested"
-                                  ? "opacity-55 bg-slate-950/50"
-                                  : "hover:bg-slate-800/40"
-                              }
+                                  ? "bg-slate-950/60 border-slate-800/60 opacity-60"
+                                  : "bg-[#111827]/90 border-slate-800 hover:border-slate-700"
+                              }`}
                             >
-                              {/* Chain Chips: [raw material] -> [product] -> [downstream (emphasized accent fill)] */}
-                              <td className="py-3 px-3.5 align-top space-y-2">
+                              {/* Card Header: Product Title, Category & Status */}
+                              <div className="flex items-start justify-between gap-3 flex-wrap">
+                                <div className="space-y-1">
+                                  <div className="flex items-center gap-2 flex-wrap">
+                                    <span className="text-sm font-semibold text-white">
+                                      {prod.name}
+                                    </span>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        handleSelectCategoryFromDossier(
+                                          prod.category
+                                        )
+                                      }
+                                      title="Click to view all peer companies in this product category"
+                                      className="px-2 py-0.5 rounded bg-purple-500/15 hover:bg-purple-500/25 text-purple-300 border border-purple-500/35 text-[11px] font-medium transition cursor-pointer"
+                                    >
+                                      {prod.category}
+                                    </button>
+                                  </div>
+                                  <div className="text-[11px] font-mono text-slate-400">
+                                    BU: {prod.business_unit}
+                                  </div>
+                                </div>
+
+                                <div className="flex items-center gap-2 font-mono text-[10px]">
+                                  <span className="text-slate-400">
+                                    {prod.as_of}
+                                  </span>
+                                  <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-300">
+                                    {prod.conf} ({prod.src.type})
+                                  </span>
+                                  <span
+                                    className={`px-1.5 py-0.5 rounded uppercase ${
+                                      prod.status === "active"
+                                        ? "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
+                                        : "bg-rose-500/15 text-rose-300 border border-rose-500/30"
+                                    }`}
+                                  >
+                                    {prod.status}
+                                  </span>
+                                </div>
+                              </div>
+
+                              {/* Visual Flow Pipeline: [Raw Material] -> [Product] -> [Downstream] */}
+                              <div className="rounded-lg bg-[#090d16] border border-slate-800/80 p-3 flex flex-wrap items-center gap-2 text-xs">
                                 <div className="flex flex-wrap items-center gap-1.5">
-                                  {/* Raw Material Chips */}
-                                  <div className="flex flex-wrap items-center gap-1">
-                                    {(prod.raw_materials || []).map((rm, rIdx) => {
+                                  {(prod.raw_materials || []).map(
+                                    (rm, rIdx) => {
                                       const isLogged = Boolean(
                                         rm.commodity_ref &&
-                                          validRegistryCodes.has(rm.commodity_ref)
+                                          validRegistryCodes.has(
+                                            rm.commodity_ref
+                                          )
                                       );
                                       if (isLogged && rm.commodity_ref) {
                                         return (
@@ -1425,18 +2029,21 @@ export default function DashboardClient({
                                             }
                                             title={`Logged registry commodity: ${getCommodityDisplayName(
                                               rm.commodity_ref
-                                            )} (${rm.role} • ${rm.basis}). Click to reverse-filter companies.`}
-                                            className="px-2 py-0.5 rounded bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-solid border-amber-400/60 font-medium transition cursor-pointer"
+                                            )} (${rm.role} • ${rm.basis}). Click to filter companies.`}
+                                            className="px-2.5 py-1 rounded-md bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-solid border-amber-400/60 font-medium transition cursor-pointer"
                                           >
-                                            {rm.name}
+                                            {formatShortCostInput(
+                                              rm.name,
+                                              rm.commodity_ref
+                                            )}
                                           </button>
                                         );
                                       }
                                       return (
                                         <span
                                           key={`${rm.name}-${rIdx}`}
-                                          title={`Unlogged raw material (${rm.role} • ${rm.basis}) — not yet in commodity registry`}
-                                          className="px-2 py-0.5 rounded bg-slate-900/70 text-slate-400 border border-dashed border-slate-600 inline-flex items-center gap-1"
+                                          title={`Unlogged raw material (${rm.role} • ${rm.basis})`}
+                                          className="px-2.5 py-1 rounded-md bg-slate-900/70 text-slate-400 border border-dashed border-slate-600 inline-flex items-center gap-1.5"
                                         >
                                           <span>{rm.name}</span>
                                           <span className="text-[9px] font-mono uppercase text-slate-500">
@@ -1444,517 +2051,510 @@ export default function DashboardClient({
                                           </span>
                                         </span>
                                       );
-                                    })}
-                                  </div>
-
-                                  <span className="text-slate-500 font-mono">&rarr;</span>
-
-                                  {/* Company Product Chip */}
-                                  <span className="px-2.5 py-0.5 rounded bg-slate-800 text-white border border-slate-600 font-semibold">
-                                    {prod.name}
-                                  </span>
-
-                                  <span className="text-slate-500 font-mono">&rarr;</span>
-
-                                  {/* Downstream Chip (Emphasized Accent Fill) */}
-                                  {isProxyValid && proxyCode ? (
-                                    <button
-                                      type="button"
-                                      onClick={() =>
-                                        handleSelectCommodityFromDossier(proxyCode)
-                                      }
-                                      title={`Downstream demand proxy: ${getCommodityDisplayName(
-                                        proxyCode
-                                      )} (${prod.downstream.process_step} -> ${
-                                        prod.downstream.end_product
-                                      }). Click to reverse-filter companies.`}
-                                      className="px-2.5 py-0.5 rounded bg-sky-500 text-slate-950 font-semibold shadow-sm shadow-sky-500/30 hover:bg-sky-400 transition cursor-pointer"
-                                    >
-                                      {prod.downstream.end_demand}
-                                    </button>
-                                  ) : (
-                                    <span
-                                      title={`${prod.downstream.process_step} -> ${prod.downstream.end_product}`}
-                                      className="px-2.5 py-0.5 rounded bg-sky-500 text-slate-950 font-semibold shadow-sm shadow-sky-500/30"
-                                    >
-                                      {prod.downstream.end_demand}
-                                    </span>
+                                    }
                                   )}
                                 </div>
 
-                                <div className="text-[11px] text-slate-400">
-                                  <span className="text-slate-500">Process:</span>{" "}
-                                  {prod.downstream.process_step} &bull;{" "}
-                                  <span className="text-slate-500">End Product:</span>{" "}
-                                  {prod.downstream.end_product}
-                                </div>
+                                <span className="text-slate-500 font-mono">
+                                  &rarr;
+                                </span>
 
-                                {prod.peers && prod.peers.length > 0 && (
-                                  <div className="flex flex-wrap items-center gap-1 pt-0.5">
-                                    <span className="text-[10px] font-mono text-slate-500">
-                                      Product Peers:
-                                    </span>
-                                    {prod.peers.map((peerTk) => (
-                                      <button
-                                        key={peerTk}
-                                        type="button"
-                                        onClick={() => setSelectedTicker(peerTk)}
-                                        className="px-1.5 py-0.2 rounded bg-[#090d16] hover:bg-slate-800 text-sky-400 border border-slate-700 font-mono text-[10px]"
-                                      >
-                                        {peerTk}
-                                      </button>
-                                    ))}
-                                  </div>
-                                )}
-                              </td>
+                                <span className="px-2.5 py-1 rounded-md bg-slate-800 text-white border border-slate-600 font-semibold">
+                                  {prod.name}
+                                </span>
 
-                              {/* Clickable Category + Advanced Qualification Specs */}
-                              <td className="py-3 px-3.5 align-top space-y-1.5 max-w-[220px]">
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    handleSelectCategoryFromDossier(prod.category)
-                                  }
-                                  title="Click to view all peer companies in this product category"
-                                  className="px-2 py-0.5 rounded bg-purple-500/15 hover:bg-purple-500/25 text-purple-300 border border-purple-500/35 font-medium text-left transition cursor-pointer"
-                                >
-                                  {prod.category}
-                                </button>
-                                <div className="text-[10px] font-mono text-slate-400">
-                                  BU: {prod.business_unit}
-                                </div>
-                                <div className="text-[11px] text-slate-300 leading-snug">
-                                  <span className="text-slate-500">Spec:</span>{" "}
-                                  {prod.advanced.performance_spec}
-                                </div>
-                                <div className="text-[10px] text-slate-400">
-                                  <span className="text-slate-500">Barrier:</span>{" "}
-                                  {prod.advanced.switching_barrier}
-                                </div>
-                              </td>
+                                <span className="text-slate-500 font-mono">
+                                  &rarr;
+                                </span>
 
-                              {/* Status, As-Of, Confidence & Source */}
-                              <td className="py-3 px-3.5 align-top text-right font-mono space-y-1 whitespace-nowrap">
-                                <div>
-                                  <span
-                                    className={`px-1.5 py-0.5 rounded text-[10px] uppercase ${
-                                      prod.status === "active"
-                                        ? "bg-emerald-500/15 text-emerald-300 border border-emerald-500/30"
-                                        : "bg-rose-500/15 text-rose-300 border border-rose-500/30"
-                                    }`}
+                                {isProxyValid && proxyCode ? (
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleSelectCommodityFromDossier(proxyCode)
+                                    }
+                                    title={`Downstream demand proxy: ${getCommodityDisplayName(
+                                      proxyCode
+                                    )} (${prod.downstream.process_step} -> ${
+                                      prod.downstream.end_product
+                                    }). Click to filter companies.`}
+                                    className="px-3 py-1 rounded-md bg-sky-500 text-slate-950 font-semibold shadow-sm shadow-sky-500/25 hover:bg-sky-400 transition cursor-pointer"
                                   >
-                                    {prod.status}
+                                    {prod.downstream.end_demand}
+                                  </button>
+                                ) : (
+                                  <span
+                                    title={`${prod.downstream.process_step} -> ${prod.downstream.end_product}`}
+                                    className="px-3 py-1 rounded-md bg-sky-500 text-slate-950 font-semibold shadow-sm shadow-sky-500/25"
+                                  >
+                                    {prod.downstream.end_demand}
+                                  </span>
+                                )}
+                              </div>
+
+                              {/* Clean 2-Column Technical Specs & Peers */}
+                              <div className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1.5 text-[11px] text-slate-400">
+                                <div>
+                                  <span className="text-slate-500">
+                                    Process &amp; Output:
+                                  </span>{" "}
+                                  <span className="text-slate-300">
+                                    {prod.downstream.process_step} &rarr;{" "}
+                                    {prod.downstream.end_product}
                                   </span>
                                 </div>
-                                <div className="text-[10px] text-slate-400">
-                                  {prod.as_of}
+                                <div>
+                                  <span className="text-slate-500">
+                                    Switching Barrier:
+                                  </span>{" "}
+                                  <span className="text-slate-300">
+                                    {prod.advanced.switching_barrier}
+                                  </span>
                                 </div>
-                                <div className="text-[10px] text-slate-500">
-                                  conf: {prod.conf} ({prod.src.type})
+                                <div className="sm:col-span-2">
+                                  <span className="text-slate-500">
+                                    Performance Spec:
+                                  </span>{" "}
+                                  <span className="text-slate-300">
+                                    {prod.advanced.performance_spec}
+                                  </span>
                                 </div>
-                                {prod.pricing_structure && (
-                                  <div className="text-[10px] text-sky-300">
-                                    {prod.pricing_structure}
-                                  </div>
-                                )}
-                              </td>
-                            </tr>
+                              </div>
+
+                              {prod.peers && prod.peers.length > 0 && (
+                                <div className="flex flex-wrap items-center gap-1.5 pt-1 border-t border-slate-800/70">
+                                  <span className="text-[10px] font-mono uppercase text-slate-500">
+                                    Product Peers:
+                                  </span>
+                                  {prod.peers.map((peerTk) => (
+                                    <button
+                                      key={peerTk}
+                                      type="button"
+                                      onClick={() => setSelectedTicker(peerTk)}
+                                      className="px-2 py-0.5 rounded bg-[#090d16] hover:bg-slate-800 text-sky-400 border border-slate-700/80 font-mono text-[10px] transition"
+                                    >
+                                      {peerTk}
+                                    </button>
+                                  ))}
+                                </div>
+                              )}
+                            </div>
                           );
                         })}
-                      </tbody>
-                    </table>
-                  </div>
-                </div>
-              )}
-
-              {/* Excluded Non-Materials / Divested Items */}
-              {selectedEquityExcluded.length > 0 && (
-                <div className="rounded-lg bg-[#111827]/70 border border-slate-800/80 p-3 space-y-1.5">
-                  <div className="text-[10px] font-mono uppercase text-slate-400">
-                    Excluded Segments / Non-Material Lines ({selectedEquityExcluded.length})
-                  </div>
-                  <div className="space-y-1">
-                    {selectedEquityExcluded.map((ex, i) => (
-                      <div key={`${ex.name}-${i}`} className="text-xs text-slate-400">
-                        <span className="text-slate-300 font-medium">{ex.name}:</span>{" "}
-                        {ex.reason}
                       </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-            </div>
 
-            {/* In-Depth AI Company-Specific Commodity & Input Breakdown */}
-            <div className="space-y-2.5">
-              <div className="flex items-center justify-between">
-                <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                  {selectedEquityDrivers.length > 0
-                    ? `AI-Extracted Commodity & Input Exposure (${selectedEquityDrivers.length})`
-                    : "Sub-Sector Commodity & Macro Exposure"}
-                </h3>
-                {selectedEquityDrivers.length > 0 && (
-                  <span className="text-[10px] font-mono text-sky-400">
-                    Company-Specific Filing Analysis
-                  </span>
-                )}
-              </div>
-
-              {selectedEquityDrivers.length > 0 ? (
-                <div className="space-y-2.5">
-                  {selectedEquityDrivers.map((d, idx) => (
-                    <div
-                      key={`${d.commodity_name}-${idx}`}
-                      className="rounded-lg bg-[#111827] border border-slate-800 p-3.5 space-y-1.5"
-                    >
-                      <div className="flex items-center justify-between gap-2 flex-wrap">
-                        <div className="flex items-center gap-2 flex-wrap">
-                          <span className="font-semibold text-white text-xs">
-                            {d.commodity_name}
-                          </span>
-                          <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 text-[10px] font-mono">
-                            {d.exposure_role}
-                          </span>
-                          {d.cogs_or_rev_share_pct != null && (
-                            <span className="px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[10px] font-mono">
-                              {d.cogs_or_rev_share_pct}% Share
+                      {/* Collapsible Excluded Non-Material Segments */}
+                      {selectedEquityExcluded.length > 0 && (
+                        <div className="pt-1">
+                          <button
+                            type="button"
+                            onClick={() => setShowExcluded((prev) => !prev)}
+                            className="text-xs font-mono text-slate-400 hover:text-slate-200 flex items-center gap-1.5"
+                          >
+                            <span>{showExcluded ? "▾" : "▸"}</span>
+                            <span>
+                              Excluded Non-Material / Divested Segments (
+                              {selectedEquityExcluded.length})
                             </span>
+                          </button>
+                          {showExcluded && (
+                            <div className="mt-2 rounded-xl bg-[#111827]/70 border border-slate-800/80 p-3.5 space-y-1.5">
+                              {selectedEquityExcluded.map((ex, i) => (
+                                <div
+                                  key={`${ex.name}-${i}`}
+                                  className="text-xs text-slate-400"
+                                >
+                                  <span className="text-slate-300 font-medium">
+                                    {ex.name}:
+                                  </span>{" "}
+                                  {ex.reason}
+                                </div>
+                              ))}
+                            </div>
                           )}
                         </div>
-                        <div className="flex items-center gap-1.5">
-                          {d.pass_through_lag && (
-                            <span className="text-[10px] font-mono text-slate-400">
-                              {d.pass_through_lag}
+                      )}
+                    </>
+                  )}
+                </div>
+              )}
+
+              {/* TAB 2: VALUE CHAIN & PEERS (1. Upstream -> 2. Competitors -> 3. Downstream) */}
+              {dossierTab === "value_chain" && (
+                <div className="space-y-4">
+                  {/* 1. Upstream Suppliers */}
+                  <div className="rounded-xl bg-[#111827] border border-slate-800 p-4 space-y-3">
+                    <div className="text-[11px] font-mono uppercase tracking-wider text-amber-400">
+                      1. Upstream Raw Material Suppliers ({upstreamSuppliers.length})
+                    </div>
+                    {upstreamSuppliers.length === 0 ? (
+                      <p className="text-xs text-slate-500">
+                        None disclosed in parsed filings.
+                      </p>
+                    ) : (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                        {upstreamSuppliers.map((sup, idx) => (
+                          <div
+                            key={`${sup.counterparty_name}-${idx}`}
+                            className="rounded-lg bg-[#090d16] border border-slate-800/80 p-3 space-y-1.5"
+                          >
+                            <div className="flex items-center justify-between gap-1.5 flex-wrap">
+                              <span className="text-xs font-semibold text-white">
+                                {sup.counterparty_name}
+                              </span>
+                              <div className="flex items-center gap-1">
+                                {sup.is_sole_source && (
+                                  <span className="px-1.5 py-0.2 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30 text-[10px] font-mono">
+                                    SOLE SOURCE
+                                  </span>
+                                )}
+                                {sup.exposure_pct != null && (
+                                  <span className="px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-300 text-[10px] font-mono">
+                                    {sup.exposure_pct}%
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            <div className="text-[11px] text-sky-300 font-medium">
+                              Input: {sup.material_or_product}
+                            </div>
+                            {sup.source_quote && (
+                              <p className="text-[11px] text-slate-400 italic leading-snug">
+                                &ldquo;{sup.source_quote}&rdquo;
+                                {sup.source_filing_type && (
+                                  <span className="not-italic font-mono text-[10px] text-slate-500 ml-1">
+                                    ({sup.source_filing_type}{" "}
+                                    {sup.source_filing_date})
+                                  </span>
+                                )}
+                              </p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  {/* 2. Competitors & Tracked Sub-Sector Peers */}
+                  <div className="rounded-xl bg-[#111827] border border-slate-800 p-4 space-y-3">
+                    <div className="text-[11px] font-mono uppercase tracking-wider text-purple-400">
+                      2. Competitors &amp; Sub-Sector Peers ({filingCompetitors.length} Filing-Disclosed • {universePeers.length} Universe Peers)
+                    </div>
+
+                    {filingCompetitors.length > 0 && (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                        {filingCompetitors.map((comp, idx) => (
+                          <div
+                            key={`${comp.counterparty_name}-${idx}`}
+                            className="rounded-lg bg-[#090d16] border border-slate-800/80 p-3 space-y-1.5"
+                          >
+                            <div className="flex items-center justify-between gap-1.5 flex-wrap">
+                              <span className="text-xs font-semibold text-white">
+                                {comp.counterparty_name}
+                              </span>
+                              <div className="flex items-center gap-1">
+                                {comp.is_sole_source && (
+                                  <span className="px-1.5 py-0.2 rounded bg-purple-500/15 text-purple-300 border border-purple-500/30 text-[10px] font-mono">
+                                    PRIMARY RIVAL
+                                  </span>
+                                )}
+                                {comp.exposure_pct != null && (
+                                  <span className="px-1.5 py-0.2 rounded bg-sky-500/15 text-sky-300 text-[10px] font-mono">
+                                    {comp.exposure_pct}% Share
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            <div className="text-[11px] text-purple-300 font-medium">
+                              Overlap: {comp.material_or_product}
+                            </div>
+                            {comp.source_quote && (
+                              <p className="text-[11px] text-slate-400 italic leading-snug">
+                                &ldquo;{comp.source_quote}&rdquo;
+                                {comp.source_filing_type && (
+                                  <span className="not-italic font-mono text-[10px] text-slate-500 ml-1">
+                                    ({comp.source_filing_type}{" "}
+                                    {comp.source_filing_date})
+                                  </span>
+                                )}
+                              </p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+
+                    {universePeers.length > 0 ? (
+                      <div
+                        className={
+                          filingCompetitors.length > 0
+                            ? "pt-2.5 border-t border-slate-800/70"
+                            : ""
+                        }
+                      >
+                        <div className="text-[10px] font-mono uppercase text-slate-500 mb-2">
+                          Tracked Peers in {selectedEquity.sub_sector} (Click to Inspect):
+                        </div>
+                        <div className="flex flex-wrap gap-1.5">
+                          {universePeers.map((peer) => (
+                            <button
+                              key={peer.ticker}
+                              onClick={() => setSelectedTicker(peer.ticker)}
+                              className="px-2.5 py-1 rounded-lg bg-[#090d16] hover:bg-slate-800 border border-slate-700/80 text-xs text-left transition flex items-center gap-1.5"
+                            >
+                              {peer.country && (
+                                <span className="text-xs leading-none">
+                                  {getCountryFlag(peer.country)}
+                                </span>
+                              )}
+                              <span className="font-mono font-semibold text-sky-400">
+                                {peer.ticker}
+                              </span>
+                              <span className="text-slate-300 truncate max-w-[140px]">
+                                {peer.company_name}
+                              </span>
+                              {peer.market_cap_usd != null && (
+                                <span className="text-[10px] font-mono text-slate-500">
+                                  ({formatMarketCap(peer.market_cap_usd)})
+                                </span>
+                              )}
+                            </button>
+                          ))}
+                        </div>
+                      </div>
+                    ) : (
+                      filingCompetitors.length === 0 && (
+                        <p className="text-xs text-slate-500">
+                          No named competitors extracted from filings yet and no other tracked peers in this sub-sector.
+                        </p>
+                      )
+                    )}
+                  </div>
+
+                  {/* 3. Downstream Customers & OEMs */}
+                  <div className="rounded-xl bg-[#111827] border border-slate-800 p-4 space-y-3">
+                    <div className="text-[11px] font-mono uppercase tracking-wider text-emerald-400">
+                      3. Downstream Customers &amp; OEMs ({downstreamCustomers.length})
+                    </div>
+                    {downstreamCustomers.length === 0 ? (
+                      <p className="text-xs text-slate-500">
+                        None disclosed in parsed filings.
+                      </p>
+                    ) : (
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                        {downstreamCustomers.map((cust, idx) => (
+                          <div
+                            key={`${cust.counterparty_name}-${idx}`}
+                            className="rounded-lg bg-[#090d16] border border-slate-800/80 p-3 space-y-1.5"
+                          >
+                            <div className="flex items-center justify-between gap-1.5 flex-wrap">
+                              <span className="text-xs font-semibold text-white">
+                                {cust.counterparty_name}
+                              </span>
+                              <div className="flex items-center gap-1">
+                                {cust.is_sole_source && (
+                                  <span className="px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[10px] font-mono">
+                                    10%+ CONC.
+                                  </span>
+                                )}
+                                {cust.exposure_pct != null && (
+                                  <span className="px-1.5 py-0.2 rounded bg-emerald-500/15 text-emerald-300 text-[10px] font-mono">
+                                    {cust.exposure_pct}%
+                                  </span>
+                                )}
+                              </div>
+                            </div>
+                            <div className="text-[11px] text-sky-300 font-medium">
+                              Product: {cust.material_or_product}
+                            </div>
+                            {cust.source_quote && (
+                              <p className="text-[11px] text-slate-400 italic leading-snug">
+                                &ldquo;{cust.source_quote}&rdquo;
+                                {cust.source_filing_type && (
+                                  <span className="not-italic font-mono text-[10px] text-slate-500 ml-1">
+                                    ({cust.source_filing_type}{" "}
+                                    {cust.source_filing_date})
+                                  </span>
+                                )}
+                              </p>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* TAB 3: COMMODITY EXPOSURE */}
+              {dossierTab === "commodities" && (
+                <div className="space-y-3">
+                  {selectedEquityDrivers.length > 0 ? (
+                    selectedEquityDrivers.map((d, idx) => (
+                      <div
+                        key={`${d.commodity_name}-${idx}`}
+                        className="rounded-xl bg-[#111827] border border-slate-800 p-4 space-y-2"
+                      >
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <div className="flex items-center gap-2 flex-wrap">
+                            <span className="font-semibold text-white text-xs">
+                              {d.commodity_name}
                             </span>
-                          )}
+                            <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 text-[10px] font-mono">
+                              {d.exposure_role}
+                            </span>
+                            {d.cogs_or_rev_share_pct != null && (
+                              <span className="px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[10px] font-mono">
+                                {d.cogs_or_rev_share_pct}% Share
+                              </span>
+                            )}
+                          </div>
+                          <div className="flex items-center gap-1.5">
+                            {d.pass_through_lag && (
+                              <span className="text-[10px] font-mono text-slate-400">
+                                {d.pass_through_lag}
+                              </span>
+                            )}
+                            <span
+                              className={`text-[11px] font-mono px-2 py-0.5 rounded ${
+                                d.impact_direction.includes("Inverse")
+                                  ? "bg-rose-500/15 text-rose-300"
+                                  : d.impact_direction.includes("Direct")
+                                  ? "bg-emerald-500/15 text-emerald-300"
+                                  : "bg-sky-500/15 text-sky-300"
+                              }`}
+                            >
+                              {d.impact_direction}
+                            </span>
+                          </div>
+                        </div>
+                        <p className="text-xs text-slate-300 leading-relaxed">
+                          {d.mechanism_detail}
+                        </p>
+                        {d.source_quote && (
+                          <p className="text-[11px] text-slate-400 italic leading-snug border-l-2 border-slate-700 pl-2.5">
+                            &ldquo;{d.source_quote}&rdquo;
+                            {d.source_filing_type && (
+                              <span className="not-italic font-mono text-[10px] text-slate-500 ml-1">
+                                ({d.source_filing_type} {d.source_filing_date})
+                              </span>
+                            )}
+                          </p>
+                        )}
+                      </div>
+                    ))
+                  ) : selectedEquitySensitivities.length === 0 ? (
+                    <p className="text-xs text-slate-500">
+                      No direct commodity rules mapped for this sub-sector yet.
+                    </p>
+                  ) : (
+                    selectedEquitySensitivities.map((s) => (
+                      <div
+                        key={s.input_code}
+                        className="rounded-xl bg-[#111827] border border-slate-800 p-4 space-y-1.5"
+                      >
+                        <div className="flex items-center justify-between">
+                          <span className="font-semibold text-sky-400 text-xs">
+                            {getCommodityDisplayName(s.input_code)} —{" "}
+                            {s.relationship_type}
+                          </span>
                           <span
                             className={`text-[11px] font-mono px-2 py-0.5 rounded ${
-                              d.impact_direction.includes("Inverse")
+                              s.impact_direction.includes("Inverse")
                                 ? "bg-rose-500/15 text-rose-300"
-                                : d.impact_direction.includes("Direct")
+                                : s.impact_direction.includes("Direct")
                                 ? "bg-emerald-500/15 text-emerald-300"
                                 : "bg-sky-500/15 text-sky-300"
                             }`}
                           >
-                            {d.impact_direction}
+                            {s.impact_direction}
                           </span>
                         </div>
-                      </div>
-                      <p className="text-xs text-slate-300 leading-relaxed">
-                        {d.mechanism_detail}
-                      </p>
-                      {d.source_quote && (
-                        <p className="text-[11px] text-slate-400 italic leading-snug border-l-2 border-slate-700 pl-2">
-                          &ldquo;{d.source_quote}&rdquo;
-                          {d.source_filing_type && (
-                            <span className="not-italic font-mono text-[10px] text-slate-500 ml-1">
-                              ({d.source_filing_type} {d.source_filing_date})
-                            </span>
-                          )}
+                        <p className="text-xs text-slate-300 leading-relaxed">
+                          {s.mechanism_note}
                         </p>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              ) : selectedEquitySensitivities.length === 0 ? (
-                <p className="text-xs text-slate-500">
-                  No direct commodity rules mapped for this sub-sector yet.
-                </p>
-              ) : (
-                <div className="space-y-2">
-                  {selectedEquitySensitivities.map((s) => (
-                    <div
-                      key={s.input_code}
-                      className="rounded-lg bg-[#111827] border border-slate-800 p-3.5"
-                    >
-                      <div className="flex items-center justify-between">
-                        <span className="font-semibold text-sky-400 text-xs">
-                          {getCommodityDisplayName(s.input_code)} — {s.relationship_type}
-                        </span>
-                        <span
-                          className={`text-[11px] font-mono px-2 py-0.5 rounded ${
-                            s.impact_direction.includes("Inverse")
-                              ? "bg-rose-500/15 text-rose-300"
-                              : s.impact_direction.includes("Direct")
-                              ? "bg-emerald-500/15 text-emerald-300"
-                              : "bg-sky-500/15 text-sky-300"
-                          }`}
-                        >
-                          {s.impact_direction}
-                        </span>
                       </div>
-                      <p className="text-xs text-slate-300 mt-1.5 leading-relaxed">
-                        {s.mechanism_note}
-                      </p>
-                    </div>
-                  ))}
+                    ))
+                  )}
                 </div>
               )}
-            </div>
 
-            {/* Value-Chain & Competitive Landscape: 1. Upstream -> 2. Competitors -> 3. Downstream */}
-            <div className="space-y-3">
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                Value-Chain &amp; Competitive Landscape (Upstream • Competitors • Downstream)
-              </h3>
-
-              {/* 1. Upstream Suppliers */}
-              <div className="rounded-lg bg-[#111827] border border-slate-800 p-3.5 space-y-2.5">
-                <div className="text-[11px] font-mono uppercase tracking-wider text-amber-400">
-                  1. Upstream Raw Material Suppliers ({upstreamSuppliers.length})
-                </div>
-                {upstreamSuppliers.length === 0 ? (
-                  <p className="text-xs text-slate-500">
-                    None disclosed in parsed filings.
-                  </p>
-                ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
-                    {upstreamSuppliers.map((sup, idx) => (
-                      <div
-                        key={`${sup.counterparty_name}-${idx}`}
-                        className="rounded bg-[#090d16] border border-slate-800/80 p-2.5 space-y-1"
-                      >
-                        <div className="flex items-center justify-between gap-1.5 flex-wrap">
-                          <span className="text-xs font-semibold text-white">
-                            {sup.counterparty_name}
-                          </span>
-                          <div className="flex items-center gap-1">
-                            {sup.is_sole_source && (
-                              <span className="px-1.5 py-0.2 rounded bg-rose-500/15 text-rose-300 border border-rose-500/30 text-[10px] font-mono">
-                                SOLE SOURCE
-                              </span>
-                            )}
-                            {sup.exposure_pct != null && (
-                              <span className="px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-300 text-[10px] font-mono">
-                                {sup.exposure_pct}%
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                        <div className="text-[11px] text-sky-300 font-medium">
-                          Input: {sup.material_or_product}
-                        </div>
-                        {sup.source_quote && (
-                          <p className="text-[11px] text-slate-400 italic leading-snug">
-                            &ldquo;{sup.source_quote}&rdquo;
-                            {sup.source_filing_type && (
-                              <span className="not-italic font-mono text-[10px] text-slate-500 ml-1">
-                                ({sup.source_filing_type} {sup.source_filing_date})
-                              </span>
-                            )}
-                          </p>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-
-              {/* 2. Competitors & Sub-Sector Peers */}
-              <div className="rounded-lg bg-[#111827] border border-slate-800 p-3.5 space-y-3">
-                <div className="text-[11px] font-mono uppercase tracking-wider text-purple-400">
-                  2. Competitors &amp; Sub-Sector Peers ({filingCompetitors.length} Filing-Disclosed • {universePeers.length} Universe Peers)
-                </div>
-
-                {filingCompetitors.length > 0 && (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
-                    {filingCompetitors.map((comp, idx) => (
-                      <div
-                        key={`${comp.counterparty_name}-${idx}`}
-                        className="rounded bg-[#090d16] border border-slate-800/80 p-2.5 space-y-1"
-                      >
-                        <div className="flex items-center justify-between gap-1.5 flex-wrap">
-                          <span className="text-xs font-semibold text-white">
-                            {comp.counterparty_name}
-                          </span>
-                          <div className="flex items-center gap-1">
-                            {comp.is_sole_source && (
-                              <span className="px-1.5 py-0.2 rounded bg-purple-500/15 text-purple-300 border border-purple-500/30 text-[10px] font-mono">
-                                PRIMARY RIVAL
-                              </span>
-                            )}
-                            {comp.exposure_pct != null && (
-                              <span className="px-1.5 py-0.2 rounded bg-sky-500/15 text-sky-300 text-[10px] font-mono">
-                                {comp.exposure_pct}% Share
-                              </span>
-                            )}
-                          </div>
-                        </div>
-                        <div className="text-[11px] text-purple-300 font-medium">
-                          Overlap: {comp.material_or_product}
-                        </div>
-                        {comp.source_quote && (
-                          <p className="text-[11px] text-slate-400 italic leading-snug">
-                            &ldquo;{comp.source_quote}&rdquo;
-                            {comp.source_filing_type && (
-                              <span className="not-italic font-mono text-[10px] text-slate-500 ml-1">
-                                ({comp.source_filing_type} {comp.source_filing_date})
-                              </span>
-                            )}
-                          </p>
-                        )}
-                      </div>
-                    ))}
-                  </div>
-                )}
-
-                {universePeers.length > 0 ? (
-                  <div className={filingCompetitors.length > 0 ? "pt-2 border-t border-slate-800/70" : ""}>
-                    <div className="text-[10px] font-mono uppercase text-slate-500 mb-1.5">
-                      Tracked Peers in {selectedEquity.sub_sector} (Click to Inspect):
+              {/* TAB 4: FILINGS & BRIEFS */}
+              {dossierTab === "filings" && (
+                <div className="space-y-4">
+                  {selectedEquityFilings.length === 0 ? (
+                    <div className="rounded-xl bg-[#111827] border border-slate-800 p-5 text-xs text-slate-400">
+                      This ticker is queued for the next SEC EDGAR / AI synthesis batch.
                     </div>
-                    <div className="flex flex-wrap gap-1.5">
-                      {universePeers.map((peer) => (
-                        <button
-                          key={peer.ticker}
-                          onClick={() => setSelectedTicker(peer.ticker)}
-                          className="px-2.5 py-1 rounded bg-[#090d16] hover:bg-slate-800 border border-slate-700/80 text-xs text-left transition flex items-center gap-1.5"
-                        >
-                          <span className="font-mono font-semibold text-sky-400">
-                            {peer.ticker}
+                  ) : (
+                    selectedEquityFilings.map((f) => (
+                      <div
+                        key={f.id}
+                        className="rounded-xl bg-[#111827] border border-slate-800 p-4 space-y-3"
+                      >
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <span className="px-2.5 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-500/30 text-xs font-mono font-semibold">
+                            {f.fiscal_period
+                              ? `${f.fiscal_period} • ${f.filing_date}`
+                              : f.filing_type === "Earnings Brief"
+                              ? `Profile & News • As of ${f.filing_date}`
+                              : `${f.filing_type} • Filed ${f.filing_date}`}
                           </span>
-                          <span className="text-slate-300 truncate max-w-[140px]">
-                            {peer.company_name}
-                          </span>
-                          {peer.market_cap_usd != null && (
-                            <span className="text-[10px] font-mono text-slate-500">
-                              ({formatMarketCap(peer.market_cap_usd)})
-                            </span>
+                          {f.source_url && (
+                            <a
+                              href={f.source_url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-xs text-sky-400 hover:underline font-mono"
+                            >
+                              View Filing &nearr;
+                            </a>
                           )}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                ) : (
-                  filingCompetitors.length === 0 && (
-                    <p className="text-xs text-slate-500">
-                      No named competitors extracted from filings yet and no other tracked peers in this sub-sector.
-                    </p>
-                  )
-                )}
-              </div>
+                        </div>
 
-              {/* 3. Downstream Customers & OEMs */}
-              <div className="rounded-lg bg-[#111827] border border-slate-800 p-3.5 space-y-2.5">
-                <div className="text-[11px] font-mono uppercase tracking-wider text-emerald-400">
-                  3. Downstream Customers &amp; OEMs ({downstreamCustomers.length})
-                </div>
-                {downstreamCustomers.length === 0 ? (
-                  <p className="text-xs text-slate-500">
-                    None disclosed in parsed filings.
-                  </p>
-                ) : (
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-2.5">
-                    {downstreamCustomers.map((cust, idx) => (
-                      <div
-                        key={`${cust.counterparty_name}-${idx}`}
-                        className="rounded bg-[#090d16] border border-slate-800/80 p-2.5 space-y-1"
-                      >
-                        <div className="flex items-center justify-between gap-1.5 flex-wrap">
-                          <span className="text-xs font-semibold text-white">
-                            {cust.counterparty_name}
-                          </span>
-                          <div className="flex items-center gap-1">
-                            {cust.is_sole_source && (
-                              <span className="px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[10px] font-mono">
-                                10%+ CONC.
+                        <h4 className="text-sm font-semibold text-white">
+                          {f.headline}
+                        </h4>
+                        <p className="text-xs text-slate-300 leading-relaxed">
+                          {f.executive_summary}
+                        </p>
+
+                        <div className="grid grid-cols-1 gap-2 pt-1 text-xs">
+                          {f.pricing_and_margins && (
+                            <div className="rounded-lg bg-[#090d16] p-3 border border-slate-800/80">
+                              <span className="font-mono text-[10px] uppercase text-emerald-400 block mb-0.5">
+                                Pricing Power &amp; Margins
                               </span>
-                            )}
-                            {cust.exposure_pct != null && (
-                              <span className="px-1.5 py-0.2 rounded bg-emerald-500/15 text-emerald-300 text-[10px] font-mono">
-                                {cust.exposure_pct}%
+                              <span className="text-slate-300">
+                                {f.pricing_and_margins}
                               </span>
-                            )}
-                          </div>
+                            </div>
+                          )}
+                          {f.capex_and_backlog && (
+                            <div className="rounded-lg bg-[#090d16] p-3 border border-slate-800/80">
+                              <span className="font-mono text-[10px] uppercase text-sky-400 block mb-0.5">
+                                Backlog, Qualification &amp; Capex
+                              </span>
+                              <span className="text-slate-300">
+                                {f.capex_and_backlog}
+                              </span>
+                            </div>
+                          )}
+                          {f.key_risks && (
+                            <div className="rounded-lg bg-[#090d16] p-3 border border-slate-800/80">
+                              <span className="font-mono text-[10px] uppercase text-rose-400 block mb-0.5">
+                                Key Risks
+                              </span>
+                              <span className="text-slate-300">
+                                {f.key_risks}
+                              </span>
+                            </div>
+                          )}
                         </div>
-                        <div className="text-[11px] text-sky-300 font-medium">
-                          Product: {cust.material_or_product}
-                        </div>
-                        {cust.source_quote && (
-                          <p className="text-[11px] text-slate-400 italic leading-snug">
-                            &ldquo;{cust.source_quote}&rdquo;
-                            {cust.source_filing_type && (
-                              <span className="not-italic font-mono text-[10px] text-slate-500 ml-1">
-                                ({cust.source_filing_type} {cust.source_filing_date})
-                              </span>
-                            )}
-                          </p>
-                        )}
                       </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            {/* Recent 10-K / 10-Q / Company Profile Intelligence */}
-            <div className="space-y-3">
-              <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
-                Recent 10-K, 10-Q &amp; Company Profile Intelligence ({selectedEquityFilings.length})
-              </h3>
-              {selectedEquityFilings.length === 0 ? (
-                <div className="rounded-lg bg-[#111827] border border-slate-800 p-4 text-xs text-slate-400">
-                  This ticker is queued for the next SEC EDGAR / AI synthesis batch.
+                    ))
+                  )}
                 </div>
-              ) : (
-                selectedEquityFilings.map((f) => (
-                  <div
-                    key={f.id}
-                    className="rounded-xl bg-[#111827] border border-slate-800 p-4 space-y-3"
-                  >
-                    <div className="flex items-center justify-between gap-2 flex-wrap">
-                      <span className="px-2.5 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-500/30 text-xs font-mono font-semibold">
-                        {f.fiscal_period
-                          ? `${f.fiscal_period} • ${f.filing_date}`
-                          : f.filing_type === "Earnings Brief"
-                          ? `Profile & News • As of ${f.filing_date}`
-                          : `${f.filing_type} • Filed ${f.filing_date}`}
-                      </span>
-                      {f.source_url && (
-                        <a
-                          href={f.source_url}
-                          target="_blank"
-                          rel="noreferrer"
-                          className="text-xs text-sky-400 hover:underline font-mono"
-                        >
-                          View Filing &nearr;
-                        </a>
-                      )}
-                    </div>
-
-                    <h4 className="text-sm font-semibold text-white">{f.headline}</h4>
-                    <p className="text-xs text-slate-300 leading-relaxed">
-                      {f.executive_summary}
-                    </p>
-
-                    <div className="grid grid-cols-1 gap-2 pt-1 text-xs">
-                      {f.pricing_and_margins && (
-                        <div className="rounded bg-[#090d16] p-2.5 border border-slate-800/80">
-                          <span className="font-mono text-[10px] uppercase text-emerald-400 block mb-0.5">
-                            Pricing Power &amp; Margins
-                          </span>
-                          <span className="text-slate-300">{f.pricing_and_margins}</span>
-                        </div>
-                      )}
-                      {f.capex_and_backlog && (
-                        <div className="rounded bg-[#090d16] p-2.5 border border-slate-800/80">
-                          <span className="font-mono text-[10px] uppercase text-sky-400 block mb-0.5">
-                            Backlog, Qualification &amp; Capex
-                          </span>
-                          <span className="text-slate-300">{f.capex_and_backlog}</span>
-                        </div>
-                      )}
-                      {f.key_risks && (
-                        <div className="rounded bg-[#090d16] p-2.5 border border-slate-800/80">
-                          <span className="font-mono text-[10px] uppercase text-rose-400 block mb-0.5">
-                            Key Risks
-                          </span>
-                          <span className="text-slate-300">{f.key_risks}</span>
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                ))
               )}
             </div>
           </div>
