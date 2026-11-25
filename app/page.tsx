@@ -108,7 +108,15 @@ async function DashboardDataLoader() {
         FROM company_filings_ai f
         LEFT JOIN equities_universe e ON f.ticker = e.ticker
       ) ranked
-      WHERE rn <= 3
+    WHERE rn <= CASE
+        WHEN EXISTS (
+          SELECT 1
+          FROM company_filings_ai hf
+          WHERE hf.ticker = ranked.ticker
+            AND hf.filing_type = 'Half-Year Report'
+        ) THEN 2
+        ELSE 3
+      END
       ORDER BY filing_date DESC, id DESC
     `,
     sql`
