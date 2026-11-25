@@ -25,6 +25,24 @@ GENERIC_SEGMENT_RE = re.compile(
     re.IGNORECASE,
 )
 
+NON_ADV_MAT_RE = re.compile(
+    r"\b("
+    r"pharmaceuticals?|oncology|biologics?|vaccines?|therapeutics?|clinical\s+trials?|"
+    r"prescription\s+drugs?|fertility\s+drugs?|monoclonal\s+antibod(y|ies)|cdmo|cro|"
+    r"frozen\s+foods?|seasonings?|beverages?|snacks?|pet\s+food|animal\s+feed|"
+    r"post-?it|scotch\s+tape|consumer\s+retail|apparel|footwear|cosmetics?|"
+    r"enterprise\s+software|cloud\s+saas|avionics|building\s+automation|"
+    r"insurance|banking|residential\s+housing|turnkey\s+machinery|capital\s+equipment|metrology|"
+    r"recycling"
+    r")\b",
+    re.IGNORECASE,
+)
+
+NON_MAT_CUSTOMER_RE = re.compile(
+    r"\b(walmart|target|cvs|walgreens|kroger|costco|pfizer|novartis|roche|sanofi|astrazeneca|amgen|nestle|unilever)\b",
+    re.IGNORECASE,
+)
+
 
 def _build_gemini_client():
     if not GEMINI_API_KEY:
@@ -111,7 +129,7 @@ class DownstreamSpec(BaseModel):
     )
     customers: Optional[List[str]] = Field(
         default=None,
-        description="Explicitly disclosed customers/OEMs if stated in source text, else null.",
+        description="Explicitly disclosed customers/OEMs for this advanced material if stated in source text, else null.",
     )
 
 
@@ -311,6 +329,16 @@ def get_registry_and_universe(conn):
     return conn, registry, universe
 
 
+def _normalize_product_slug(raw_id: str, ticker: str, prod_name: str) -> str:
+    prefix = re.sub(r"[^a-z0-9]+", "-", ticker.lower()).strip("-")
+    base = re.sub(r"[^a-z0-9]+", "-", (raw_id or prod_name).lower()).strip("-")
+    if not base:
+        base = re.sub(r"[^a-z0-9]+", "-", prod_name.lower()).strip("-") or "product"
+    if not base.startswith(f"{prefix}-"):
+        base = f"{prefix}-{base}"
+    return base[:80]
+
+
 def run_product_extraction(conn):
     conn, registry, universe = get_registry_and_universe(conn)
     registry_guide = "\n".join([f"- {code}: {name} ({cat})" for code, (name, cat) in sorted(registry.items())])
@@ -318,7 +346,7 @@ def run_product_extraction(conn):
 
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT e.ticker, e.company_name, e.sub_sector, e.market_cap_usd
+            SELECT e.ticker, e.company_name, e.sub_sector, e.adv_mat_rev_pct, e.market_cap_usd
             FROM equities_universe e
             WHERE NOT EXISTS (SELECT 1 FROM company_products p WHERE p.ticker = e.ticker)
               AND NOT EXISTS (SELECT 1 FROM company_product_profiles pr WHERE pr.ticker = e.ticker)
@@ -329,7 +357,7 @@ def run_product_extraction(conn):
 
     print(f"Starting product extraction for {len(targets)} companies (BATCH_LIMIT={BATCH_LIMIT})...", flush=True)
 
-    for idx, (ticker, company_name, sub_sector, _) in enumerate(targets, start=1):
+    for idx, (ticker, company_name, sub_sector, adv_mat_rev_pct, _) in enumerate(targets, start=1):
         print(f"[{idx}/{len(targets)}] Extracting {ticker} ({company_name})...", flush=True)
         conn = ensure_conn(conn)
         with conn.cursor() as cur:
@@ -361,15 +389,20 @@ def run_product_extraction(conn):
 
         src_type = "filing" if filings and filings[0][0] in ("10-K", "10-Q", "20-F", "40-F", "6-K") else "inferred"
         src_ref = f"{filings[0][0]} ({filings[0][1]})" if filings and src_type == "filing" else None
+        rev_share_note = f"{adv_mat_rev_pct}% of company revenue" if adv_mat_rev_pct is not None else "specialist segment"
 
         prompt = f"""
-        Decompose {company_name} ({ticker}) | Sub-sector: {sub_sector} into specific engineered advanced-materials products.
+        Decompose {company_name} ({ticker}) | Assigned Advanced-Materials Sub-sector: {sub_sector} ({rev_share_note}) into specific engineered advanced-materials products.
+
+        CONGLOMERATE & DOMAIN SCOPE LOCK (CRITICAL):
+        - Extract ONLY engineered materials, specialty chemicals, alloys, wafers, films, fibers, gases, or ceramics belonging to the company's "{sub_sector}" operations.
+        - If {company_name} is a diversified conglomerate, STRICTLY IGNORE all non-materials divisions (Pharmaceuticals/Biologics/Healthcare drugs, Food/Seasonings/Beverages, Consumer/Office Retail, Building Automation/Avionics, Software, Financial Services, Turnkey Equipment/Machinery, Recycling operations) and list those excluded divisions in excluded[] instead.
 
         STRICT INCLUSION GATE (ALL 4 MUST HOLD, OTHERWISE PUT IN excluded[]):
-        1. Performance-specified (not commodity grade-specified).
+        1. Performance-specified engineered material (not finished consumer goods, drugs, food, or machinery).
         2. Qualified inside a customer's manufacturing process.
         3. Switching requires customer requalification.
-        4. Sold as a specific engineered material input to a downstream manufacturer (NEVER include broad business units, segments, recycling operations, equipment, metrology, or services—put those in excluded[]).
+        4. Sold as a material input to a downstream manufacturer (NEVER include generic segment names like "recycling business" or "electronics division").
 
         RULES:
         - Never invent facts, customer names, qualification months, or product revenue shares. Unknown = null.
@@ -407,10 +440,19 @@ def run_product_extraction(conn):
                 if not prod_name:
                     continue
 
-                if GENERIC_SEGMENT_RE.search(prod_name):
+                ds_raw = prod.get("downstream") or {}
+                check_blob = " ".join([
+                    prod_name,
+                    prod.get("category") or "",
+                    prod.get("business_unit") or "",
+                    ds_raw.get("end_product") or "",
+                    ds_raw.get("end_demand") or "",
+                ])
+
+                if GENERIC_SEGMENT_RE.search(prod_name) or NON_ADV_MAT_RE.search(check_blob):
                     excluded_items.append({
                         "name": prod_name,
-                        "reason": "Generic business segment or service rather than a specific engineered material product.",
+                        "reason": "Excluded non-advanced-materials division, finished good, or generic segment.",
                     })
                     continue
 
@@ -431,7 +473,7 @@ def run_product_extraction(conn):
                         "basis": rm.get("basis") if rm.get("basis") in ("disclosed", "inferred") else "inferred",
                     })
 
-                ds = prod.get("downstream") or {}
+                ds = dict(ds_raw)
                 dref = ds.get("demand_proxy_ref")
                 if dref not in registry:
                     dref = None
@@ -439,7 +481,17 @@ def run_product_extraction(conn):
                 ds.setdefault("process_step", "downstream processing")
                 ds.setdefault("end_product", "manufactured component")
                 ds.setdefault("end_demand", "industrial end-demand")
-                ds.setdefault("customers", None)
+
+                raw_customers = ds.get("customers")
+                if isinstance(raw_customers, list):
+                    filtered_custs = [
+                        c.strip()
+                        for c in raw_customers
+                        if isinstance(c, str) and c.strip() and not NON_MAT_CUSTOMER_RE.search(c)
+                    ]
+                    ds["customers"] = filtered_custs or None
+                else:
+                    ds["customers"] = None
 
                 adv = prod.get("advanced") or {
                     "performance_spec": "customer-qualified specification",
@@ -454,6 +506,7 @@ def run_product_extraction(conn):
                 status = prod.get("status") if prod.get("status") in ("active", "divested") else "active"
                 conf = prod.get("conf") if prod.get("conf") in ("high", "med", "low") else "med"
                 valid_peers = list(dict.fromkeys(p for p in prod.get("peers", []) if p in universe and p != ticker))
+                prod_id = _normalize_product_slug(prod.get("id", ""), ticker, prod_name)
 
                 cur.execute(
                     """
@@ -479,7 +532,7 @@ def run_product_extraction(conn):
                         updated_at = NOW();
                     """,
                     (
-                        prod["id"],
+                        prod_id,
                         ticker,
                         prod_name,
                         prod["category"],
@@ -498,11 +551,16 @@ def run_product_extraction(conn):
                 )
                 saved_products += 1
 
+            seen_excluded = set()
             for ex in excluded_items:
                 ex_name = (ex.get("name") or "").strip()
                 ex_reason = (ex.get("reason") or "").strip()
                 if not ex_name or not ex_reason:
                     continue
+                ex_key = ex_name.lower()
+                if ex_key in seen_excluded:
+                    continue
+                seen_excluded.add(ex_key)
                 cur.execute(
                     """
                     INSERT INTO company_excluded_products (ticker, name, reason)
@@ -513,7 +571,7 @@ def run_product_extraction(conn):
                 )
         conn.commit()
         print(
-            f"[{ticker}] Saved {saved_products} products & {len(excluded_items)} excluded items.",
+            f"[{ticker}] Saved {saved_products} products & {len(seen_excluded)} excluded items.",
             flush=True,
         )
 
