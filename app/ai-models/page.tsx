@@ -13,7 +13,6 @@ interface ModelSpec {
   speedLabel: string;
   contextWindow: string;
   defaultRpd: number;
-  defaultTpd: number | null;
   summary: string;
 }
 
@@ -28,7 +27,6 @@ const MODEL_REGISTRY: ModelSpec[] = [
     speedLabel: "Fast",
     contextWindow: "1M tokens",
     defaultRpd: 250,
-    defaultTpd: null,
     summary:
       "First-choice engine for SEC 10-K/20-F parsing, product decomposition, and live Google Search spot-price grounding with native Pydantic schema enforcement.",
   },
@@ -42,7 +40,6 @@ const MODEL_REGISTRY: ModelSpec[] = [
     speedLabel: "Ultra-Fast",
     contextWindow: "1M tokens",
     defaultRpd: 250,
-    defaultTpd: null,
     summary:
       "Separate Google AI Studio rate-limit bucket that absorbs overflow immediately if Gemini 3.8 Flash hits per-minute or daily caps.",
   },
@@ -56,7 +53,6 @@ const MODEL_REGISTRY: ModelSpec[] = [
     speedLabel: "~500 tok/s",
     contextWindow: "131K tokens",
     defaultRpd: 1000,
-    defaultTpd: 200000,
     summary:
       "120B MoE reasoning model on Groq LPU hardware; top open-weight fallback for multi-hop supply-chain and margin pass-through extraction.",
   },
@@ -70,7 +66,6 @@ const MODEL_REGISTRY: ModelSpec[] = [
     speedLabel: "~650 tok/s",
     contextWindow: "131K tokens",
     defaultRpd: 1000,
-    defaultTpd: 200000,
     summary:
       "Strong structured JSON adherence and cross-lingual comprehension for Japanese, Korean, Taiwanese, and European materials disclosures.",
   },
@@ -84,9 +79,8 @@ const MODEL_REGISTRY: ModelSpec[] = [
     speedLabel: "~900 tok/s",
     contextWindow: "131K tokens",
     defaultRpd: 1000,
-    defaultTpd: 200000,
     summary:
-      "Lightweight 20B MoE model providing an independent 1,000 RPD / 200K TPD bucket to finish batch runs when larger buckets saturate.",
+      "Lightweight 20B MoE model providing an independent 1,000 RPD bucket to finish batch runs when larger buckets saturate.",
   },
   {
     id: "openai/gpt-oss-safeguard-20b",
@@ -98,7 +92,6 @@ const MODEL_REGISTRY: ModelSpec[] = [
     speedLabel: "~850 tok/s",
     contextWindow: "128K tokens",
     defaultRpd: 1000,
-    defaultTpd: 200000,
     summary:
       "Safety-tuned 20B reserve bucket; placed last because stricter classifier guardrails can occasionally refuse defense/munitions filing excerpts.",
   },
@@ -114,6 +107,12 @@ interface UsageRow {
   limit_tokens: number | null;
   quota_exhausted: boolean;
   last_used_at: string | null;
+}
+
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(2)}M`;
+  if (n >= 1_000) return `${Math.round(n / 1_000)}K`;
+  return `${n}`;
 }
 
 async function AiModelsLoader() {
@@ -164,26 +163,22 @@ async function AiModelsLoader() {
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
         {MODEL_REGISTRY.map((m) => {
           const u = usageMap.get(m.id);
+          const hasLiveRpdHeader = u?.remaining_requests != null;
           const limitReq = u?.limit_requests ?? m.defaultRpd;
           const callsUsed = u?.calls_used ?? 0;
           const remainingReq = u?.quota_exhausted
             ? 0
-            : u?.remaining_requests != null
-            ? u.remaining_requests
+            : hasLiveRpdHeader
+            ? u!.remaining_requests!
             : Math.max(0, limitReq - callsUsed);
           const pctLeft =
             limitReq > 0
               ? Math.max(0, Math.min(100, (remainingReq / limitReq) * 100))
               : 0;
 
-          const limitTok = u?.limit_tokens ?? m.defaultTpd;
-          const remTok = u?.quota_exhausted
-            ? 0
-            : u?.remaining_tokens != null
-            ? u.remaining_tokens
-            : limitTok != null
-            ? Math.max(0, limitTok - (u?.tokens_used ?? 0))
-            : null;
+          const tokensUsed = u?.tokens_used ?? 0;
+          const tpmRemaining = u?.remaining_tokens ?? null;
+          const tpmLimit = u?.limit_tokens ?? null;
 
           return (
             <div
@@ -233,10 +228,15 @@ async function AiModelsLoader() {
                 </p>
               </div>
 
-              {/* Live Daily Quota Remaining */}
+              {/* Daily Request Quota & Token Telemetry */}
               <div className="rounded-lg bg-[#090d16] border border-slate-800/90 p-3 space-y-2">
                 <div className="flex items-center justify-between text-xs font-mono">
-                  <span className="text-slate-400">Requests Left Today</span>
+                  <span className="text-slate-400">
+                    Requests Left{" "}
+                    <span className="text-[10px] text-slate-500">
+                      ({hasLiveRpdHeader ? "Live RPD" : "Est. Cap"})
+                    </span>
+                  </span>
                   <span
                     className={
                       pctLeft > 40
@@ -246,7 +246,8 @@ async function AiModelsLoader() {
                         : "text-rose-400 font-semibold"
                     }
                   >
-                    {remainingReq.toLocaleString()} / {limitReq.toLocaleString()} ({pctLeft.toFixed(0)}%)
+                    {remainingReq.toLocaleString()} / {limitReq.toLocaleString()} (
+                    {pctLeft.toFixed(0)}%)
                   </span>
                 </div>
 
@@ -264,11 +265,13 @@ async function AiModelsLoader() {
                 </div>
 
                 <div className="flex items-center justify-between text-[10px] font-mono text-slate-500">
-                  <span>Used today: {callsUsed} calls</span>
-                  {remTok != null && limitTok != null ? (
-                    <span>
-                      Tokens left: {Math.round(remTok / 1000)}K /{" "}
-                      {Math.round(limitTok / 1000)}K
+                  <span>
+                    Used today: {callsUsed} calls ({formatTokens(tokensUsed)} tok)
+                  </span>
+                  {tpmRemaining != null && tpmLimit != null ? (
+                    <span title="Groq x-ratelimit-remaining-tokens reports Tokens Per Minute (TPM)">
+                      Last TPM window: {formatTokens(tpmRemaining)} /{" "}
+                      {formatTokens(tpmLimit)}
                     </span>
                   ) : (
                     <span>
