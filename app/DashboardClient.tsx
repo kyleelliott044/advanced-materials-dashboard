@@ -249,6 +249,9 @@ const MACRO_DRIVER_CODES = new Set([
   "IHI",
 ]);
 
+const DEMAND_DRIVER_NAME_RE =
+  /\b(demand|build\s*rates?|wafer\s*(starts?|fab)|capex|production|utilization|spending|shipments?|volumes?|end[- ]market|supply\s*chain|yield|interest\s*rate|ppi|index)\b/i;
+
 function isMacroDriverItem(item: RawInputRow): boolean {
   if (MACRO_DRIVER_CODES.has(item.input_code)) return true;
   const cat = (item.category || "").toLowerCase();
@@ -481,7 +484,7 @@ export default function DashboardClient({
   equities: rawEquities,
   inputs,
   sensitivities,
-  filings,
+  filings: rawFilings,
   narrative,
   supplyChain = [],
   commodityDrivers = [],
@@ -532,6 +535,22 @@ export default function DashboardClient({
     }
     return Array.from(byKey.values());
   }, [rawEquities]);
+
+  // Exclude FY2024 or older filings defensively
+  const filings = useMemo(() => {
+    return rawFilings.filter((f) => {
+      if (f.fiscal_period && /\b202[0-4]\b/.test(f.fiscal_period)) return false;
+      if (f.filing_date && f.filing_date < "2025-01-01") return false;
+      if (
+        ["10-K", "20-F", "40-F"].includes(f.filing_type) &&
+        f.filing_date &&
+        f.filing_date < "2025-04-01"
+      ) {
+        return false;
+      }
+      return true;
+    });
+  }, [rawFilings]);
 
   const [activeTab, setActiveTab] = useState<"screener" | "feed">("screener");
   const [narrativeTab, setNarrativeTab] = useState<
@@ -618,18 +637,24 @@ export default function DashboardClient({
   const getCommodityDisplayName = (code: string) =>
     inputNameMap[code] || code;
 
-  // Separate filter cards into Commodities vs. Macro Drivers
-  const { commodityInputs, macroDriverInputs } = useMemo(() => {
+  // Separate filter cards into Commodities vs. Macro / Demand Drivers
+  const { commodityInputs, macroDriverInputs, macroCodeSet } = useMemo(() => {
     const commodities: RawInputRow[] = [];
     const macro: RawInputRow[] = [];
+    const codes = new Set<string>(MACRO_DRIVER_CODES);
     for (const item of inputs) {
       if (isMacroDriverItem(item)) {
         macro.push(item);
+        codes.add(item.input_code);
       } else {
         commodities.push(item);
       }
     }
-    return { commodityInputs: commodities, macroDriverInputs: macro };
+    return {
+      commodityInputs: commodities,
+      macroDriverInputs: macro,
+      macroCodeSet: codes,
+    };
   }, [inputs]);
 
   const displayedFilterInputs =
@@ -1059,6 +1084,56 @@ export default function DashboardClient({
     ? sectorSensitivitiesMap[selectedEquity.sub_sector] || []
     : [];
 
+  // Separate actual commodities from end-market / macro demand drivers in the dossier
+  const {
+    dossierAiCommodities,
+    dossierAiDemandDrivers,
+    dossierSectorCommodities,
+    dossierSectorDemandDrivers,
+  } = useMemo(() => {
+    const isAiDemandDriver = (d: CommodityDriverRow) => {
+      if (d.matched_input_code && macroCodeSet.has(d.matched_input_code)) {
+        return true;
+      }
+      if (
+        !d.matched_input_code &&
+        d.exposure_role === "Revenue Driver" &&
+        d.impact_direction === "Direct (Demand)" &&
+        DEMAND_DRIVER_NAME_RE.test(d.commodity_name)
+      ) {
+        return true;
+      }
+      return false;
+    };
+
+    const aiCommodities: CommodityDriverRow[] = [];
+    const aiDemandDrivers: CommodityDriverRow[] = [];
+    for (const d of selectedEquityDrivers) {
+      if (isAiDemandDriver(d)) {
+        aiDemandDrivers.push(d);
+      } else {
+        aiCommodities.push(d);
+      }
+    }
+
+    const sectorCommodities: SensitivityRow[] = [];
+    const sectorDemandDrivers: SensitivityRow[] = [];
+    for (const s of selectedEquitySensitivities) {
+      if (macroCodeSet.has(s.input_code)) {
+        sectorDemandDrivers.push(s);
+      } else {
+        sectorCommodities.push(s);
+      }
+    }
+
+    return {
+      dossierAiCommodities: aiCommodities,
+      dossierAiDemandDrivers: aiDemandDrivers,
+      dossierSectorCommodities: sectorCommodities,
+      dossierSectorDemandDrivers: sectorDemandDrivers,
+    };
+  }, [selectedEquityDrivers, selectedEquitySensitivities, macroCodeSet]);
+
   const selectedEquitySupplyChain = selectedTicker
     ? tickerSupplyChainMap[selectedTicker] || []
     : [];
@@ -1130,14 +1205,7 @@ export default function DashboardClient({
   }, [equities, selectedEquity]);
 
   const handleSelectCommodityFromDossier = (code: string) => {
-    const matchedInput = inputs.find((i) => i.input_code === code);
-    if (matchedInput) {
-      setDriverFilterTab(isMacroDriverItem(matchedInput) ? "macro" : "commodities");
-    } else if (MACRO_DRIVER_CODES.has(code)) {
-      setDriverFilterTab("macro");
-    } else {
-      setDriverFilterTab("commodities");
-    }
+    setDriverFilterTab(macroCodeSet.has(code) ? "macro" : "commodities");
     setSelectedCommodity(code);
     setSelectedProductCategory(null);
     setActiveTab("screener");
@@ -2496,98 +2564,298 @@ export default function DashboardClient({
                   </div>
                 ))}
 
-              {/* TAB 3: COMMODITY EXPOSURE */}
-              {dossierTab === "commodities" && (
-                <div className="space-y-3">
-                  {selectedEquityDrivers.length > 0 ? (
-                    selectedEquityDrivers.map((d, idx) => (
-                      <div
-                        key={`${d.commodity_name}-${idx}`}
-                        className="rounded-xl bg-[#111827] border border-slate-800 p-4 space-y-2"
-                      >
-                        <div className="flex items-center justify-between gap-2 flex-wrap">
-                          <div className="flex items-center gap-2 flex-wrap">
-                            <span className="font-semibold text-white text-xs">
-                              {d.commodity_name}
-                            </span>
-                            <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 text-[10px] font-mono">
-                              {d.exposure_role}
-                            </span>
-                            {d.cogs_or_rev_share_pct != null && (
-                              <span className="px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[10px] font-mono">
-                                {d.cogs_or_rev_share_pct}% Share
-                              </span>
-                            )}
-                          </div>
-                          <div className="flex items-center gap-1.5">
-                            {d.pass_through_lag && (
-                              <span className="text-[10px] font-mono text-slate-400">
-                                {d.pass_through_lag}
-                              </span>
-                            )}
-                            <span
-                              className={`text-[11px] font-mono px-2 py-0.5 rounded ${
-                                d.impact_direction.includes("Inverse")
-                                  ? "bg-rose-500/15 text-rose-300"
-                                  : d.impact_direction.includes("Direct")
-                                  ? "bg-emerald-500/15 text-emerald-300"
-                                  : "bg-sky-500/15 text-sky-300"
-                              }`}
+              {/* TAB 3: COMMODITY EXPOSURE (Separated: Physical Commodities vs. Demand Drivers) */}
+              {dossierTab === "commodities" &&
+                (totalCommodityCount === 0 ? (
+                  <p className="text-xs text-slate-500">
+                    No direct commodity rules mapped for this sub-sector yet.
+                  </p>
+                ) : selectedEquityDrivers.length > 0 ? (
+                  <div className="space-y-4">
+                    {/* 1. Physical Commodities & Raw Materials */}
+                    <div className="rounded-xl bg-[#111827] border border-slate-800 p-4 space-y-3">
+                      <div className="text-[11px] font-mono uppercase tracking-wider text-amber-400">
+                        1. Commodities &amp; Raw Materials ({dossierAiCommodities.length})
+                      </div>
+                      {dossierAiCommodities.length === 0 ? (
+                        <p className="text-xs text-slate-500">
+                          No physical commodities or raw material inputs extracted yet.
+                        </p>
+                      ) : (
+                        <div className="space-y-2.5">
+                          {dossierAiCommodities.map((d, idx) => (
+                            <div
+                              key={`${d.commodity_name}-${idx}`}
+                              className="rounded-lg bg-[#090d16] border border-slate-800/80 p-3.5 space-y-2"
                             >
-                              {d.impact_direction}
-                            </span>
-                          </div>
+                              <div className="flex items-center justify-between gap-2 flex-wrap">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="font-semibold text-white text-xs">
+                                    {d.commodity_name}
+                                  </span>
+                                  <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 text-[10px] font-mono">
+                                    {d.exposure_role}
+                                  </span>
+                                  {d.matched_input_code &&
+                                    validRegistryCodes.has(
+                                      d.matched_input_code
+                                    ) && (
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          handleSelectCommodityFromDossier(
+                                            d.matched_input_code!
+                                          )
+                                        }
+                                        title="Filter screener by this commodity feed"
+                                        className="px-2 py-0.5 rounded bg-amber-500/15 hover:bg-amber-500/25 text-amber-300 border border-amber-500/30 text-[10px] font-mono transition"
+                                      >
+                                        {getCommodityDisplayName(
+                                          d.matched_input_code
+                                        )}{" "}
+                                        ↗
+                                      </button>
+                                    )}
+                                  {d.cogs_or_rev_share_pct != null && (
+                                    <span className="px-2 py-0.5 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[10px] font-mono">
+                                      {d.cogs_or_rev_share_pct}% Share
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                  {d.pass_through_lag && (
+                                    <span className="text-[10px] font-mono text-slate-400">
+                                      {d.pass_through_lag}
+                                    </span>
+                                  )}
+                                  <span
+                                    className={`text-[11px] font-mono px-2 py-0.5 rounded ${
+                                      d.impact_direction.includes("Inverse")
+                                        ? "bg-rose-500/15 text-rose-300"
+                                        : d.impact_direction.includes("Direct")
+                                        ? "bg-emerald-500/15 text-emerald-300"
+                                        : "bg-sky-500/15 text-sky-300"
+                                    }`}
+                                  >
+                                    {d.impact_direction}
+                                  </span>
+                                </div>
+                              </div>
+                              <p className="text-xs text-slate-300 leading-relaxed">
+                                {d.mechanism_detail}
+                              </p>
+                              {d.source_quote && (
+                                <p className="text-[11px] text-slate-400 italic leading-snug border-l-2 border-slate-700 pl-2.5">
+                                  &ldquo;{d.source_quote}&rdquo;
+                                  {d.source_filing_type && (
+                                    <span className="not-italic font-mono text-[10px] text-slate-500 ml-1">
+                                      ({d.source_filing_type}{" "}
+                                      {d.source_filing_date})
+                                    </span>
+                                  )}
+                                </p>
+                              )}
+                            </div>
+                          ))}
                         </div>
-                        <p className="text-xs text-slate-300 leading-relaxed">
-                          {d.mechanism_detail}
-                        </p>
-                        {d.source_quote && (
-                          <p className="text-[11px] text-slate-400 italic leading-snug border-l-2 border-slate-700 pl-2.5">
-                            &ldquo;{d.source_quote}&rdquo;
-                            {d.source_filing_type && (
-                              <span className="not-italic font-mono text-[10px] text-slate-500 ml-1">
-                                ({d.source_filing_type} {d.source_filing_date})
-                              </span>
-                            )}
-                          </p>
-                        )}
+                      )}
+                    </div>
+
+                    {/* 2. End-Market & Macro Demand Drivers */}
+                    <div className="rounded-xl bg-[#111827] border border-slate-800 p-4 space-y-3">
+                      <div className="text-[11px] font-mono uppercase tracking-wider text-sky-400">
+                        2. End-Market &amp; Macro Demand Drivers ({dossierAiDemandDrivers.length})
                       </div>
-                    ))
-                  ) : selectedEquitySensitivities.length === 0 ? (
-                    <p className="text-xs text-slate-500">
-                      No direct commodity rules mapped for this sub-sector yet.
-                    </p>
-                  ) : (
-                    selectedEquitySensitivities.map((s) => (
-                      <div
-                        key={s.input_code}
-                        className="rounded-xl bg-[#111827] border border-slate-800 p-4 space-y-1.5"
-                      >
-                        <div className="flex items-center justify-between">
-                          <span className="font-semibold text-sky-400 text-xs">
-                            {getCommodityDisplayName(s.input_code)} —{" "}
-                            {s.relationship_type}
-                          </span>
-                          <span
-                            className={`text-[11px] font-mono px-2 py-0.5 rounded ${
-                              s.impact_direction.includes("Inverse")
-                                ? "bg-rose-500/15 text-rose-300"
-                                : s.impact_direction.includes("Direct")
-                                ? "bg-emerald-500/15 text-emerald-300"
-                                : "bg-sky-500/15 text-sky-300"
-                            }`}
-                          >
-                            {s.impact_direction}
-                          </span>
+                      {dossierAiDemandDrivers.length === 0 ? (
+                        <p className="text-xs text-slate-500">
+                          No macro or end-market demand drivers extracted yet.
+                        </p>
+                      ) : (
+                        <div className="space-y-2.5">
+                          {dossierAiDemandDrivers.map((d, idx) => (
+                            <div
+                              key={`${d.commodity_name}-${idx}`}
+                              className="rounded-lg bg-[#090d16] border border-slate-800/80 p-3.5 space-y-2"
+                            >
+                              <div className="flex items-center justify-between gap-2 flex-wrap">
+                                <div className="flex items-center gap-2 flex-wrap">
+                                  <span className="font-semibold text-white text-xs">
+                                    {formatShortDemandProxy(
+                                      d.commodity_name,
+                                      d.matched_input_code
+                                    )}
+                                  </span>
+                                  <span className="px-2 py-0.5 rounded bg-slate-800 text-slate-300 text-[10px] font-mono">
+                                    {d.exposure_role}
+                                  </span>
+                                  {d.matched_input_code &&
+                                    validRegistryCodes.has(
+                                      d.matched_input_code
+                                    ) && (
+                                      <button
+                                        type="button"
+                                        onClick={() =>
+                                          handleSelectCommodityFromDossier(
+                                            d.matched_input_code!
+                                          )
+                                        }
+                                        title="Filter screener by this macro demand driver"
+                                        className="px-2 py-0.5 rounded bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border border-sky-500/30 text-[10px] font-mono transition"
+                                      >
+                                        Filter Proxy ↗
+                                      </button>
+                                    )}
+                                  {d.cogs_or_rev_share_pct != null && (
+                                    <span className="px-2 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-500/30 text-[10px] font-mono">
+                                      {d.cogs_or_rev_share_pct}% Share
+                                    </span>
+                                  )}
+                                </div>
+                                <div className="flex items-center gap-1.5">
+                                  {d.pass_through_lag && (
+                                    <span className="text-[10px] font-mono text-slate-400">
+                                      {d.pass_through_lag}
+                                    </span>
+                                  )}
+                                  <span
+                                    className={`text-[11px] font-mono px-2 py-0.5 rounded ${
+                                      d.impact_direction.includes("Inverse")
+                                        ? "bg-rose-500/15 text-rose-300"
+                                        : d.impact_direction.includes("Direct")
+                                        ? "bg-emerald-500/15 text-emerald-300"
+                                        : "bg-sky-500/15 text-sky-300"
+                                    }`}
+                                  >
+                                    {d.impact_direction}
+                                  </span>
+                                </div>
+                              </div>
+                              <p className="text-xs text-slate-300 leading-relaxed">
+                                {d.mechanism_detail}
+                              </p>
+                              {d.source_quote && (
+                                <p className="text-[11px] text-slate-400 italic leading-snug border-l-2 border-slate-700 pl-2.5">
+                                  &ldquo;{d.source_quote}&rdquo;
+                                  {d.source_filing_type && (
+                                    <span className="not-italic font-mono text-[10px] text-slate-500 ml-1">
+                                      ({d.source_filing_type}{" "}
+                                      {d.source_filing_date})
+                                    </span>
+                                  )}
+                                </p>
+                              )}
+                            </div>
+                          ))}
                         </div>
-                        <p className="text-xs text-slate-300 leading-relaxed">
-                          {s.mechanism_note}
-                        </p>
+                      )}
+                    </div>
+                  </div>
+                ) : (
+                  <div className="space-y-4">
+                    {/* 1. Sub-Sector Commodities & Raw Materials */}
+                    <div className="rounded-xl bg-[#111827] border border-slate-800 p-4 space-y-3">
+                      <div className="text-[11px] font-mono uppercase tracking-wider text-amber-400">
+                        1. Commodities &amp; Raw Materials ({dossierSectorCommodities.length})
                       </div>
-                    ))
-                  )}
-                </div>
-              )}
+                      {dossierSectorCommodities.length === 0 ? (
+                        <p className="text-xs text-slate-500">
+                          No direct physical commodity rules mapped for this sub-sector.
+                        </p>
+                      ) : (
+                        <div className="space-y-2.5">
+                          {dossierSectorCommodities.map((s) => (
+                            <div
+                              key={s.input_code}
+                              className="rounded-lg bg-[#090d16] border border-slate-800/80 p-3.5 space-y-1.5"
+                            >
+                              <div className="flex items-center justify-between gap-2 flex-wrap">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleSelectCommodityFromDossier(
+                                      s.input_code
+                                    )
+                                  }
+                                  className="font-semibold text-amber-300 hover:underline text-xs text-left"
+                                >
+                                  {getCommodityDisplayName(s.input_code)} —{" "}
+                                  {s.relationship_type} ↗
+                                </button>
+                                <span
+                                  className={`text-[11px] font-mono px-2 py-0.5 rounded ${
+                                    s.impact_direction.includes("Inverse")
+                                      ? "bg-rose-500/15 text-rose-300"
+                                      : s.impact_direction.includes("Direct")
+                                      ? "bg-emerald-500/15 text-emerald-300"
+                                      : "bg-sky-500/15 text-sky-300"
+                                  }`}
+                                >
+                                  {s.impact_direction}
+                                </span>
+                              </div>
+                              <p className="text-xs text-slate-300 leading-relaxed">
+                                {s.mechanism_note}
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* 2. Sub-Sector End-Market & Macro Demand Drivers */}
+                    <div className="rounded-xl bg-[#111827] border border-slate-800 p-4 space-y-3">
+                      <div className="text-[11px] font-mono uppercase tracking-wider text-sky-400">
+                        2. End-Market &amp; Macro Demand Drivers ({dossierSectorDemandDrivers.length})
+                      </div>
+                      {dossierSectorDemandDrivers.length === 0 ? (
+                        <p className="text-xs text-slate-500">
+                          No direct demand drivers mapped for this sub-sector.
+                        </p>
+                      ) : (
+                        <div className="space-y-2.5">
+                          {dossierSectorDemandDrivers.map((s) => (
+                            <div
+                              key={s.input_code}
+                              className="rounded-lg bg-[#090d16] border border-slate-800/80 p-3.5 space-y-1.5"
+                            >
+                              <div className="flex items-center justify-between gap-2 flex-wrap">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleSelectCommodityFromDossier(
+                                      s.input_code
+                                    )
+                                  }
+                                  className="font-semibold text-sky-400 hover:underline text-xs text-left"
+                                >
+                                  {formatShortDemandProxy(
+                                    getCommodityDisplayName(s.input_code),
+                                    s.input_code
+                                  )}{" "}
+                                  — {s.relationship_type} ↗
+                                </button>
+                                <span
+                                  className={`text-[11px] font-mono px-2 py-0.5 rounded ${
+                                    s.impact_direction.includes("Inverse")
+                                      ? "bg-rose-500/15 text-rose-300"
+                                      : s.impact_direction.includes("Direct")
+                                      ? "bg-emerald-500/15 text-emerald-300"
+                                      : "bg-sky-500/15 text-sky-300"
+                                  }`}
+                                >
+                                  {s.impact_direction}
+                                </span>
+                              </div>
+                              <p className="text-xs text-slate-300 leading-relaxed">
+                                {s.mechanism_note}
+                              </p>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                ))}
 
               {/* TAB 4: FILINGS & BRIEFS */}
               {dossierTab === "filings" && (
