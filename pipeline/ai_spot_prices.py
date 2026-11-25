@@ -12,7 +12,11 @@ from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
-from ai_usage_logger import record_ai_usage
+
+try:
+    from ai_usage_logger import record_ai_usage
+except ImportError:
+    from pipeline.ai_usage_logger import record_ai_usage
 
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
@@ -185,14 +189,35 @@ def _search_via_groq(prompt: str, target_codes: list[str]) -> tuple[str, list[st
                 },
                 timeout=45,
             )
+            resp_headers = dict(resp.headers)
             if resp.status_code == 429:
+                err_lower = resp.text.lower()
+                is_daily = "tokens per day" in err_lower or "requests per day" in err_lower
+                record_ai_usage(
+                    DATABASE_URL,
+                    model_id,
+                    "Groq",
+                    calls_delta=0,
+                    headers=resp_headers,
+                    quota_exhausted=is_daily,
+                )
                 print(f"Groq rate limit on {model_id} — trying next model.", flush=True)
                 continue
             if resp.status_code in (400, 404, 413):
                 print(f"Groq {resp.status_code} on {model_id} — trying next model.", flush=True)
                 continue
             resp.raise_for_status()
-            content = resp.json()["choices"][0]["message"]["content"] or ""
+            data = resp.json()
+            tok_total = data.get("usage", {}).get("total_tokens", 0) or 0
+            record_ai_usage(
+                DATABASE_URL,
+                model_id,
+                "Groq",
+                calls_delta=1,
+                tokens_delta=tok_total,
+                headers=resp_headers,
+            )
+            content = data["choices"][0]["message"]["content"] or ""
             if content:
                 return content, urls, f"Market RSS + Groq ({model_id})"
         except Exception as e:
@@ -258,6 +283,14 @@ def refresh_ai_material_prices(conn):
                     ),
                 )
                 raw_text = resp.text or ""
+                tok_total = getattr(getattr(resp, "usage_metadata", None), "total_token_count", 0) or 0
+                record_ai_usage(
+                    DATABASE_URL,
+                    g_model,
+                    "Google Gemini",
+                    calls_delta=1,
+                    tokens_delta=tok_total,
+                )
                 if raw_text:
                     provider_label = f"Gemini Search ({g_model})"
                     gm = (
@@ -273,6 +306,15 @@ def refresh_ai_material_prices(conn):
                     ][:5]
                     break
             except Exception as e:
+                err = str(e)
+                if "429" in err or "RESOURCE_EXHAUSTED" in err:
+                    record_ai_usage(
+                        DATABASE_URL,
+                        g_model,
+                        "Google Gemini",
+                        calls_delta=0,
+                        quota_exhausted=True,
+                    )
                 print(f"Gemini search unavailable on {g_model} ({e}) — trying next model.", flush=True)
 
     if not raw_text:
