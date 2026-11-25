@@ -24,6 +24,7 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
 /* Light Mode Theme Overrides */
 html.light-mode,
 html.light-mode body {
@@ -31,16 +32,20 @@ html.light-mode body {
   color: #0f172a !important;
 }
 
-/* Main page & drawer backgrounds */
+/* Main page, inputs & drawer backgrounds */
 html.light-mode .bg-zinc-950,
-html.light-mode .bg-\[\#090d16\] {
+html.light-mode .bg-\[\#090d16\],
+html.light-mode .bg-\[\#0b111e\],
+html.light-mode .bg-\[\#0b1120\] {
   background-color: #f8fafc !important;
   color: #0f172a !important;
 }
 
-/* Header, cards, tables & panels */
+/* Header, cards, tables, dropdown menus & dossier header */
 html.light-mode .bg-\[\#0c1220\],
 html.light-mode .bg-\[\#0c1220\]\/90,
+html.light-mode .bg-\[\#0d1424\],
+html.light-mode .bg-\[\#0d1424\]\/95,
 html.light-mode .bg-\[\#111827\],
 html.light-mode .bg-\[\#111827\]\/70,
 html.light-mode .bg-\[\#111827\]\/80,
@@ -56,14 +61,25 @@ html.light-mode .bg-gradient-to-br {
   background-image: linear-gradient(to bottom right, #f0f9ff, #ffffff, #f8fafc) !important;
 }
 
-/* Secondary buttons, pills & tab bars */
+/* Secondary buttons, pills, unlogged chips & tab bars */
 html.light-mode .bg-slate-800,
 html.light-mode .bg-slate-800\/80,
+html.light-mode .bg-slate-800\/90,
 html.light-mode .bg-slate-900\/60,
+html.light-mode .bg-slate-900\/70,
+html.light-mode .bg-slate-900\/80,
+html.light-mode .bg-slate-950\/60,
 html.light-mode .bg-zinc-900,
 html.light-mode .bg-zinc-800 {
   background-color: #f1f5f9 !important;
   color: #334155 !important;
+}
+
+/* Selected commodity cards, active filter dropdowns & reverse-index banners */
+html.light-mode .bg-sky-950\/50,
+html.light-mode .bg-sky-950\/30,
+html.light-mode .bg-sky-950\/25 {
+  background-color: #e0f2fe !important;
 }
 
 /* Borders & dividers */
@@ -72,6 +88,10 @@ html.light-mode [class*="border-slate-7"],
 html.light-mode [class*="border-zinc-8"],
 html.light-mode [class*="divide-slate-8"] > :not([hidden]) ~ :not([hidden]) {
   border-color: #e2e8f0 !important;
+}
+
+html.light-mode [class*="border-slate-6"] {
+  border-color: #94a3b8 !important;
 }
 
 /* Typography */
@@ -95,7 +115,8 @@ html.light-mode .text-zinc-400 {
 
 /* Deeper accent colors for legibility on white */
 html.light-mode .text-sky-400,
-html.light-mode .text-sky-300 {
+html.light-mode .text-sky-300,
+html.light-mode .text-sky-200 {
   color: #0284c7 !important;
 }
 
@@ -104,17 +125,30 @@ html.light-mode .text-emerald-300 {
   color: #059669 !important;
 }
 
+html.light-mode .text-amber-400,
+html.light-mode .text-amber-300,
+html.light-mode .text-amber-200 {
+  color: #b45309 !important;
+}
+
 html.light-mode .text-rose-300,
 html.light-mode .text-rose-400 {
   color: #e11d48 !important;
 }
 
-html.light-mode .text-purple-300 {
+html.light-mode .text-purple-300,
+html.light-mode .text-purple-400 {
   color: #7c3aed !important;
 }
 
-/* Keep active primary buttons white text on blue */
-html.light-mode .bg-sky-500 {
+/* Keep active primary buttons & nested counter badges crisp white text on blue */
+html.light-mode .bg-sky-500,
+html.light-mode .bg-sky-500 span {
+  color: #ffffff !important;
+}
+
+html.light-mode .bg-sky-500 .bg-sky-950\/50 {
+  background-color: #0369a1 !important;
   color: #ffffff !important;
 }
 
