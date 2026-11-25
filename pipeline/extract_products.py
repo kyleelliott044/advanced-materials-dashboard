@@ -1,4 +1,5 @@
 import os
+import re
 import time
 import json
 from typing import List, Optional, Literal
@@ -8,12 +9,22 @@ import yfinance as yf
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
-from ai_usage_logger import record_ai_usage
+
+try:
+    from ai_usage_logger import record_ai_usage
+except ImportError:
+    from pipeline.ai_usage_logger import record_ai_usage
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 BATCH_LIMIT = int(os.environ.get("PRODUCT_BATCH_LIMIT", "15"))
+
+GENERIC_SEGMENT_RE = re.compile(
+    r"\b(business|segment|division|operations|services|activities)\b",
+    re.IGNORECASE,
+)
+
 
 def _build_gemini_client():
     if not GEMINI_API_KEY:
@@ -29,15 +40,21 @@ def _build_gemini_client():
 
 client = _build_gemini_client()
 
-MAX_GEMINI_CALLS = 18
+MAX_GEMINI_CALLS = 24
 gemini_calls_used = 0
 groq_calls_used = 0
-gemini_unavailable = False
+
+GEMINI_MODELS = [
+    "gemini-3.8-flash",
+    "gemini-3.5-flash-lite",
+]
+exhausted_gemini_models = set()
 
 GROQ_MODELS = [
     "openai/gpt-oss-120b",
     "qwen/qwen3.8-27b",
     "openai/gpt-oss-20b",
+    "openai/gpt-oss-safeguard-20b",
 ]
 exhausted_groq_models = set()
 
@@ -320,7 +337,13 @@ def run_product_extraction(conn):
                 SELECT filing_type, filing_date::text, headline, executive_summary, pricing_and_margins, capex_and_backlog
                 FROM company_filings_ai
                 WHERE ticker = %s
-                ORDER BY CASE WHEN filing_type = '10-K' THEN 1 WHEN filing_type = '10-Q' THEN 2 ELSE 3 END, filing_date DESC
+                ORDER BY
+                    CASE
+                        WHEN filing_type IN ('10-K', '20-F', '40-F', 'Annual Report') THEN 1
+                        WHEN filing_type IN ('10-Q', '6-K', 'Quarterly Report', 'Half-Year Report') THEN 2
+                        ELSE 3
+                    END,
+                    filing_date DESC
                 LIMIT 2;
             """, (ticker,))
             filings = cur.fetchall()
@@ -336,17 +359,17 @@ def run_product_extraction(conn):
             except Exception as e:
                 print(f"  Warning fetching Yahoo summary for {ticker}: {e}", flush=True)
 
-        src_type = "filing" if filings and filings[0][0] in ("10-K", "10-Q") else "inferred"
+        src_type = "filing" if filings and filings[0][0] in ("10-K", "10-Q", "20-F", "40-F", "6-K") else "inferred"
         src_ref = f"{filings[0][0]} ({filings[0][1]})" if filings and src_type == "filing" else None
 
         prompt = f"""
-        Decompose {company_name} ({ticker}) | Sub-sector: {sub_sector} into advanced-materials products.
+        Decompose {company_name} ({ticker}) | Sub-sector: {sub_sector} into specific engineered advanced-materials products.
 
         STRICT INCLUSION GATE (ALL 4 MUST HOLD, OTHERWISE PUT IN excluded[]):
         1. Performance-specified (not commodity grade-specified).
         2. Qualified inside a customer's manufacturing process.
         3. Switching requires customer requalification.
-        4. Sold as a material input to a downstream manufacturer (exclude equipment, metrology, services, and non-material divisions).
+        4. Sold as a specific engineered material input to a downstream manufacturer (NEVER include broad business units, segments, recycling operations, equipment, metrology, or services—put those in excluded[]).
 
         RULES:
         - Never invent facts, customer names, qualification months, or product revenue shares. Unknown = null.
@@ -364,6 +387,10 @@ def run_product_extraction(conn):
             print("All AI providers exhausted — stopping cleanly.", flush=True)
             break
 
+        excluded_items = list(parsed.get("excluded") or [])
+        saved_products = 0
+        seen_product_names = set()
+
         conn = ensure_conn(conn)
         with conn.cursor() as cur:
             cur.execute(
@@ -376,6 +403,22 @@ def run_product_extraction(conn):
             )
 
             for prod in parsed.get("products", []):
+                prod_name = (prod.get("name") or "").strip()
+                if not prod_name:
+                    continue
+
+                if GENERIC_SEGMENT_RE.search(prod_name):
+                    excluded_items.append({
+                        "name": prod_name,
+                        "reason": "Generic business segment or service rather than a specific engineered material product.",
+                    })
+                    continue
+
+                norm_prod = re.sub(r"[^a-z0-9]", "", prod_name.lower())
+                if norm_prod in seen_product_names:
+                    continue
+                seen_product_names.add(norm_prod)
+
                 cleaned_rms = []
                 for rm in prod.get("raw_materials", []):
                     cref = rm.get("commodity_ref")
@@ -410,7 +453,7 @@ def run_product_extraction(conn):
 
                 status = prod.get("status") if prod.get("status") in ("active", "divested") else "active"
                 conf = prod.get("conf") if prod.get("conf") in ("high", "med", "low") else "med"
-                valid_peers = [p for p in prod.get("peers", []) if p in universe and p != ticker]
+                valid_peers = list(dict.fromkeys(p for p in prod.get("peers", []) if p in universe and p != ticker))
 
                 cur.execute(
                     """
@@ -438,7 +481,7 @@ def run_product_extraction(conn):
                     (
                         prod["id"],
                         ticker,
-                        prod["name"],
+                        prod_name,
                         prod["category"],
                         prod.get("business_unit", sub_sector or "Core Materials"),
                         status,
@@ -453,19 +496,24 @@ def run_product_extraction(conn):
                         conf,
                     ),
                 )
+                saved_products += 1
 
-            for ex in parsed.get("excluded", []):
+            for ex in excluded_items:
+                ex_name = (ex.get("name") or "").strip()
+                ex_reason = (ex.get("reason") or "").strip()
+                if not ex_name or not ex_reason:
+                    continue
                 cur.execute(
                     """
                     INSERT INTO company_excluded_products (ticker, name, reason)
                     VALUES (%s, %s, %s)
                     ON CONFLICT (ticker, name) DO UPDATE SET reason = EXCLUDED.reason, updated_at = NOW();
                     """,
-                    (ticker, ex["name"], ex["reason"]),
+                    (ticker, ex_name, ex_reason),
                 )
         conn.commit()
         print(
-            f"[{ticker}] Saved {len(parsed.get('products', []))} products & {len(parsed.get('excluded', []))} excluded items.",
+            f"[{ticker}] Saved {saved_products} products & {len(excluded_items)} excluded items.",
             flush=True,
         )
 
