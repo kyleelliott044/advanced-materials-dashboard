@@ -27,18 +27,24 @@ SEC_HEADERS = {
 }
 
 INVALID_COMMODITY_RE = re.compile(
-    r"\b(contract|revenue|customer|oem|backlog|sales|earnings|agreement|segment|business)\b",
+    r"\b(contract|revenue|customer|oem|backlog|sales|earnings|agreement|segment|business|medicine|drug|antiviral|vaccine)\b",
     re.IGNORECASE,
 )
 
 NON_MATERIALS_SC_RE = re.compile(
     r"\b("
-    r"pharmaceuticals?|oncology|biologics?|vaccines?|therapeutics?|clinical\s+trials?|"
-    r"prescription\s+drugs?|fertility\s+drugs?|monoclonal\s+antibod(y|ies)|"
+    r"pharmaceuticals?|biotherapeutics?|oncology|biologics?|vaccines?|therapeutics?|"
+    r"antiviral|covid-?19|clinical\s+trials?|prescription\s+drugs?|fertility\s+drugs?|"
+    r"monoclonal\s+antibod(y|ies)|innovative\s+medicine|license\s+agreement|"
     r"frozen\s+foods?|seasonings?|beverages?|snacks?|grocery|supermarkets?|consumer\s+retail|"
     r"post-?it|scotch\s+tape|building\s+automation|avionics|enterprise\s+software|"
     r"insurance|banking|walmart|target|cvs|walgreens|kroger|costco"
     r")\b",
+    re.IGNORECASE,
+)
+
+NON_US_EXCHANGE_SUFFIX_RE = re.compile(
+    r"\.(DE|F|PA|AS|BR|SW|L|MI|MC|ST|HE|OL|CO|VI|WA|T|KS|KQ|TW|TWO|HK|SS|SZ|SI|AX|TO|V|SA|MX|JO|TA|SR)$",
     re.IGNORECASE,
 )
 
@@ -714,8 +720,9 @@ def run_backfill(conn=None):
             f"Risks: {key_risks or ''}"
         )
 
+        is_foreign_ticker = "." in ticker and bool(NON_US_EXCHANGE_SUFFIX_RE.search(ticker.strip()))
         filing_excerpt = ""
-        if source_url and "sec.gov" in source_url:
+        if source_url and "sec.gov" in source_url and not is_foreign_ticker:
             try:
                 filing_excerpt = fetch_sec_targeted_excerpt(source_url)
                 time.sleep(0.2)
