@@ -137,24 +137,53 @@ class CompanyProductsBatch(BaseModel):
 
 
 def _call_ai(prompt: str, schema) -> Optional[dict]:
-    global gemini_calls_used, groq_calls_used, gemini_unavailable
+    global gemini_calls_used, groq_calls_used
 
-    if client and not gemini_unavailable and gemini_calls_used < MAX_GEMINI_CALLS:
-        try:
-            gemini_calls_used += 1
-            resp = client.models.generate_content(
-                model="gemini-3.8-flash",
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    response_mime_type="application/json",
-                    response_schema=schema,
-                    temperature=0.1,
-                ),
-            )
-            return json.loads(resp.text)
-        except Exception as e:
-            gemini_unavailable = True
-            print(f"Gemini unavailable/quota ({e}) — switching immediately to Groq cascade.", flush=True)
+    if client and gemini_calls_used < MAX_GEMINI_CALLS:
+        for g_model in GEMINI_MODELS:
+            if g_model in exhausted_gemini_models:
+                continue
+            for attempt in range(2):
+                try:
+                    gemini_calls_used += 1
+                    resp = client.models.generate_content(
+                        model=g_model,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            response_schema=schema,
+                            temperature=0.1,
+                        ),
+                    )
+                    tok_total = getattr(getattr(resp, "usage_metadata", None), "total_token_count", 0) or 0
+                    record_ai_usage(
+                        DATABASE_URL,
+                        g_model,
+                        "Google Gemini",
+                        calls_delta=1,
+                        tokens_delta=tok_total,
+                    )
+                    return json.loads(resp.text)
+                except Exception as e:
+                    err = str(e)
+                    if "429" in err or "RESOURCE_EXHAUSTED" in err or "404" in err or "NOT_FOUND" in err:
+                        exhausted_gemini_models.add(g_model)
+                        if "429" in err or "RESOURCE_EXHAUSTED" in err:
+                            record_ai_usage(
+                                DATABASE_URL,
+                                g_model,
+                                "Google Gemini",
+                                calls_delta=0,
+                                quota_exhausted=True,
+                            )
+                        print(f"Gemini {g_model} quota/unavailable — trying next model.", flush=True)
+                        break
+                    if any(k in err for k in ("503", "UNAVAILABLE", "disconnected", "timed out")) and attempt == 0:
+                        time.sleep(3)
+                        continue
+                    exhausted_gemini_models.add(g_model)
+                    print(f"Gemini {g_model} error ({e}) — trying next model.", flush=True)
+                    break
 
     if not GROQ_API_KEY:
         return None
@@ -196,14 +225,31 @@ def _call_ai(prompt: str, schema) -> Optional[dict]:
                 print(f"Groq network error on {model_id}: {e}", flush=True)
                 break
 
+            resp_headers = dict(resp.headers)
+
             if resp.status_code == 429:
                 err_lower = resp.text.lower()
                 if "tokens per day" in err_lower or "requests per day" in err_lower:
                     print(f"Groq daily limit reached for {model_id} — switching model.", flush=True)
                     exhausted_groq_models.add(model_id)
+                    record_ai_usage(
+                        DATABASE_URL,
+                        model_id,
+                        "Groq",
+                        calls_delta=0,
+                        headers=resp_headers,
+                        quota_exhausted=True,
+                    )
                     break
                 if attempt == 0:
                     print(f"Groq TPM limit on {model_id} — waiting 15s...", flush=True)
+                    record_ai_usage(
+                        DATABASE_URL,
+                        model_id,
+                        "Groq",
+                        calls_delta=0,
+                        headers=resp_headers,
+                    )
                     time.sleep(15)
                     continue
                 break
@@ -215,9 +261,19 @@ def _call_ai(prompt: str, schema) -> Optional[dict]:
                 break
 
             resp.raise_for_status()
+            data = resp.json()
             groq_calls_used += 1
+            tok_total = data.get("usage", {}).get("total_tokens", 0) or 0
+            record_ai_usage(
+                DATABASE_URL,
+                model_id,
+                "Groq",
+                calls_delta=1,
+                tokens_delta=tok_total,
+                headers=resp_headers,
+            )
             time.sleep(2)
-            return json.loads(resp.json()["choices"][0]["message"]["content"])
+            return json.loads(data["choices"][0]["message"]["content"])
 
     return None
 
