@@ -176,14 +176,31 @@ def _call_groq_fallback(prompt: str, schema):
                 print(f"Groq network error on {model_id}: {e} — trying next model.", flush=True)
                 break
 
+            resp_headers = dict(resp.headers)
+
             if resp.status_code == 429:
                 err_lower = resp.text.lower()
                 if "tokens per day" in err_lower or "requests per day" in err_lower:
                     print(f"Groq daily limit reached for {model_id} — switching to next model.", flush=True)
                     exhausted_groq_models.add(model_id)
+                    record_ai_usage(
+                        DATABASE_URL,
+                        model_id,
+                        "Groq",
+                        calls_delta=0,
+                        headers=resp_headers,
+                        quota_exhausted=True,
+                    )
                     break
                 if attempt == 0:
                     print(f"Groq TPM limit on {model_id} — waiting 15s...", flush=True)
+                    record_ai_usage(
+                        DATABASE_URL,
+                        model_id,
+                        "Groq",
+                        calls_delta=0,
+                        headers=resp_headers,
+                    )
                     time.sleep(15)
                     continue
                 print(f"Groq still rate-limited on {model_id} — trying next model.", flush=True)
@@ -196,8 +213,18 @@ def _call_groq_fallback(prompt: str, schema):
                 break
 
             resp.raise_for_status()
+            data = resp.json()
             groq_requests_used += 1
-            content = resp.json()["choices"][0]["message"]["content"]
+            tok_total = data.get("usage", {}).get("total_tokens", 0) or 0
+            record_ai_usage(
+                DATABASE_URL,
+                model_id,
+                "Groq",
+                calls_delta=1,
+                tokens_delta=tok_total,
+                headers=resp_headers,
+            )
+            content = data["choices"][0]["message"]["content"]
             time.sleep(2.5)
             return _FallbackResp(content)
 
@@ -224,11 +251,27 @@ def call_gemini(prompt: str, schema, retries: int = 2):
                         ),
                     )
                     gemini_503_counts[model_id] = 0
+                    tok_total = getattr(getattr(resp, "usage_metadata", None), "total_token_count", 0) or 0
+                    record_ai_usage(
+                        DATABASE_URL,
+                        model_id,
+                        "Google Gemini",
+                        calls_delta=1,
+                        tokens_delta=tok_total,
+                    )
                     return resp
                 except Exception as e:
                     err = str(e)
                     if "429" in err or "RESOURCE_EXHAUSTED" in err or "404" in err or "NOT_FOUND" in err:
                         exhausted_gemini_models.add(model_id)
+                        if "429" in err or "RESOURCE_EXHAUSTED" in err:
+                            record_ai_usage(
+                                DATABASE_URL,
+                                model_id,
+                                "Google Gemini",
+                                calls_delta=0,
+                                quota_exhausted=True,
+                            )
                         print(f"Gemini {model_id} quota/unavailable — switching to next model.", flush=True)
                         break
                     if any(k in err for k in ("503", "UNAVAILABLE", "disconnected", "timed out")):
