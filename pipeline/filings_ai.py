@@ -11,7 +11,11 @@ from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
-from ai_usage_logger import record_ai_usage
+
+try:
+    from ai_usage_logger import record_ai_usage
+except ImportError:
+    from pipeline.ai_usage_logger import record_ai_usage
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
@@ -21,6 +25,22 @@ SEC_HEADERS = {
     "User-Agent": "AdvancedMaterialsResearchPlatform research@materials-macro.io",
     "Accept-Encoding": "gzip, deflate",
 }
+
+INVALID_COMMODITY_RE = re.compile(
+    r"\b(contract|revenue|customer|oem|backlog|sales|earnings|agreement|segment|business)\b",
+    re.IGNORECASE,
+)
+
+NON_MATERIALS_SC_RE = re.compile(
+    r"\b("
+    r"pharmaceuticals?|oncology|biologics?|vaccines?|therapeutics?|clinical\s+trials?|"
+    r"prescription\s+drugs?|fertility\s+drugs?|monoclonal\s+antibod(y|ies)|"
+    r"frozen\s+foods?|seasonings?|beverages?|snacks?|grocery|supermarkets?|consumer\s+retail|"
+    r"post-?it|scotch\s+tape|building\s+automation|avionics|enterprise\s+software|"
+    r"insurance|banking|walmart|target|cvs|walgreens|kroger|costco"
+    r")\b",
+    re.IGNORECASE,
+)
 
 
 def _build_gemini_client():
@@ -132,6 +152,19 @@ def _safe_pct(val) -> Optional[float]:
     except (TypeError, ValueError):
         pass
     return None
+
+
+def _norm_counterparty(name: str) -> str:
+    cleaned = re.sub(
+        r"\b(ag|se|sa|nv|inc|corp|corporation|co|ltd|limited|plc|gmbh|kgaa|holdings?|group|industries)\b",
+        "",
+        name.lower(),
+    )
+    return re.sub(r"[^a-z0-9]", "", cleaned)
+
+
+def _is_non_materials_sc(counterparty_name: str, material_or_product: str) -> bool:
+    return bool(NON_MATERIALS_SC_RE.search(f"{counterparty_name} {material_or_product}"))
 
 
 def _call_groq_fallback(prompt: str, schema):
@@ -375,7 +408,7 @@ SENSITIVITY_RULES = [
 # Pydantic Schemas
 class CommodityDriverLink(BaseModel):
     commodity_name: str = Field(
-        description="Clean, human-readable name of the specific commodity, feedstock, energy input, or end-market driver (e.g., 'High-Purity Nickel', 'Natural Gas', 'Lithium Carbonate', 'Titanium Sponge', 'Copper Foil', 'Epoxy Resins'). Never return a ticker symbol or FRED code here."
+        description="Clean, human-readable name of a physical commodity, raw material, feedstock, energy input, or macro end-market driver (e.g., 'High-Purity Nickel', 'Natural Gas', 'Lithium Carbonate', 'Titanium Sponge', 'Copper Foil', 'Epoxy Resins'). NEVER return customer contracts, OEM revenue lines, company products, ticker symbols, or FRED codes."
     )
     matched_input_code: Optional[str] = Field(
         default=None,
@@ -404,7 +437,7 @@ class CommodityDriverLink(BaseModel):
 
 class DriverBackfillBatch(BaseModel):
     commodity_drivers: List[CommodityDriverLink] = Field(
-        description="3 to 6 specific, company-level commodity, raw material, and energy drivers."
+        description="1 to 6 specific, company-level physical commodities, raw materials, and energy drivers (never pad with customer contracts or revenue lines)."
     )
 
 
@@ -448,7 +481,7 @@ class FilingSummarySchema(BaseModel):
     key_risks: str = Field(description="Top 1-2 operational, geopolitical, or cyclical risks highlighted in the report.")
     commodity_drivers: List[CommodityDriverLink] = Field(
         default_factory=list,
-        description="3 to 6 specific raw materials, energy inputs, feedstocks, and commodity benchmarks that drive this specific company's costs or revenues.",
+        description="1 to 6 specific physical raw materials, energy inputs, feedstocks, and commodity benchmarks that drive this company's costs or revenues (never pad with customer contracts or revenue lines).",
     )
     upstream_suppliers: List[SupplyChainLink] = Field(
         default_factory=list,
@@ -501,11 +534,19 @@ def _quote_exists(quote: str, source_text: str) -> bool:
 def save_commodity_drivers(conn, ticker: str, filing_type: str, filing_date: str, drivers: list):
     conn = ensure_conn(conn)
     rows = []
+    seen_commodities = set()
     for d in (drivers or []):
         cname = (d.get("commodity_name") or "").strip()
         mech = (d.get("mechanism_detail") or "").strip()
         if not cname or not mech:
             continue
+        if INVALID_COMMODITY_RE.search(cname):
+            continue
+        norm_c = cname.lower()
+        if norm_c in seen_commodities:
+            continue
+        seen_commodities.add(norm_c)
+
         code = (d.get("matched_input_code") or "").strip() or None
         rows.append((
             ticker,
@@ -553,7 +594,7 @@ def save_commodity_drivers(conn, ticker: str, filing_type: str, filing_date: str
 
 def save_supply_chain_links(conn, ticker: str, filing_type: str, filing_date: str, parsed: dict, source_text: str):
     conn = ensure_conn(conn)
-    rows = []
+    dedup_sc = {}
     for direction, key in (
         ("upstream_supplier", "upstream_suppliers"),
         ("competitor", "competitors"),
@@ -564,22 +605,40 @@ def save_supply_chain_links(conn, ticker: str, filing_type: str, filing_date: st
             mat = (item.get("material_or_product") or "").strip()
             if not cname or not mat:
                 continue
+            if _is_non_materials_sc(cname, mat):
+                continue
             quote = (item.get("source_quote") or "").strip()
             if item.get("is_named_entity") and not _quote_exists(quote, source_text):
                 continue
-            rows.append((
-                ticker,
-                direction,
-                cname[:140],
-                bool(item.get("is_named_entity", False)),
-                mat[:180],
-                bool(item.get("is_sole_source", False)),
-                _safe_pct(item.get("exposure_pct")),
-                filing_type,
-                filing_date,
-                quote[:400],
-            ))
 
+            norm_key = (direction, _norm_counterparty(cname) or cname.lower())
+            exp_pct = _safe_pct(item.get("exposure_pct"))
+            is_sole = bool(item.get("is_sole_source", False))
+            is_named = bool(item.get("is_named_entity", False))
+
+            if norm_key not in dedup_sc:
+                dedup_sc[norm_key] = [
+                    ticker,
+                    direction,
+                    cname[:140],
+                    is_named,
+                    mat[:180],
+                    is_sole,
+                    exp_pct,
+                    filing_type,
+                    filing_date,
+                    quote[:400],
+                ]
+            else:
+                existing = dedup_sc[norm_key]
+                if mat.lower() not in existing[4].lower():
+                    existing[4] = f"{existing[4]} • {mat}"[:180]
+                existing[3] = existing[3] or is_named
+                existing[5] = existing[5] or is_sole
+                if exp_pct is not None and (existing[6] is None or exp_pct > existing[6]):
+                    existing[6] = exp_pct
+
+    rows = [tuple(v) for v in dedup_sc.values()]
     if not rows:
         return conn
 
@@ -814,16 +873,16 @@ def process_sec_filings(conn, limit_tickers=4):
     sec_by_ticker, sec_by_name = fetch_sec_ticker_map()
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT e.ticker, e.company_name, e.sub_sector
+            SELECT e.ticker, e.company_name, e.sub_sector, e.adv_mat_rev_pct
             FROM equities_universe e
             LEFT JOIN company_filings_ai f ON e.ticker = f.ticker
-            GROUP BY e.ticker, e.company_name, e.sub_sector, e.qualification_years
+            GROUP BY e.ticker, e.company_name, e.sub_sector, e.adv_mat_rev_pct, e.qualification_years
             ORDER BY COUNT(f.id) ASC, MAX(f.filing_date) ASC NULLS FIRST, e.qualification_years DESC NULLS LAST;
         """)
         all_equities = cur.fetchall()
 
     processed = 0
-    for ticker, company_name, sub_sector in all_equities:
+    for ticker, company_name, sub_sector, adv_mat_rev_pct in all_equities:
         if processed >= limit_tickers:
             break
         clean_ticker = ticker.upper()
@@ -832,6 +891,7 @@ def process_sec_filings(conn, limit_tickers=4):
             continue
 
         cik_padded, cik_unpadded = cik_pair
+        rev_share_note = f"{adv_mat_rev_pct}% of company revenue" if adv_mat_rev_pct is not None else "specialist segment"
         try:
             conn = ensure_conn(conn)
             sub_url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
@@ -870,12 +930,17 @@ def process_sec_filings(conn, limit_tickers=4):
                     continue
 
                 prompt = f"""
-                You are an institutional advanced materials equity analyst. Analyze this SEC {form} filing excerpt for {company_name} ({ticker}), sub-sector: {sub_sector}, filed on {f_date}.
+                You are an institutional advanced materials equity analyst. Analyze this SEC {form} filing excerpt for {company_name} ({ticker}), assigned sub-sector: {sub_sector} ({rev_share_note}), filed on {f_date}.
+
+                DOMAIN SCOPE LOCK (CRITICAL):
+                - Focus ONLY on {company_name}'s "{sub_sector}" / advanced-materials operations.
+                - If {company_name} is a multi-segment conglomerate, STRICTLY EXCLUDE pharmaceuticals/biologics/healthcare drugs, food/seasonings, consumer/office retail, building automation/avionics, software, and financial services from your summary, commodity drivers, and value-chain links.
+
                 1. Identify the exact fiscal_period (e.g., 'FY2025 10-K', 'Q3 2026 10-Q', 'FY2025 20-F', 'H1 2026 6-K Interim').
                 2. Extract operational insights on demand trends, pricing power/raw material pass-through, backlog/capex (ONLY if stated; return null if not disclosed), and risks.
-                3. Extract 3 to 6 specific company-level commodity, raw material, feedstock, and energy drivers (clean human-readable names, never ticker symbols) matched to:
+                3. Extract 1 to 6 physical commodities, raw materials, feedstocks, and energy drivers (clean human-readable names; NEVER customer contracts, OEM revenue lines, company products, or ticker symbols—put customer contracts in downstream_customers instead) matched to:
                 {CANONICAL_INPUT_GUIDE}
-                4. Extract any explicitly disclosed upstream suppliers, named competitors, or downstream customers with verbatim quotes.
+                4. Extract any explicitly disclosed upstream suppliers, named competitors, or downstream customers (list each company at most ONCE per category) with verbatim quotes.
 
                 FILING EXCERPT:
                 {excerpt}
@@ -1027,11 +1092,12 @@ def process_international_briefs(conn, limit_tickers=4):
                 e.sub_sector,
                 e.contract_type,
                 e.qualification_years,
+                e.adv_mat_rev_pct,
                 COUNT(f.id) AS existing_count,
                 MAX(f.filing_date)::text AS last_filing_date
             FROM equities_universe e
             LEFT JOIN company_filings_ai f ON e.ticker = f.ticker
-            GROUP BY e.ticker, e.company_name, e.sub_sector, e.contract_type, e.qualification_years
+            GROUP BY e.ticker, e.company_name, e.sub_sector, e.contract_type, e.qualification_years, e.adv_mat_rev_pct
             HAVING COUNT(f.id) < 2
                 OR MAX(f.filing_date) < CURRENT_DATE - INTERVAL '85 days'
             ORDER BY
@@ -1043,13 +1109,14 @@ def process_international_briefs(conn, limit_tickers=4):
         candidates = cur.fetchall()
 
     processed = 0
-    for ticker, company_name, sub_sector, contract_type, qual_years, existing_count, _ in candidates:
+    for ticker, company_name, sub_sector, contract_type, qual_years, adv_mat_rev_pct, existing_count, _ in candidates:
         if processed >= limit_tickers:
             break
         # Skip companies already covered directly via SEC EDGAR filings
         if ticker.upper() in sec_by_ticker or _normalize_co_name(company_name) in sec_by_name:
             continue
 
+        rev_share_note = f"{adv_mat_rev_pct}% of company revenue" if adv_mat_rev_pct is not None else "specialist segment"
         try:
             tk = yf.Ticker(ticker)
             keep_count, period_plan = _build_international_period_plan(tk)
@@ -1080,19 +1147,23 @@ def process_international_briefs(conn, limit_tickers=4):
                 source_text = f"{metrics_block}\n{biz_summary}\n{headlines_str}"
                 prompt = f"""
                 You are an institutional advanced materials equity analyst covering global equities.
-                Synthesize a structured {filing_kind} for {company_name} ({ticker}), Sub-sector: {sub_sector}, Contract Type: {contract_type}, Qualification Moat: {qual_years} yrs.
+                Synthesize a structured {filing_kind} for {company_name} ({ticker}), Assigned Sub-sector: {sub_sector} ({rev_share_note}), Contract Type: {contract_type}, Qualification Moat: {qual_years} yrs.
                 Target Reporting Period Ending: {report_date} ({filing_kind}).
 
                 FINANCIAL TRAJECTORY FOR THIS & PRIOR PERIODS:
                 {metrics_block}
 
+                DOMAIN SCOPE LOCK (CRITICAL):
+                - Focus ONLY on {company_name}'s "{sub_sector}" / advanced-materials operations.
+                - If {company_name} is a multi-segment conglomerate, STRICTLY EXCLUDE pharmaceuticals/biologics/healthcare drugs, food/seasonings, consumer/office retail, building automation/avionics, software, and financial services from your summary, commodity drivers, and value-chain links.
+
                 CRITICAL RULES:
                 - Set fiscal_period to the exact period label for {report_date} (e.g., 'FY2025 Annual Report', 'H1 2026 Half-Year Report', or 'Q3 2026 Quarterly Report').
                 - Analyze sequential and YoY revenue & margin changes in pricing_and_margins using the reported figures above.
                 - Only report capex_and_backlog if explicitly stated in the financial metrics, profile, or headlines below; return null if not disclosed.
-                - Extract 3 to 6 company-level commodity, raw material, and energy drivers matched to:
+                - Extract 1 to 6 physical commodities, raw materials, and energy drivers (NEVER customer contracts, OEM revenue lines, or company products—put customer contracts in downstream_customers instead) matched to:
                 {CANONICAL_INPUT_GUIDE}
-                - Extract any explicitly named upstream suppliers, competitors, or downstream customers with verbatim quotes.
+                - Extract any explicitly named upstream suppliers, competitors, or downstream customers (list each company at most ONCE per category) with verbatim quotes.
 
                 Business Profile: {biz_summary}
                 Recent Corporate & Earnings Headlines:
@@ -1159,7 +1230,7 @@ def backfill_existing_filing_drivers(conn, limit_tickers=2):
     with conn.cursor() as cur:
         cur.execute("""
             SELECT DISTINCT ON (f.ticker)
-                f.ticker, e.company_name, e.sub_sector, e.contract_type,
+                f.ticker, e.company_name, e.sub_sector, e.contract_type, e.adv_mat_rev_pct,
                 f.filing_type, f.filing_date::text, f.executive_summary,
                 f.pricing_and_margins, f.capex_and_backlog, f.key_risks
             FROM company_filings_ai f
@@ -1171,11 +1242,12 @@ def backfill_existing_filing_drivers(conn, limit_tickers=2):
         """, (limit_tickers,))
         rows = cur.fetchall()
 
-    for ticker, company_name, sub_sector, contract_type, ftype, fdate, summary, margins, capex, risks in rows:
+    for ticker, company_name, sub_sector, contract_type, adv_mat_rev_pct, ftype, fdate, summary, margins, capex, risks in rows:
+        rev_share_note = f"{adv_mat_rev_pct}% of company revenue" if adv_mat_rev_pct is not None else "specialist segment"
         prompt = f"""
         You are an institutional advanced materials commodity & equity analyst.
-        For {company_name} ({ticker}), Sub-sector: {sub_sector}, Contract Type: {contract_type}, identify 4 to 6 specific raw materials, energy inputs, feedstocks, and commodity benchmarks that drive its costs, margins, or revenues.
-        Use clean human-readable commodity names (never ticker symbols or FRED codes) and map each to the closest canonical code when applicable:
+        For {company_name} ({ticker}), Assigned Sub-sector: {sub_sector} ({rev_share_note}), Contract Type: {contract_type}, identify 1 to 6 physical raw materials, energy inputs, feedstocks, and commodity benchmarks that drive its advanced-materials costs, margins, or revenues.
+        Use clean human-readable commodity names (NEVER customer contracts, OEM revenue lines, company products, ticker symbols, or FRED codes) and map each to the closest canonical code when applicable:
         {CANONICAL_INPUT_GUIDE}
 
         FILING CONTEXT ({ftype} {fdate}):
@@ -1205,7 +1277,7 @@ def backfill_existing_supply_chain(conn, limit_tickers=2):
     sec_by_ticker, sec_by_name = fetch_sec_ticker_map()
     with conn.cursor() as cur:
         cur.execute("""
-            SELECT DISTINCT e.ticker, e.company_name, e.sub_sector, e.qualification_years
+            SELECT DISTINCT e.ticker, e.company_name, e.sub_sector, e.qualification_years, e.adv_mat_rev_pct
             FROM equities_universe e
             JOIN company_filings_ai f ON e.ticker = f.ticker
             LEFT JOIN equity_supply_chain sc ON e.ticker = sc.ticker
@@ -1215,7 +1287,7 @@ def backfill_existing_supply_chain(conn, limit_tickers=2):
         candidates = cur.fetchall()
 
     processed = 0
-    for ticker, company_name, sub_sector, _ in candidates:
+    for ticker, company_name, sub_sector, _, adv_mat_rev_pct in candidates:
         if processed >= limit_tickers:
             break
         clean_ticker = ticker.upper()
@@ -1224,6 +1296,7 @@ def backfill_existing_supply_chain(conn, limit_tickers=2):
             continue
 
         cik_padded, cik_unpadded = cik_pair
+        rev_share_note = f"{adv_mat_rev_pct}% of company revenue" if adv_mat_rev_pct is not None else "specialist segment"
         try:
             sub_url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
             sub_resp = requests.get(sub_url, headers=SEC_HEADERS, timeout=15)
@@ -1255,8 +1328,13 @@ def backfill_existing_supply_chain(conn, limit_tickers=2):
 
             prompt = f"""
             You are an institutional advanced materials supply-chain analyst.
-            Analyze this SEC {form} filing excerpt for {company_name} ({ticker}), sub-sector: {sub_sector}.
-            Extract ALL disclosed:
+            Analyze this SEC {form} filing excerpt for {company_name} ({ticker}), assigned sub-sector: {sub_sector} ({rev_share_note}).
+
+            DOMAIN SCOPE LOCK:
+            - Extract ONLY suppliers, competitors, and downstream customers tied to {company_name}'s "{sub_sector}" / advanced-materials operations.
+            - Strictly EXCLUDE counterparties belonging to non-materials divisions (pharmaceuticals/healthcare drugs, food/seasonings, consumer retail, software/avionics, or financial services).
+
+            Extract disclosed (list each company at most ONCE per category, combining multiple products into one entry):
             1. upstream_suppliers: Upstream raw material suppliers, feedstock sources, or sole-source/single-source inputs.
             2. competitors: Explicitly named rival companies disclosed in Item 1 Competition or MD&A.
             3. downstream_customers: Downstream customers, OEMs, or 10%+ customer concentration disclosures.
