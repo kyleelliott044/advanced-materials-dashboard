@@ -19,13 +19,59 @@ DATABASE_URL = os.environ["DATABASE_URL"]
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
-client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
+
+def _build_gemini_client():
+    if not GEMINI_API_KEY:
+        return None
+    try:
+        return genai.Client(
+            api_key=GEMINI_API_KEY,
+            http_options=types.HttpOptions(timeout=45000),
+        )
+    except TypeError:
+        return genai.Client(api_key=GEMINI_API_KEY)
+
+
+client = _build_gemini_client()
+
+GEMINI_MODELS = [
+    "gemini-3.8-flash",
+    "gemini-3.5-flash-lite",
+]
 
 GROQ_MODELS = [
     "openai/gpt-oss-120b",
     "qwen/qwen3.8-27b",
     "openai/gpt-oss-20b",
+    "openai/gpt-oss-safeguard-20b",
 ]
+
+
+def connect_db():
+    return psycopg.connect(
+        DATABASE_URL,
+        autocommit=True,
+        keepalives=1,
+        keepalives_idle=30,
+        keepalives_interval=10,
+        keepalives_count=5,
+    )
+
+
+def ensure_conn(conn):
+    if conn is not None and not conn.closed and not conn.broken:
+        try:
+            with conn.cursor() as cur:
+                cur.execute("SELECT 1;")
+            return conn
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    print("Reconnecting to Neon PostgreSQL...", flush=True)
+    return connect_db()
+
 
 SPECIALTY_MATERIALS = [
     ("NDPR_CN", "Neodymium-Praseodymium (NdPr) Oxide Spot", "USD / kg", "Rare Earths"),
@@ -97,16 +143,16 @@ def _fetch_rss_snippets(target_codes: list[str]) -> tuple[str, list[str]]:
                     continue
             time.sleep(0.15)
 
-    print(f"Retrieved {len(snippets)} RSS market snippets across {len(target_codes)} materials.")
+    print(f"Retrieved {len(snippets)} RSS market snippets across {len(target_codes)} materials.", flush=True)
     return "\n".join(snippets), urls
 
 
-def _search_via_groq(prompt: str, target_codes: list[str]) -> tuple[str, list[str]]:
+def _search_via_groq(prompt: str, target_codes: list[str]) -> tuple[str, list[str], str]:
     if not GROQ_API_KEY:
-        return "", []
+        return "", [], ""
     snippets, urls = _fetch_rss_snippets(target_codes)
     if not snippets:
-        return "", []
+        return "", [], ""
 
     schema_hint = json.dumps(MaterialSpotBatch.model_json_schema())
     for model_id in GROQ_MODELS:
@@ -139,18 +185,24 @@ def _search_via_groq(prompt: str, target_codes: list[str]) -> tuple[str, list[st
                 timeout=45,
             )
             if resp.status_code == 429:
-                print(f"Groq rate limit on {model_id} — trying next model.")
+                print(f"Groq rate limit on {model_id} — trying next model.", flush=True)
+                continue
+            if resp.status_code in (400, 404, 413):
+                print(f"Groq {resp.status_code} on {model_id} — trying next model.", flush=True)
                 continue
             resp.raise_for_status()
-            return resp.json()["choices"][0]["message"]["content"] or "", urls
+            content = resp.json()["choices"][0]["message"]["content"] or ""
+            if content:
+                return content, urls, f"Market RSS + Groq ({model_id})"
         except Exception as e:
-            print(f"Groq spot-price extraction failed on {model_id}: {e}")
+            print(f"Groq spot-price extraction failed on {model_id}: {e}", flush=True)
             continue
 
-    return "", []
+    return "", [], ""
 
 
 def refresh_ai_material_prices(conn):
+    conn = ensure_conn(conn)
     with conn.cursor() as cur:
         cur.execute(
             """
@@ -168,8 +220,8 @@ def refresh_ai_material_prices(conn):
     ]
 
     if not stale_materials:
-        print("All AI spot prices are current (< 3 days old) — skipping.")
-        return
+        print("All AI spot prices are current (less than 3 days old) — skipping.", flush=True)
+        return conn
 
     today_str = date.today().isoformat()
     stale_codes = [m[0] for m in stale_materials]
@@ -192,35 +244,48 @@ def refresh_ai_material_prices(conn):
     provider_label = "Gemini Search"
 
     if client:
-        try:
-            resp = client.models.generate_content(
-                model="gemini-3.8-flash",
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    tools=[types.Tool(google_search=types.GoogleSearch())],
-                    response_mime_type="application/json",
-                    response_schema=MaterialSpotBatch,
-                    temperature=0.1,
-                ),
-            )
-            raw_text = resp.text or ""
-            chunks = resp.candidates[0].grounding_metadata.grounding_chunks or []
-            grounding_urls = [c.web.uri for c in chunks if getattr(c, "web", None) and c.web.uri][:5]
-        except Exception as e:
-            print(f"Gemini search unavailable ({e}) — falling back to RSS + Groq.")
+        for g_model in GEMINI_MODELS:
+            try:
+                resp = client.models.generate_content(
+                    model=g_model,
+                    contents=prompt,
+                    config=types.GenerateContentConfig(
+                        tools=[types.Tool(google_search=types.GoogleSearch())],
+                        response_mime_type="application/json",
+                        response_schema=MaterialSpotBatch,
+                        temperature=0.1,
+                    ),
+                )
+                raw_text = resp.text or ""
+                if raw_text:
+                    provider_label = f"Gemini Search ({g_model})"
+                    gm = (
+                        getattr(resp.candidates[0], "grounding_metadata", None)
+                        if getattr(resp, "candidates", None)
+                        else None
+                    )
+                    chunks = getattr(gm, "grounding_chunks", None) or []
+                    grounding_urls = [
+                        c.web.uri
+                        for c in chunks
+                        if getattr(c, "web", None) and getattr(c.web, "uri", None)
+                    ][:5]
+                    break
+            except Exception as e:
+                print(f"Gemini search unavailable on {g_model} ({e}) — trying next model.", flush=True)
 
     if not raw_text:
-        provider_label = "Market RSS + Groq"
-        raw_text, grounding_urls = _search_via_groq(prompt, stale_codes)
+        raw_text, grounding_urls, provider_label = _search_via_groq(prompt, stale_codes)
 
     json_match = re.search(r"\{.*\}", raw_text, re.DOTALL)
     if not json_match:
-        print("No valid JSON returned from AI spot price search.")
-        return
+        print("No valid JSON returned from AI spot price search.", flush=True)
+        return conn
 
     parsed = json.loads(json_match.group(0))
     rows_upserted = 0
 
+    conn = ensure_conn(conn)
     with conn.cursor() as cur:
         for q in parsed.get("quotes", []):
             code = q.get("input_code")
@@ -249,9 +314,14 @@ def refresh_ai_material_prices(conn):
             rows_upserted += 1
 
     conn.commit()
-    print(f"Upserted {rows_upserted} AI-grounded specialty material prices via {provider_label}.")
+    print(f"Upserted {rows_upserted} AI-grounded specialty material prices via {provider_label}.", flush=True)
+    return conn
 
 
 if __name__ == "__main__":
-    with psycopg.connect(DATABASE_URL, autocommit=True) as conn:
-        refresh_ai_material_prices(conn)
+    conn = connect_db()
+    try:
+        conn = refresh_ai_material_prices(conn)
+    finally:
+        if conn and not conn.closed:
+            conn.close()
