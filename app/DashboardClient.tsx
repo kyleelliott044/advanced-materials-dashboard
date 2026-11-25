@@ -1812,6 +1812,8 @@ export default function DashboardClient({
                 </button>
               </div>
 
+              <StockPriceChart ticker={selectedEquity.ticker} />
+
               {/* Compact 4-Metric KPI Strip */}
               <div className="grid grid-cols-2 sm:grid-cols-4 gap-2.5">
                 <div className="rounded-lg bg-[#090d16] border border-slate-800/80 px-3 py-2">
