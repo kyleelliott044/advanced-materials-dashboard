@@ -3,7 +3,7 @@ import re
 import time
 import json
 import warnings
-from datetime import date
+from datetime import date, timedelta
 from typing import List, Optional
 from urllib.parse import quote_plus
 import requests
@@ -86,8 +86,22 @@ SPECIALTY_MATERIALS = [
     ("POLYSILICON_N", "Solar/Semicon N-Type Polysilicon Spot", "USD / kg", "Semicon & Solar"),
     ("SPHERICAL_GRAPHITE", "Uncoated Spherical Graphite (99.95% Spot)", "USD / Metric Ton", "Battery Materials"),
     ("COBALT_SULFATE", "Battery-Grade Cobalt Sulfate Spot", "USD / Metric Ton", "Battery & Alloy Metal"),
+    ("PCOBAUSDM", "Global Cobalt Metal Spot (99.8%)", "USD / Metric Ton", "Battery & Alloy Metal"),
     ("CARBON_FIBER_T700", "Industrial Standard-Modulus Carbon Fiber Tow", "USD / kg", "Composites"),
 ]
+
+# Guardrails against unconverted RMB/CNY, per-lb, or 1,000x ton-vs-kg hallucinations
+PRICE_BOUNDS_USD: dict[str, tuple[float, float]] = {
+    "NDPR_CN": (15.0, 250.0),               # USD / kg
+    "LICARB_CN": (3000.0, 95000.0),         # USD / Metric Ton
+    "GALLIUM_9999": (100.0, 1800.0),        # USD / kg
+    "GERMANIUM_INGOT": (500.0, 5500.0),     # USD / kg
+    "POLYSILICON_N": (2.0, 45.0),           # USD / kg
+    "SPHERICAL_GRAPHITE": (500.0, 8000.0),  # USD / Metric Ton
+    "COBALT_SULFATE": (1500.0, 25000.0),    # USD / Metric Ton
+    "PCOBAUSDM": (10000.0, 95000.0),        # USD / Metric Ton (rejects unscaled USD/lb)
+    "CARBON_FIBER_T700": (5.0, 80.0),       # USD / kg
+}
 
 SEARCH_QUERIES = {
     "NDPR_CN": ["NdPr oxide price per kg SMM", "praseodymium neodymium oxide spot price"],
@@ -97,6 +111,7 @@ SEARCH_QUERIES = {
     "POLYSILICON_N": ["n-type polysilicon price per kg InfoLink", "polysilicon spot price USD kg"],
     "SPHERICAL_GRAPHITE": ["spherical graphite price per ton", "uncoated spherical graphite spot price"],
     "COBALT_SULFATE": ["cobalt sulfate price per ton SMM", "battery grade cobalt sulfate spot price"],
+    "PCOBAUSDM": ["cobalt metal price per ton Fastmarkets LME", "refined cobalt 99.8 spot price USD ton"],
     "CARBON_FIBER_T700": ["carbon fiber T700 price per kg", "industrial carbon fiber tow price USD kg"],
 }
 
@@ -227,6 +242,38 @@ def _search_via_groq(prompt: str, target_codes: list[str]) -> tuple[str, list[st
     return "", [], ""
 
 
+def _is_valid_price_and_date(
+    code: str,
+    price: float,
+    obs_date_raw: Optional[str],
+    today: date,
+) -> tuple[bool, str]:
+    bounds = PRICE_BOUNDS_USD.get(code)
+    if bounds and not (bounds[0] <= price <= bounds[1]):
+        print(
+            f"Skipping {code}: price ${price:,.2f} outside expected USD range "
+            f"[${bounds[0]:,.0f}, ${bounds[1]:,.0f}] (likely unconverted unit/currency).",
+            flush=True,
+        )
+        return False, today.isoformat()
+
+    raw_str = (obs_date_raw or today.isoformat()).strip()[:10]
+    try:
+        parsed_dt = date.fromisoformat(raw_str)
+    except ValueError:
+        print(f"Skipping {code}: invalid observation_date '{obs_date_raw}'.", flush=True)
+        return False, today.isoformat()
+
+    if parsed_dt > today + timedelta(days=1) or (today - parsed_dt).days > 30:
+        print(
+            f"Skipping {code}: observation_date {parsed_dt.isoformat()} is stale (>30d) or in the future.",
+            flush=True,
+        )
+        return False, parsed_dt.isoformat()
+
+    return True, parsed_dt.isoformat()
+
+
 def refresh_ai_material_prices(conn):
     conn = ensure_conn(conn)
     with conn.cursor() as cur:
@@ -240,16 +287,17 @@ def refresh_ai_material_prices(conn):
         )
         last_updated = {r[0]: r[1] for r in cur.fetchall()}
 
+    today = date.today()
     stale_materials = [
         item for item in SPECIALTY_MATERIALS
-        if item[0] not in last_updated or (date.today() - last_updated[item[0]]).days >= 3
+        if item[0] not in last_updated or (today - last_updated[item[0]]).days >= 3
     ]
 
     if not stale_materials:
         print("All AI spot prices are current (less than 3 days old) — skipping.", flush=True)
         return conn
 
-    today_str = date.today().isoformat()
+    today_str = today.isoformat()
     stale_codes = [m[0] for m in stale_materials]
     mat_list = "\n".join([f"- {code}: {name} (target unit: {unit})" for code, name, unit, _ in stale_materials])
     meta_map = {code: (name, unit, cat) for code, name, unit, cat in stale_materials}
@@ -261,7 +309,8 @@ def refresh_ai_material_prices(conn):
 
     Rules:
     - Convert RMB/CNY quotes to USD (~7.2 RMB/USD) if quoted on Chinese spot markets (SMM, Asian Metal, GFEX).
-    - Convert per-ton quotes to per-kg (divide by 1,000) or per-kg to per-metric-ton (multiply by 1,000) to match the exact target unit.
+    - Convert per-ton quotes to per-kg (divide by 1,000), per-kg to per-metric-ton (multiply by 1,000), or per-lb to per-metric-ton (multiply by 2,204.62) to match the exact target unit.
+    - Only extract current spot quotes dated within the last 30 days (ignore historical comparisons from prior years).
     - Do NOT guess or fabricate prices. If no recent quote is verifiable in the results, set price_usd to null.
     """
 
@@ -325,7 +374,12 @@ def refresh_ai_material_prices(conn):
         print("No valid JSON returned from AI spot price search.", flush=True)
         return conn
 
-    parsed = json.loads(json_match.group(0))
+    try:
+        parsed = json.loads(json_match.group(0))
+    except json.JSONDecodeError as e:
+        print(f"Failed to parse AI spot price JSON: {e}", flush=True)
+        return conn
+
     rows_upserted = 0
 
     conn = ensure_conn(conn)
@@ -333,13 +387,25 @@ def refresh_ai_material_prices(conn):
         for q in parsed.get("quotes", []):
             code = q.get("input_code")
             price = q.get("price_usd")
-            if code not in meta_map or price is None or price <= 0:
+            if code not in meta_map or price is None:
                 continue
-            if q.get("confidence") == "low":
+            try:
+                price_val = float(price)
+            except (TypeError, ValueError):
+                continue
+            if price_val <= 0 or q.get("confidence") == "low":
+                continue
+
+            is_valid, obs_date = _is_valid_price_and_date(
+                code,
+                price_val,
+                q.get("observation_date"),
+                today,
+            )
+            if not is_valid:
                 continue
 
             name, unit, category = meta_map[code]
-            obs_date = q.get("observation_date") or today_str
             refs = f" | Refs: {', '.join(grounding_urls[:2])}" if grounding_urls else ""
             note = f"{provider_label} ({q.get('source_name', 'Market Assessment')}){refs}"
 
@@ -352,7 +418,7 @@ def refresh_ai_material_prices(conn):
                     is_proxy = TRUE,
                     source_note = EXCLUDED.source_note;
                 """,
-                (code, name, category, unit, obs_date, round(float(price), 2), note),
+                (code, name, category, unit, obs_date, round(price_val, 2), note),
             )
             rows_upserted += 1
 
