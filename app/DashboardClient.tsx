@@ -195,6 +195,19 @@ const SHORT_COST_INPUT_NAMES: Record<string, string> = {
   CARBON_FIBER_T700: "Carbon Fiber",
 };
 
+const SHORT_DEMAND_PROXY_NAMES: Record<string, string> = {
+  SMH: "Semiconductors",
+  ITA: "Aerospace & Defense",
+  LIT: "Lithium & Batteries",
+  REMX: "Rare Earths",
+  URA: "Uranium & Nuclear",
+  SLX: "Specialty Steel",
+  IHI: "Medical Devices",
+  INDPRO: "Industrial Production",
+  PCUOMFGOMFG: "Manufacturing PPI",
+  DGS10: "10Y Treasury Yield",
+};
+
 function formatShortCostInput(rawLabel: string, code?: string | null): string {
   if (code && SHORT_COST_INPUT_NAMES[code]) {
     return SHORT_COST_INPUT_NAMES[code];
@@ -206,6 +219,20 @@ function formatShortCostInput(rawLabel: string, code?: string | null): string {
       ""
     )
     .replace(/^(Global|Refined|N-Type)\s+/i, "")
+    .trim();
+}
+
+function formatShortDemandProxy(
+  rawLabel: string,
+  code?: string | null
+): string {
+  if (code && SHORT_DEMAND_PROXY_NAMES[code]) {
+    return SHORT_DEMAND_PROXY_NAMES[code];
+  }
+  return rawLabel
+    .replace(/\s*\([^)]*\)/g, "")
+    .replace(/\b(ETF|Index|Fund|Trust|Benchmark|Futures|Spot)\b/gi, "")
+    .replace(/\s{2,}/g, " ")
     .trim();
 }
 
@@ -473,12 +500,21 @@ export default function DashboardClient({
   excludedProducts?: ExcludedProduct[];
   productProfiles?: CompanyProductProfile[];
 }) {
-  // Defensively deduplicate any repeated company/base-ticker rows (e.g., 120290 vs 120290.KS)
+  // Deduplicate repeated company rows (e.g., 120290 vs 120290.KS)
   const equities = useMemo(() => {
+    const normalizeName = (name: string) =>
+      name
+        .toLowerCase()
+        .replace(
+          /\b(inc|corp|corporation|co|ltd|limited|plc|ag|se|sa|holdings?|group)\b/g,
+          ""
+        )
+        .replace(/[^a-z0-9]/g, "");
+
     const byKey = new Map<string, EquityRow>();
     for (const eq of rawEquities) {
-      const baseTicker = eq.ticker.split(".")[0].toUpperCase();
-      const key = `${baseTicker}::${eq.company_name.trim().toLowerCase()}`;
+      const normName = normalizeName(eq.company_name);
+      const key = normName || eq.ticker.split(".")[0].toUpperCase();
       const existing = byKey.get(key);
       if (!existing) {
         byKey.set(key, eq);
@@ -487,7 +523,8 @@ export default function DashboardClient({
         const currentHasSuffix = eq.ticker.includes(".");
         if (
           (!existingHasSuffix && currentHasSuffix) ||
-          ((existing.market_cap_usd ?? 0) === 0 && (eq.market_cap_usd ?? 0) > 0)
+          ((existing.market_cap_usd ?? 0) === 0 &&
+            (eq.market_cap_usd ?? 0) > 0)
         ) {
           byKey.set(key, eq);
         }
@@ -743,7 +780,7 @@ export default function DashboardClient({
     return map;
   }, [supplyChain]);
 
-  // Unified company-level cost_inputs (short names) & demand_proxies
+  // Unified company-level cost_inputs & demand_proxies (clean short labels without "ETF"/"Index")
   const companyDriversByRole = useMemo(() => {
     const map: Record<
       string,
@@ -776,10 +813,15 @@ export default function DashboardClient({
               label: formatShortCostInput(getCommodityDisplayName(code), code),
             }))
           ),
-          demandProxies: rollup.demandProxyCodes.map((code) => ({
-            code,
-            label: getCommodityDisplayName(code),
-          })),
+          demandProxies: dedupeByLabel(
+            rollup.demandProxyCodes.map((code) => ({
+              code,
+              label: formatShortDemandProxy(
+                getCommodityDisplayName(code),
+                code
+              ),
+            }))
+          ),
           fromProductRollup: true,
         };
         continue;
@@ -799,13 +841,18 @@ export default function DashboardClient({
               detail: d.mechanism_detail,
             }))
         );
-        const demandProxies = aiDrivers
-          .filter((d) => d.exposure_role !== "Cost Input")
-          .map((d) => ({
-            code: d.matched_input_code,
-            label: d.commodity_name,
-            detail: d.mechanism_detail,
-          }));
+        const demandProxies = dedupeByLabel(
+          aiDrivers
+            .filter((d) => d.exposure_role !== "Cost Input")
+            .map((d) => ({
+              code: d.matched_input_code,
+              label: formatShortDemandProxy(
+                d.commodity_name,
+                d.matched_input_code
+              ),
+              detail: d.mechanism_detail,
+            }))
+        );
         map[eq.ticker] = { costInputs, demandProxies, fromProductRollup: false };
       } else {
         const subRules = sectorSensitivitiesMap[eq.sub_sector || ""] || [];
@@ -821,13 +868,18 @@ export default function DashboardClient({
               detail: r.mechanism_note,
             }))
         );
-        const demandProxies = subRules
-          .filter((r) => r.relationship_type !== "Cost Input")
-          .map((r) => ({
-            code: r.input_code,
-            label: getCommodityDisplayName(r.input_code),
-            detail: r.mechanism_note,
-          }));
+        const demandProxies = dedupeByLabel(
+          subRules
+            .filter((r) => r.relationship_type !== "Cost Input")
+            .map((r) => ({
+              code: r.input_code,
+              label: formatShortDemandProxy(
+                getCommodityDisplayName(r.input_code),
+                r.input_code
+              ),
+              detail: r.mechanism_note,
+            }))
+        );
         map[eq.ticker] = { costInputs, demandProxies, fromProductRollup: false };
       }
     }
@@ -1011,15 +1063,62 @@ export default function DashboardClient({
     ? tickerSupplyChainMap[selectedTicker] || []
     : [];
 
-  const upstreamSuppliers = selectedEquitySupplyChain.filter(
-    (s) => s.direction === "upstream_supplier"
-  );
-  const filingCompetitors = selectedEquitySupplyChain.filter(
-    (s) => s.direction === "competitor"
-  );
-  const downstreamCustomers = selectedEquitySupplyChain.filter(
-    (s) => s.direction === "downstream_customer"
-  );
+  // Deduplicate repeated counterparties (e.g., Evonik or downstream OEMs) per direction
+  const { upstreamSuppliers, filingCompetitors, downstreamCustomers } =
+    useMemo(() => {
+      const groupByCounterparty = (rows: SupplyChainRow[]) => {
+        const map = new Map<string, SupplyChainRow>();
+        for (const r of rows) {
+          const key = r.counterparty_name
+            .toLowerCase()
+            .replace(
+              /\b(ag|se|sa|nv|inc|corp|corporation|co|ltd|limited|plc|gmbh|kgaa|holdings?|group|industries)\b/g,
+              ""
+            )
+            .replace(/[^a-z0-9]/g, "");
+          const bucket = key || r.counterparty_name.toLowerCase();
+          const existing = map.get(bucket);
+          if (!existing) {
+            map.set(bucket, { ...r });
+          } else {
+            if (
+              r.material_or_product &&
+              !existing.material_or_product
+                .toLowerCase()
+                .includes(r.material_or_product.toLowerCase())
+            ) {
+              existing.material_or_product = `${existing.material_or_product} • ${r.material_or_product}`;
+            }
+            existing.is_sole_source =
+              existing.is_sole_source || r.is_sole_source;
+            if (
+              r.exposure_pct != null &&
+              (existing.exposure_pct == null ||
+                r.exposure_pct > existing.exposure_pct)
+            ) {
+              existing.exposure_pct = r.exposure_pct;
+            }
+          }
+        }
+        return Array.from(map.values());
+      };
+
+      return {
+        upstreamSuppliers: groupByCounterparty(
+          selectedEquitySupplyChain.filter(
+            (s) => s.direction === "upstream_supplier"
+          )
+        ),
+        filingCompetitors: groupByCounterparty(
+          selectedEquitySupplyChain.filter((s) => s.direction === "competitor")
+        ),
+        downstreamCustomers: groupByCounterparty(
+          selectedEquitySupplyChain.filter(
+            (s) => s.direction === "downstream_customer"
+          )
+        ),
+      };
+    }, [selectedEquitySupplyChain]);
 
   const universePeers = useMemo(() => {
     if (!selectedEquity?.sub_sector) return [];
@@ -1624,7 +1723,7 @@ export default function DashboardClient({
                             </div>
                           </td>
 
-                          {/* Demand Proxies (Downstream -> Volume) */}
+                          {/* Demand Proxies (Clean Labels without "ETF" / "Index") */}
                           <td className="py-3.5 px-4">
                             <div className="flex flex-wrap gap-1.5 max-w-[210px]">
                               {roleDrivers.demandProxies.length === 0 ? (
@@ -2251,7 +2350,7 @@ export default function DashboardClient({
                       )}
                     </div>
 
-                    {/* 2. Competitors & Tracked Sub-Sector Peers (No Flag Emojis) */}
+                    {/* 2. Competitors & Tracked Sub-Sector Peers */}
                     <div className="rounded-xl bg-[#111827] border border-slate-800 p-4 space-y-3">
                       <div className="text-[11px] font-mono uppercase tracking-wider text-purple-400">
                         2. Competitors &amp; Sub-Sector Peers ({filingCompetitors.length} Filing-Disclosed • {universePeers.length} Universe Peers)
@@ -2518,7 +2617,7 @@ export default function DashboardClient({
                               rel="noreferrer"
                               className="text-xs text-sky-400 hover:underline font-mono"
                             >
-                              View Filing &nearr;
+                              View Filing ↗
                             </a>
                           )}
                         </div>
