@@ -121,7 +121,7 @@ EQUITIES_UNIVERSE = [
     ("3402.T", "Toray Industries", "Carbon Fiber & Advanced Films", "fixed_spread", 4.5),
     ("3401.T", "Teijin Limited", "Aramid & Carbon Fibers", "fixed_spread", 3.5),
     ("298050.KS", "Hyosung Advanced Materials", "Carbon Fiber & Tire Cord", "fixed_spread", 3.5),
-    ("120290.KS", "Kolon Industries", "Aramid Fibers & Industrial Films", "fixed_spread", 3.0),
+    ("120110.KS", "Kolon Industries", "Aramid Fibers & Industrial Films", "fixed_spread", 3.0),
     ("AIN", "Albany International", "Engineered Composites & Fabrics", "fixed_spread", 4.5),
     ("GURN.SW", "Gurit Holding", "Wind & Marine Composites", "fixed_spread", 2.5),
     ("ASPN", "Aspen Aerogels", "Thermal Barrier Aerogels", "fixed_spread", 3.5),
