@@ -30,20 +30,49 @@ export default function ScopedInsightsPanel({
   const [scopeFilter, setScopeFilter] = useState<
     "ALL" | "industry" | "sub_industry" | "theme"
   >("ALL");
+  const [query, setQuery] = useState("");
+
+  const counts = useMemo(() => {
+    const c = { industry: 0, sub_industry: 0, theme: 0 };
+    for (const item of insights || []) {
+      if (item.scope_type === "industry") c.industry += 1;
+      else if (item.scope_type === "sub_industry") c.sub_industry += 1;
+      else if (item.scope_type === "theme") c.theme += 1;
+    }
+    return c;
+  }, [insights]);
 
   const filtered = useMemo(() => {
     if (!insights) return [];
-    if (scopeFilter === "ALL") return insights;
-    return insights.filter((item) => item.scope_type === scopeFilter);
-  }, [insights, scopeFilter]);
+    const q = query.trim().toLowerCase();
+    return insights.filter((item) => {
+      if (scopeFilter !== "ALL" && item.scope_type !== scopeFilter) {
+        return false;
+      }
+      if (!q) return true;
+      return (
+        item.scope_name.toLowerCase().includes(q) ||
+        item.headline.toLowerCase().includes(q) ||
+        (item.top_tickers || []).some((tk) => tk.toLowerCase().includes(q))
+      );
+    });
+  }, [insights, scopeFilter, query]);
 
   if (!insights || insights.length === 0) {
     return null;
   }
 
+  const handleTickerClick = (ticker: string) => {
+    if (typeof window !== "undefined") {
+      window.dispatchEvent(
+        new CustomEvent("terminal:select-ticker", { detail: ticker })
+      );
+    }
+  };
+
   return (
     <section className="max-w-7xl mx-auto px-6 pb-12 space-y-4">
-      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 border-t border-slate-800/80 pt-8">
+      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 border-t border-slate-800/80 pt-8">
         <div>
           <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider bg-sky-500/15 text-sky-400 border border-sky-500/30">
             AI Sector &amp; Theme Synthesis
@@ -53,93 +82,119 @@ export default function ScopedInsightsPanel({
           </h2>
         </div>
 
-        <div className="flex flex-wrap gap-1.5">
-          {[
-            { id: "ALL", label: `All (${insights.length})` },
-            { id: "industry", label: "Industry" },
-            { id: "sub_industry", label: "Sub-Sectors" },
-            { id: "theme", label: "Themes" },
-          ].map((tab) => (
-            <button
-              key={tab.id}
-              onClick={() => setScopeFilter(tab.id as typeof scopeFilter)}
-              className={`px-3 py-1 rounded-md text-xs font-medium transition ${
-                scopeFilter === tab.id
-                  ? "bg-sky-500 text-white"
-                  : "bg-slate-800/80 text-slate-300 hover:bg-slate-800"
-              }`}
-            >
-              {tab.label}
-            </button>
-          ))}
+        <div className="flex flex-wrap items-center gap-2">
+          <input
+            type="text"
+            value={query}
+            onChange={(e) => setQuery(e.target.value)}
+            placeholder="Filter sub-sector, theme, or ticker..."
+            className="rounded-lg bg-[#090d16] border border-slate-700/80 px-3 py-1 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-sky-500"
+          />
+
+          <div className="flex flex-wrap gap-1.5">
+            {[
+              { id: "ALL", label: `All (${insights.length})` },
+              { id: "industry", label: `Industry (${counts.industry})` },
+              { id: "sub_industry", label: `Sub-Sectors (${counts.sub_industry})` },
+              { id: "theme", label: `Themes (${counts.theme})` },
+            ].map((tab) => (
+              <button
+                key={tab.id}
+                onClick={() => setScopeFilter(tab.id as typeof scopeFilter)}
+                className={`px-3 py-1 rounded-md text-xs font-medium transition ${
+                  scopeFilter === tab.id
+                    ? "bg-sky-500 text-white"
+                    : "bg-slate-800/80 text-slate-300 hover:bg-slate-800"
+                }`}
+              >
+                {tab.label}
+              </button>
+            ))}
+          </div>
         </div>
       </div>
 
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-        {filtered.map((item) => {
-          const badgeStyle =
-            SENTIMENT_STYLES[item.sentiment] ||
-            "bg-slate-800 text-slate-300 border-slate-700";
+      {filtered.length === 0 ? (
+        <div className="rounded-xl border border-slate-800 bg-[#111827]/70 p-6 text-center text-xs text-slate-400">
+          No sector or theme cards match &ldquo;{query}&rdquo;.
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+          {filtered.map((item) => {
+            const badgeStyle =
+              SENTIMENT_STYLES[item.sentiment] ||
+              "bg-slate-800 text-slate-300 border-slate-700";
 
-          return (
-            <div
-              key={`${item.scope_type}-${item.scope_name}`}
-              className="rounded-xl border border-slate-800 bg-[#111827]/90 p-5 space-y-3"
-            >
-              <div className="flex items-start justify-between gap-2">
-                <div>
-                  <span className="text-[10px] font-mono uppercase tracking-wider text-slate-400">
-                    {item.scope_type.replace("_", " ")} • {item.filing_count} Filings
-                  </span>
-                  <h3 className="text-sm font-semibold text-white mt-0.5">
-                    {item.scope_name}
-                  </h3>
-                </div>
-                <span
-                  className={`px-2.5 py-0.5 rounded-full text-[11px] font-mono border shrink-0 ${badgeStyle}`}
-                >
-                  {item.sentiment}
-                </span>
-              </div>
-
-              <p className="text-xs font-medium text-sky-300 leading-snug">
-                {item.headline}
-              </p>
-
-              <div className="space-y-2 text-xs text-slate-300 leading-relaxed">
-                <p>
-                  <strong className="text-slate-200">Demand &amp; Drivers:</strong>{" "}
-                  {item.key_drivers}
-                </p>
-                <p>
-                  <strong className="text-slate-200">Pricing &amp; Margins:</strong>{" "}
-                  {item.pricing_and_margins}
-                </p>
-                <p>
-                  <strong className="text-slate-200">Capex &amp; Supply Chain:</strong>{" "}
-                  {item.capex_and_supply_chain}
-                </p>
-              </div>
-
-              {item.top_tickers && item.top_tickers.length > 0 && (
-                <div className="flex items-center flex-wrap gap-1.5 pt-1 border-t border-slate-800/70">
-                  <span className="text-[10px] font-mono uppercase text-slate-500 mr-1">
-                    Key Tickers:
-                  </span>
-                  {item.top_tickers.map((tk) => (
-                    <span
-                      key={tk}
-                      className="px-2 py-0.5 rounded bg-[#090d16] border border-slate-800 text-[11px] font-mono text-sky-400"
-                    >
-                      {tk}
+            return (
+              <div
+                key={`${item.scope_type}-${item.scope_name}`}
+                className="rounded-xl border border-slate-800 bg-[#111827]/90 p-5 space-y-3"
+              >
+                <div className="flex items-start justify-between gap-2">
+                  <div>
+                    <span className="text-[10px] font-mono uppercase tracking-wider text-slate-400">
+                      {item.scope_type.replace("_", " ")} • {item.filing_count}{" "}
+                      Covered • {item.generated_date}
                     </span>
-                  ))}
+                    <h3 className="text-sm font-semibold text-white mt-0.5">
+                      {item.scope_name}
+                    </h3>
+                  </div>
+                  <span
+                    className={`px-2.5 py-0.5 rounded-full text-[11px] font-mono border shrink-0 ${badgeStyle}`}
+                  >
+                    {item.sentiment}
+                  </span>
                 </div>
-              )}
-            </div>
-          );
-        })}
-      </div>
+
+                <p className="text-xs font-medium text-sky-300 leading-snug">
+                  {item.headline}
+                </p>
+
+                <div className="space-y-2 text-xs text-slate-300 leading-relaxed">
+                  <p>
+                    <strong className="text-slate-200">
+                      Demand &amp; Drivers:
+                    </strong>{" "}
+                    {item.key_drivers}
+                  </p>
+                  <p>
+                    <strong className="text-slate-200">
+                      Pricing &amp; Margins:
+                    </strong>{" "}
+                    {item.pricing_and_margins}
+                  </p>
+                  <p>
+                    <strong className="text-slate-200">
+                      Capex &amp; Supply Chain:
+                    </strong>{" "}
+                    {item.capex_and_supply_chain}
+                  </p>
+                </div>
+
+                {item.top_tickers && item.top_tickers.length > 0 && (
+                  <div className="flex items-center flex-wrap gap-1.5 pt-2 border-t border-slate-800/70">
+                    <span className="text-[10px] font-mono uppercase text-slate-500 mr-1">
+                      Key Tickers:
+                    </span>
+                    {item.top_tickers.map((tk) => (
+                      <button
+                        key={tk}
+                        type="button"
+                        onClick={() => handleTickerClick(tk)}
+                        title={`Open ${tk} dossier`}
+                        className="px-2 py-0.5 rounded bg-[#090d16] hover:bg-slate-800 border border-slate-800 hover:border-sky-500/40 text-[11px] font-mono text-sky-400 transition cursor-pointer"
+                      >
+                        {tk}
+                      </button>
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      )}
     </section>
   );
 }
