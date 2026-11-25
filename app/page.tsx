@@ -1,4 +1,5 @@
 import { Suspense } from "react";
+import Link from "next/link";
 import { connection } from "next/server";
 import { neon } from "@neondatabase/serverless";
 import DashboardClient, {
@@ -108,7 +109,7 @@ async function DashboardDataLoader() {
         FROM company_filings_ai f
         LEFT JOIN equities_universe e ON f.ticker = e.ticker
       ) ranked
-    WHERE rn <= CASE
+      WHERE rn <= CASE
         WHEN EXISTS (
           SELECT 1
           FROM company_filings_ai hf
@@ -301,6 +302,15 @@ async function DashboardDataLoader() {
         productProfiles={rawProfiles as CompanyProductProfile[]}
       />
       <ScopedInsightsPanel insights={insights as ScopedInsightRow[]} />
+      <footer className="max-w-7xl mx-auto px-6 pb-8 pt-4 flex items-center justify-between text-[11px] font-mono text-slate-500 border-t border-slate-800/60">
+        <span>Advanced Materials Intelligence Terminal</span>
+        <Link
+          href="/ai-models"
+          className="hover:text-sky-400 transition"
+        >
+          AI Model Cascade &amp; Quotas &rarr;
+        </Link>
+      </footer>
     </>
   );
 }
