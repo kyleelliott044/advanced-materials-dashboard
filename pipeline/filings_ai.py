@@ -11,6 +11,7 @@ from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
+from ai_usage_logger import record_ai_usage
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
