@@ -13,7 +13,7 @@ from google import genai
 from google.genai import types
 
 DATABASE_URL = os.environ["DATABASE_URL"]
-GEMINI_API_KEY = os.environ["GEMINI_API_KEY"]
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 
 SEC_HEADERS = {
@@ -21,18 +21,37 @@ SEC_HEADERS = {
     "Accept-Encoding": "gzip, deflate",
 }
 
-client = genai.Client(api_key=GEMINI_API_KEY)
 
-MAX_REQUESTS_PER_RUN = 18
+def _build_gemini_client():
+    if not GEMINI_API_KEY:
+        return None
+    try:
+        return genai.Client(
+            api_key=GEMINI_API_KEY,
+            http_options=types.HttpOptions(timeout=45000),
+        )
+    except TypeError:
+        return genai.Client(api_key=GEMINI_API_KEY)
+
+
+client = _build_gemini_client()
+
+MAX_REQUESTS_PER_RUN = 24
 requests_used = 0
 groq_requests_used = 0
-quota_exhausted = False
-consecutive_gemini_503 = 0
+
+GEMINI_MODELS = [
+    "gemini-3.8-flash",
+    "gemini-3.5-flash-lite",
+]
+exhausted_gemini_models = set()
+gemini_503_counts = {}
 
 GROQ_MODELS = [
     "openai/gpt-oss-120b",
     "qwen/qwen3.8-27b",
     "openai/gpt-oss-20b",
+    "openai/gpt-oss-safeguard-20b",
 ]
 exhausted_groq_models = set()
 
@@ -93,7 +112,7 @@ def ensure_conn(conn):
                 conn.close()
             except Exception:
                 pass
-    print("Reconnecting to Neon PostgreSQL...")
+    print("Reconnecting to Neon PostgreSQL...", flush=True)
     return connect_db()
 
 
@@ -153,24 +172,24 @@ def _call_groq_fallback(prompt: str, schema):
                     timeout=45,
                 )
             except requests.RequestException as e:
-                print(f"Groq network error on {model_id}: {e} — trying next model.")
+                print(f"Groq network error on {model_id}: {e} — trying next model.", flush=True)
                 break
 
             if resp.status_code == 429:
                 err_lower = resp.text.lower()
                 if "tokens per day" in err_lower or "requests per day" in err_lower:
-                    print(f"Groq daily limit reached for {model_id} — switching to next model.")
+                    print(f"Groq daily limit reached for {model_id} — switching to next model.", flush=True)
                     exhausted_groq_models.add(model_id)
                     break
                 if attempt == 0:
-                    print(f"Groq TPM limit on {model_id} — waiting 15s...")
+                    print(f"Groq TPM limit on {model_id} — waiting 15s...", flush=True)
                     time.sleep(15)
                     continue
-                print(f"Groq still rate-limited on {model_id} — trying next model.")
+                print(f"Groq still rate-limited on {model_id} — trying next model.", flush=True)
                 break
 
             if resp.status_code in (400, 404, 413):
-                print(f"Groq {resp.status_code} on {model_id} — switching to next model.")
+                print(f"Groq {resp.status_code} on {model_id} — switching to next model.", flush=True)
                 if resp.status_code == 404:
                     exhausted_groq_models.add(model_id)
                 break
@@ -178,48 +197,53 @@ def _call_groq_fallback(prompt: str, schema):
             resp.raise_for_status()
             groq_requests_used += 1
             content = resp.json()["choices"][0]["message"]["content"]
-            time.sleep(3)
+            time.sleep(2.5)
             return _FallbackResp(content)
 
     return None
 
 
 def call_gemini(prompt: str, schema, retries: int = 2):
-    global requests_used, quota_exhausted, consecutive_gemini_503
+    global requests_used
 
-    if not quota_exhausted and consecutive_gemini_503 < 2 and requests_used < MAX_REQUESTS_PER_RUN:
-        for attempt in range(retries):
-            try:
-                requests_used += 1
-                resp = client.models.generate_content(
-                    model="gemini-3.8-flash",
-                    contents=prompt,
-                    config=types.GenerateContentConfig(
-                        response_mime_type="application/json",
-                        response_schema=schema,
-                    ),
-                )
-                consecutive_gemini_503 = 0
-                return resp
-            except Exception as e:
-                err = str(e)
-                if "429" in err or "RESOURCE_EXHAUSTED" in err:
-                    quota_exhausted = True
-                    print("Daily Gemini quota reached — switching to Groq fallback.")
-                    break
-                if any(k in err for k in ("503", "UNAVAILABLE", "disconnected", "timed out")):
-                    if attempt < retries - 1:
-                        print("Gemini 503/transient error — retrying in 3s...")
-                        time.sleep(3)
-                        continue
-                    consecutive_gemini_503 += 1
-                    print("Gemini unavailable — switching to Groq fallback.")
-                    break
-                raise
+    if client and requests_used < MAX_REQUESTS_PER_RUN:
+        for model_id in GEMINI_MODELS:
+            if model_id in exhausted_gemini_models:
+                continue
+
+            for attempt in range(retries):
+                try:
+                    requests_used += 1
+                    resp = client.models.generate_content(
+                        model=model_id,
+                        contents=prompt,
+                        config=types.GenerateContentConfig(
+                            response_mime_type="application/json",
+                            response_schema=schema,
+                        ),
+                    )
+                    gemini_503_counts[model_id] = 0
+                    return resp
+                except Exception as e:
+                    err = str(e)
+                    if "429" in err or "RESOURCE_EXHAUSTED" in err or "404" in err or "NOT_FOUND" in err:
+                        exhausted_gemini_models.add(model_id)
+                        print(f"Gemini {model_id} quota/unavailable — switching to next model.", flush=True)
+                        break
+                    if any(k in err for k in ("503", "UNAVAILABLE", "disconnected", "timed out")):
+                        if attempt < retries - 1:
+                            print(f"Gemini {model_id} transient error — retrying in 3s...", flush=True)
+                            time.sleep(3)
+                            continue
+                        gemini_503_counts[model_id] = gemini_503_counts.get(model_id, 0) + 1
+                        if gemini_503_counts[model_id] >= 2:
+                            exhausted_gemini_models.add(model_id)
+                        print(f"Gemini {model_id} unavailable — switching to next model.", flush=True)
+                        break
+                    raise
 
     return _call_groq_fallback(prompt, schema)
-
-
+    
 # Sub-sector fallback sensitivity map
 SENSITIVITY_RULES = [
     ("Industrial Gases", "NG=F", "Cost Input", "Pass-Through", "Natural gas is primary feedstock for hydrogen/syngas; indexed via take-or-pay pass-through clauses."),
