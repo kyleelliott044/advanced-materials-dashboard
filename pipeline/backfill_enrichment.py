@@ -10,7 +10,11 @@ from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
-from ai_usage_logger import record_ai_usage
+
+try:
+    from ai_usage_logger import record_ai_usage
+except ImportError:
+    from pipeline.ai_usage_logger import record_ai_usage
 
 DATABASE_URL = os.environ["DATABASE_URL"]
 GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
@@ -22,17 +26,36 @@ SEC_HEADERS = {
     "Accept-Encoding": "gzip, deflate",
 }
 
-client = genai.Client(api_key=GEMINI_API_KEY) if GEMINI_API_KEY else None
 
-MAX_GEMINI_CALLS = 18
+def _build_gemini_client():
+    if not GEMINI_API_KEY:
+        return None
+    try:
+        return genai.Client(
+            api_key=GEMINI_API_KEY,
+            http_options=types.HttpOptions(timeout=45000),
+        )
+    except TypeError:
+        return genai.Client(api_key=GEMINI_API_KEY)
+
+
+client = _build_gemini_client()
+
+MAX_GEMINI_CALLS = 24
 gemini_calls_used = 0
 groq_calls_used = 0
-gemini_exhausted = False
+
+GEMINI_MODELS = [
+    "gemini-3.8-flash",
+    "gemini-3.5-flash-lite",
+]
+exhausted_gemini_models = set()
 
 GROQ_MODELS = [
     "openai/gpt-oss-120b",
     "qwen/qwen3.8-27b",
     "openai/gpt-oss-20b",
+    "openai/gpt-oss-safeguard-20b",
 ]
 exhausted_groq_models = set()
 
@@ -92,7 +115,7 @@ def ensure_conn(conn):
                 conn.close()
             except Exception:
                 pass
-    print("Reconnecting to Neon PostgreSQL...")
+    print("Reconnecting to Neon PostgreSQL...", flush=True)
     return connect_db()
 
 
@@ -226,6 +249,15 @@ def _safe_pct(val) -> Optional[float]:
     except (TypeError, ValueError):
         pass
     return None
+
+
+def _norm_counterparty(name: str) -> str:
+    cleaned = re.sub(
+        r"\b(ag|se|sa|nv|inc|corp|corporation|co|ltd|limited|plc|gmbh|kgaa|holdings?|group|industries)\b",
+        "",
+        name.lower(),
+    )
+    return re.sub(r"[^a-z0-9]", "", cleaned)
 
 
 def _call_ai(prompt: str, schema) -> Optional[dict]:
@@ -369,6 +401,7 @@ def _call_ai(prompt: str, schema) -> Optional[dict]:
 
     return None
 
+
 def _extract_keyword_windows(text: str, patterns: list[str], window: int = 1600, max_total: int = 8000) -> str:
     chunks = []
     used_ranges = []
@@ -391,7 +424,6 @@ def fetch_sec_targeted_excerpt(source_url: str) -> str:
     soup = BeautifulSoup(resp.text, "html.parser")
     text = re.sub(r"\s+", " ", soup.get_text(separator=" ", strip=True))
 
-    # Targeted supply-chain, competition, and customer-concentration windows (kept early so Groq sees them)
     sc_windows = _extract_keyword_windows(
         text,
         [
@@ -403,7 +435,6 @@ def fetch_sec_targeted_excerpt(source_url: str) -> str:
         max_total=8000,
     )
 
-    # Skip Table of Contents by taking the last match of Item 1. Business and MD&A
     item1_matches = list(re.finditer(r"Item\s+1\.\s+Business", text, re.IGNORECASE))
     mda_matches = list(re.finditer(r"(Item\s+2\.|Item\s+7\.)\s+Management.{0,30}Discussion", text, re.IGNORECASE))
 
@@ -450,7 +481,8 @@ def save_enrichment(conn, ticker: str, ftype: str, fdate: str, parsed: dict, sou
             (d.get("source_quote") or "")[:350],
         ))
 
-    sc_rows = []
+    # Deduplicate counterparties per (direction, normalized company name)
+    dedup_sc = {}
     for direction, key in (
         ("upstream_supplier", "upstream_suppliers"),
         ("competitor", "competitors"),
@@ -464,18 +496,35 @@ def save_enrichment(conn, ticker: str, ftype: str, fdate: str, parsed: dict, sou
             quote = (item.get("source_quote") or "").strip()
             if item.get("is_named_entity") and not _quote_exists(quote, source_text):
                 continue
-            sc_rows.append((
-                ticker,
-                direction,
-                cname[:140],
-                bool(item.get("is_named_entity", False)),
-                mat[:180],
-                bool(item.get("is_sole_source", False)),
-                _safe_pct(item.get("exposure_pct")),
-                ftype,
-                fdate,
-                quote[:400],
-            ))
+
+            norm_key = (direction, _norm_counterparty(cname) or cname.lower())
+            exp_pct = _safe_pct(item.get("exposure_pct"))
+            is_sole = bool(item.get("is_sole_source", False))
+            is_named = bool(item.get("is_named_entity", False))
+
+            if norm_key not in dedup_sc:
+                dedup_sc[norm_key] = [
+                    ticker,
+                    direction,
+                    cname[:140],
+                    is_named,
+                    mat[:180],
+                    is_sole,
+                    exp_pct,
+                    ftype,
+                    fdate,
+                    quote[:400],
+                ]
+            else:
+                existing = dedup_sc[norm_key]
+                if mat.lower() not in existing[4].lower():
+                    existing[4] = f"{existing[4]} • {mat}"[:180]
+                existing[3] = existing[3] or is_named
+                existing[5] = existing[5] or is_sole
+                if exp_pct is not None and (existing[6] is None or exp_pct > existing[6]):
+                    existing[6] = exp_pct
+
+    sc_rows = [tuple(v) for v in dedup_sc.values()]
 
     for attempt in range(2):
         conn = ensure_conn(conn)
@@ -532,10 +581,10 @@ def save_enrichment(conn, ticker: str, ftype: str, fdate: str, parsed: dict, sou
                 )
 
             conn.commit()
-            print(f"[{ticker}] Saved {len(driver_rows)} commodity drivers & {len(sc_rows)} value-chain/competitor links ({ftype} {fdate})")
+            print(f"[{ticker}] Saved {len(driver_rows)} commodity drivers & {len(sc_rows)} value-chain/competitor links ({ftype} {fdate})", flush=True)
             return conn
         except psycopg.OperationalError as e:
-            print(f"DB connection dropped saving {ticker} ({e}) — reconnecting...")
+            print(f"DB connection dropped saving {ticker} ({e}) — reconnecting...", flush=True)
             try:
                 conn.close()
             except Exception:
@@ -550,7 +599,6 @@ def save_enrichment(conn, ticker: str, ftype: str, fdate: str, parsed: dict, sou
 def run_backfill(conn=None):
     conn = ensure_tables(conn)
 
-    # Select best already-parsed filing per ticker where enrichment has not yet been run
     with conn.cursor() as cur:
         cur.execute("""
             WITH best_filing AS (
@@ -573,8 +621,8 @@ def run_backfill(conn=None):
                 ORDER BY
                     f.ticker,
                     CASE
-                        WHEN f.filing_type = '10-K' THEN 1
-                        WHEN f.filing_type = '10-Q' THEN 2
+                        WHEN f.filing_type IN ('10-K', '20-F', '40-F', 'Annual Report') THEN 1
+                        WHEN f.filing_type IN ('10-Q', '6-K', 'Quarterly Report', 'Half-Year Report') THEN 2
                         ELSE 3
                     END ASC,
                     f.filing_date DESC
@@ -607,10 +655,10 @@ def run_backfill(conn=None):
         targets = cur.fetchall()
 
     if not targets:
-        print("All already-analyzed filings have been processed for commodity drivers, competitors, and supply-chain links.")
+        print("All already-analyzed filings have been processed for commodity drivers, competitors, and supply-chain links.", flush=True)
         return conn
 
-    print(f"Found {len(targets)} analyzed stocks to enrich (batch limit={BATCH_LIMIT})...")
+    print(f"Found {len(targets)} analyzed stocks to enrich (batch limit={BATCH_LIMIT})...", flush=True)
 
     for (
         ticker,
@@ -639,7 +687,7 @@ def run_backfill(conn=None):
                 filing_excerpt = fetch_sec_targeted_excerpt(source_url)
                 time.sleep(0.2)
             except Exception as e:
-                print(f"Warning fetching SEC text for {ticker}: {e}")
+                print(f"Warning fetching SEC text for {ticker}: {e}", flush=True)
         else:
             try:
                 biz = (yf.Ticker(ticker).info or {}).get("longBusinessSummary", "")
@@ -657,11 +705,11 @@ def run_backfill(conn=None):
         1. commodity_drivers: 3 to 6 specific raw materials, feedstocks, energy inputs, and commodity benchmarks that drive this company's costs, margins, or revenues. Use clean human-readable names (never ticker symbols or FRED codes) and map each to the closest canonical code when applicable:
         {CANONICAL_INPUT_GUIDE}
 
-        2. upstream_suppliers, competitors & downstream_customers:
-           - upstream_suppliers: Explicitly disclosed raw material suppliers, feedstock sources, or sole-source/single-source inputs.
-           - competitors: Explicitly named rival companies disclosed in the Competition section or MD&A (noting overlapping product lines and any disclosed market share %).
-           - downstream_customers: Explicitly disclosed downstream customers, OEMs, or 10%+ customer concentration disclosures.
-           Back every named entity with a verbatim quote from the source text. Do NOT invent company names not present in the text.
+        2. upstream_suppliers, competitors & downstream_customers (list each company at most ONCE per category, combining multiple materials/products into one entry):
+        - upstream_suppliers: Explicitly disclosed raw material suppliers, feedstock sources, or sole-source/single-source inputs.
+        - competitors: Explicitly named rival companies disclosed in the Competition section or MD&A (noting overlapping product lines and any disclosed market share %).
+        - downstream_customers: Explicitly disclosed downstream customers, OEMs, or 10%+ customer concentration disclosures.
+        Back every named entity with a verbatim quote from the source text. Do NOT invent company names not present in the text.
 
         SOURCE TEXT:
         {full_source_text}
@@ -669,12 +717,12 @@ def run_backfill(conn=None):
 
         parsed = _call_ai(prompt, EnrichmentBackfillSchema)
         if not parsed:
-            print("All AI providers exhausted for this run — stopping cleanly.")
+            print("All AI providers exhausted for this run — stopping cleanly.", flush=True)
             break
 
         conn = save_enrichment(conn, ticker, ftype, fdate, parsed, full_source_text)
 
-    print(f"Backfill run complete ({gemini_calls_used} Gemini calls, {groq_calls_used} Groq calls used).")
+    print(f"Backfill run complete ({gemini_calls_used} Gemini calls, {groq_calls_used} Groq calls used).", flush=True)
     return conn
 
 
