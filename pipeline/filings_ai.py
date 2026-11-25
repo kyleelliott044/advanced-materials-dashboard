@@ -1466,6 +1466,71 @@ def generate_market_macro_narrative(conn):
     return conn
 
 
+def map_broad_sub_industry(raw_sub_sector: Optional[str]) -> str:
+    """
+    Rolls ~70+ granular sub_sector tags into 8 broad institutional verticals
+    so every sub-industry insight synthesizes multiple companies instead of 1 stock.
+    """
+    s = (raw_sub_sector or "").lower()
+    if not s:
+        return "Specialty Chemicals, Polymers & Biomaterials"
+
+    if any(k in s for k in (
+        "semicon", "wafer", "photoresist", "cmp", "substrate", "abf",
+        "ccl", "copper clad", "laminate", "photonics", "silicon carbide", "soi"
+    )):
+        return "Semiconductor & Electronic Materials"
+
+    if any(k in s for k in (
+        "lithium", "cathode", "anode", "battery", "electrolyte",
+        "elecfoil", "graphite"
+    )):
+        return "Battery & Energy Storage Materials"
+
+    if any(k in s for k in (
+        "rare earth", "ndfeb", "magnet", "gallium", "germanium",
+        "uranium", "nuclear", "critical"
+    )):
+        return "Rare Earths & Strategic Metals"
+
+    if any(k in s for k in (
+        "alloy", "titanium", "steel", "stainless", "aluminum",
+        "beryllium", "aerospace & defense parts"
+    )):
+        return "Specialty Alloys & Aerospace Metals"
+
+    if any(k in s for k in (
+        "carbon fiber", "composite", "prepreg"
+    )):
+        return "Carbon Fiber & Engineered Composites"
+
+    if any(k in s for k in (
+        "optical fiber", "display glass", "glass", "ceramic", "quartz"
+    )):
+        return "Optical Fiber, Photonics & Technical Glass"
+
+    if "industrial gas" in s or "gases" in s:
+        return "Industrial Gases"
+
+    return "Specialty Chemicals, Polymers & Biomaterials"
+
+
+def _match_allowed_scope(raw_name: str, allowed_keys: list[str]) -> Optional[str]:
+    """Matches model-returned scope_name back to canonical key even if prefixed or slightly reworded."""
+    cleaned = re.sub(r"^(theme|sub[-_ ]?industry|industry)\s*:\s*", "", (raw_name or "").strip(), flags=re.I)
+    if cleaned in allowed_keys:
+        return cleaned
+    norm_cleaned = re.sub(r"[^a-z0-9]+", "", cleaned.lower())
+    for k in allowed_keys:
+        if re.sub(r"[^a-z0-9]+", "", k.lower()) == norm_cleaned:
+            return k
+    for k in allowed_keys:
+        nk = re.sub(r"[^a-z0-9]+", "", k.lower())
+        if len(nk) >= 6 and (nk in norm_cleaned or norm_cleaned in nk):
+            return k
+    return None
+
+
 def generate_scoped_insights(conn):
     conn = ensure_conn(conn)
     with conn.cursor() as cur:
@@ -1491,6 +1556,9 @@ def generate_scoped_insights(conn):
                     f.theme_tags
                 FROM company_filings_ai f
                 JOIN equities_universe e ON f.ticker = e.ticker
+                WHERE f.filing_date >= '2025-01-01'
+                  AND COALESCE(f.fiscal_period, '') !~* '\m202[0-4]\M'
+                  AND NOT (f.filing_type IN ('10-K', '20-F', '40-F') AND f.filing_date < '2025-04-01')
                 ORDER BY f.ticker, f.filing_date DESC
             ),
             driver_agg AS (
@@ -1548,26 +1616,19 @@ def generate_scoped_insights(conn):
         """)
         rows = cur.fetchall()
 
-        cur.execute("""
-            SELECT scope_name, generated_date::text
-            FROM sector_theme_insights
-            WHERE scope_type = 'sub_industry';
-        """)
-        existing_sub_dates = dict(cur.fetchall())
-
     if not rows:
         print("No filings available yet for scoped insights.", flush=True)
         return conn
 
-    by_sub = {}
-    sub_max_mcap = {}
-    sub_latest_ord = {}
+    by_sub: dict[str, list[tuple[str, str]]] = {}
+    sub_max_mcap: dict[str, float] = {}
+    sub_latest_ord: dict[str, int] = {}
 
-    by_theme = {}
-    theme_max_mcap = {}
-    theme_latest_ord = {}
+    by_theme: dict[str, list[tuple[str, str]]] = {}
+    theme_max_mcap: dict[str, float] = {}
+    theme_latest_ord: dict[str, int] = {}
 
-    all_lines = []
+    all_lines: list[str] = []
 
     for (
         ticker, cname, sub_sector, country, mcap, rev_pct, contract, qual_yrs,
@@ -1577,9 +1638,10 @@ def generate_scoped_insights(conn):
         mcap_val = float(mcap) if mcap is not None else 0.0
         date_ord = fdate.toordinal() if hasattr(fdate, "toordinal") else 0
         period_lbl = fperiod or f"{ftype} {fdate}"
+        broad_sub = map_broad_sub_industry(sub_sector)
         meta = (
-            f"Mkt Cap: {_fmt_mcap(mcap)} | Country: {country or 'N/A'} | "
-            f"AdvMat Rev: {f'{rev_pct}%' if rev_pct is not None else 'N/A'} | "
+            f"Vertical: {broad_sub} ({sub_sector or 'General'}) | Mkt Cap: {_fmt_mcap(mcap)} | "
+            f"Country: {country or 'N/A'} | AdvMat Rev: {f'{rev_pct}%' if rev_pct is not None else 'N/A'} | "
             f"Contract: {contract or 'N/A'} | Moat: {qual_yrs or 'N/A'}y"
         )
         line = (
@@ -1590,89 +1652,111 @@ def generate_scoped_insights(conn):
         )
         all_lines.append(line)
 
-        if sub_sector:
-            by_sub.setdefault(sub_sector, []).append((ticker, line))
-            sub_max_mcap[sub_sector] = max(sub_max_mcap.get(sub_sector, 0.0), mcap_val)
-            sub_latest_ord[sub_sector] = max(sub_latest_ord.get(sub_sector, 0), date_ord)
+        by_sub.setdefault(broad_sub, []).append((ticker, line))
+        sub_max_mcap[broad_sub] = max(sub_max_mcap.get(broad_sub, 0.0), mcap_val)
+        sub_latest_ord[broad_sub] = max(sub_latest_ord.get(broad_sub, 0), date_ord)
 
         for tag in (tags or []):
             by_theme.setdefault(tag, []).append((ticker, line))
             theme_max_mcap[tag] = max(theme_max_mcap.get(tag, 0.0), mcap_val)
             theme_latest_ord[tag] = max(theme_latest_ord.get(tag, 0), date_ord)
 
-    all_insights = []
+    all_insights: list[dict] = []
 
-    # 1. Rank themes by largest company size, then most recent filing date
-    theme_items = sorted(
-        by_theme.items(),
-        key=lambda x: (-theme_max_mcap.get(x[0], 0.0), -theme_latest_ord.get(x[0], 0), -len(x[1])),
-    )[:8]
-    theme_blocks = []
-    allowed_by_theme = {"Advanced Materials": {r[0] for r in rows}}
-    for tname, entries in theme_items:
-        allowed_by_theme[tname] = {tk for tk, _ in entries}
-        joined = "\n  ".join(ln for _, ln in entries[:6])
-        theme_blocks.append(f"=== THEME: {tname} (Total Covered Companies: {len(entries)}) ===\n  {joined}")
-
-    theme_prompt = f"""
+    # 1. Industry-wide synthesis (single focused call so it never truncates on Groq)
+    all_tickers_set = {r[0] for r in rows}
+    industry_prompt = f"""
     You are a Senior Advanced Materials Equity Strategist.
-    Generate:
-    1. One ScopeInsight with scope_type='industry' and scope_name='Advanced Materials' summarizing the overall universe below.
-    2. One ScopeInsight with scope_type='theme' for EACH theme block below, synthesizing across all filings inside that theme's block (weighing the largest companies and most recent filings at the top most heavily).
-    Incorporate company-level Commodity Drivers (cost pass-through vs. margin headwinds), Value Chain & Peers (sole-source suppliers, OEM concentration), Contract Structures, and Key Risks into your synthesis.
+    Generate ONE ScopeInsight with scope_type='industry' and scope_name='Advanced Materials' synthesizing across our covered global universe below.
+    Weigh the largest companies and most recent filings most heavily, incorporating Commodity Drivers, Value Chain bottlenecks, Contract Structures, and Key Risks.
 
     === INDUSTRY: Advanced Materials (Total Covered Companies: {len(rows)}) ===
-    {chr(10).join(all_lines[:18])}
-
-    {chr(10).join(theme_blocks)}
+    {chr(10).join(all_lines[:15])}
     """
-    ai_resp = call_gemini(theme_prompt, InsightBatchSchema)
+    ai_resp = call_gemini(industry_prompt, InsightBatchSchema)
     if ai_resp:
+        for item in json.loads(ai_resp.text).get("insights", [])[:1]:
+            item["scope_type"] = "industry"
+            item["scope_name"] = "Advanced Materials"
+            item["top_tickers"] = [t for t in item.get("top_tickers", []) if t in all_tickers_set][:5]
+            all_insights.append(item)
+
+    # 2. Theme synthesis in compact batches of 4 themes (prevents prompt/token truncation on fallback)
+    theme_items = sorted(
+        by_theme.items(),
+        key=lambda x: (-len(x[1]), -theme_max_mcap.get(x[0], 0.0), -theme_latest_ord.get(x[0], 0)),
+    )[:8]
+
+    for i in range(0, len(theme_items), 4):
+        batch = theme_items[i : i + 4]
+        theme_blocks = []
+        allowed_by_theme: dict[str, set[str]] = {}
+        for tname, entries in batch:
+            allowed_by_theme[tname] = {tk for tk, _ in entries}
+            joined = "\n  ".join(ln for _, ln in entries[:5])
+            theme_blocks.append(f"=== THEME: {tname} (Total Covered Companies: {len(entries)}) ===\n  {joined}")
+
+        theme_prompt = f"""
+        You are a Senior Advanced Materials Equity Strategist.
+        Generate ONE ScopeInsight (with scope_type='theme') for EACH theme block below.
+        CRITICAL RULES:
+        - Set scope_name to the EXACT theme title shown after '=== THEME: ' (e.g., {', '.join(repr(k) for k in allowed_by_theme)}).
+        - Synthesize across the multiple companies inside each block (never just one stock when multiple are listed).
+        - Set top_tickers ONLY to tickers present inside that exact theme block.
+
+        {chr(10).join(theme_blocks)}
+        """
+        ai_resp = call_gemini(theme_prompt, InsightBatchSchema)
+        if not ai_resp:
+            break
+        allowed_names = list(allowed_by_theme.keys())
         for item in json.loads(ai_resp.text).get("insights", []):
-            sname = item.get("scope_name")
-            if sname in allowed_by_theme:
-                item["top_tickers"] = [t for t in item.get("top_tickers", []) if t in allowed_by_theme[sname]][:5]
+            matched_name = _match_allowed_scope(item.get("scope_name", ""), allowed_names)
+            if matched_name:
+                item["scope_type"] = "theme"
+                item["scope_name"] = matched_name
+                item["top_tickers"] = [
+                    t for t in item.get("top_tickers", []) if t in allowed_by_theme[matched_name]
+                ][:5]
                 all_insights.append(item)
 
-    # 2. Prioritize uncovered sub-sectors first, then largest company size & most recent filing date
+    # 3. Broad Sub-Industry verticals (max 8 broad buckets, synthesized in batches of 4)
     sub_items = sorted(
         by_sub.items(),
-        key=lambda x: (
-            0 if x[0] not in existing_sub_dates else 1,
-            -sub_max_mcap.get(x[0], 0.0),
-            -sub_latest_ord.get(x[0], 0),
-            str(existing_sub_dates.get(x[0]) or "0001-01-01"),
-        ),
+        key=lambda x: (-len(x[1]), -sub_max_mcap.get(x[0], 0.0), -sub_latest_ord.get(x[0], 0)),
     )
 
-    for i in range(0, len(sub_items), 6):
-        batch = sub_items[i : i + 6]
+    for i in range(0, len(sub_items), 4):
+        batch = sub_items[i : i + 4]
         blocks = []
-        allowed_by_sub = {}
+        allowed_by_sub: dict[str, set[str]] = {}
         for sub_name, entries in batch:
             allowed_by_sub[sub_name] = {tk for tk, _ in entries}
             joined = "\n  ".join(ln for _, ln in entries[:6])
             blocks.append(f"=== SUB-INDUSTRY: {sub_name} (Total Covered Companies: {len(entries)}) ===\n  {joined}")
 
-        prompt = f"""
+        sub_prompt = f"""
         You are a Senior Advanced Materials Equity Strategist.
-        Generate one ScopeInsight (with scope_type='sub_industry') for EACH sub-industry block below.
+        Generate ONE ScopeInsight (with scope_type='sub_industry') for EACH sub-industry block below.
         CRITICAL RULES:
-        - Synthesize across ALL filings listed inside that sub-industry's block (prioritizing the largest companies and most recent filings at the top). NEVER reference tickers from another block.
-        - Incorporate Commodity Drivers, Value Chain counterparties (suppliers, OEMs, competitors), Contract Structures, and Key Risks into key_drivers, pricing_and_margins, and capex_and_supply_chain.
-        - Because every block listed below has at least 1 filing, NEVER say there are no filings or no data.
+        - Set scope_name to the EXACT vertical title shown after '=== SUB-INDUSTRY: ' (e.g., {', '.join(repr(k) for k in allowed_by_sub)}).
+        - Synthesize across ALL covered companies inside that block, comparing leaders, pricing power, and raw material exposure.
         - Set top_tickers ONLY to tickers present inside that exact block.
 
         {chr(10).join(blocks)}
         """
-        ai_resp = call_gemini(prompt, InsightBatchSchema)
+        ai_resp = call_gemini(sub_prompt, InsightBatchSchema)
         if not ai_resp:
             break
+        allowed_names = list(allowed_by_sub.keys())
         for item in json.loads(ai_resp.text).get("insights", []):
-            sname = item.get("scope_name")
-            if sname in allowed_by_sub:
+            matched_name = _match_allowed_scope(item.get("scope_name", ""), allowed_names)
+            if matched_name:
                 item["scope_type"] = "sub_industry"
-                item["top_tickers"] = [t for t in item.get("top_tickers", []) if t in allowed_by_sub[sname]][:5]
+                item["scope_name"] = matched_name
+                item["top_tickers"] = [
+                    t for t in item.get("top_tickers", []) if t in allowed_by_sub[matched_name]
+                ][:5]
                 all_insights.append(item)
 
     if not all_insights:
@@ -1681,6 +1765,18 @@ def generate_scoped_insights(conn):
 
     conn = ensure_conn(conn)
     with conn.cursor() as cur:
+        # Remove any legacy micro-subsector rows not in the canonical 8 broad verticals
+        valid_sub_names = list(by_sub.keys())
+        if valid_sub_names:
+            cur.execute(
+                """
+                DELETE FROM sector_theme_insights
+                WHERE scope_type = 'sub_industry'
+                  AND NOT (scope_name = ANY(%s));
+                """,
+                (valid_sub_names,),
+            )
+
         for item in all_insights:
             stype = item["scope_type"]
             sname = item["scope_name"]
@@ -1711,7 +1807,7 @@ def generate_scoped_insights(conn):
                 item["capex_and_supply_chain"], item["top_tickers"],
             ))
     conn.commit()
-    print(f"Upserted {len(all_insights)} validated industry, sub-industry, and theme insights (zero rows deleted).", flush=True)
+    print(f"Upserted {len(all_insights)} validated industry, broad sub-industry, and theme insights.", flush=True)
     return conn
 
 
