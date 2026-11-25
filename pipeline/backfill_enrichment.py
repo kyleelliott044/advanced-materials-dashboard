@@ -26,6 +26,22 @@ SEC_HEADERS = {
     "Accept-Encoding": "gzip, deflate",
 }
 
+INVALID_COMMODITY_RE = re.compile(
+    r"\b(contract|revenue|customer|oem|backlog|sales|earnings|agreement|segment|business)\b",
+    re.IGNORECASE,
+)
+
+NON_MATERIALS_SC_RE = re.compile(
+    r"\b("
+    r"pharmaceuticals?|oncology|biologics?|vaccines?|therapeutics?|clinical\s+trials?|"
+    r"prescription\s+drugs?|fertility\s+drugs?|monoclonal\s+antibod(y|ies)|"
+    r"frozen\s+foods?|seasonings?|beverages?|snacks?|grocery|supermarkets?|consumer\s+retail|"
+    r"post-?it|scotch\s+tape|building\s+automation|avionics|enterprise\s+software|"
+    r"insurance|banking|walmart|target|cvs|walgreens|kroger|costco"
+    r")\b",
+    re.IGNORECASE,
+)
+
 
 def _build_gemini_client():
     if not GEMINI_API_KEY:
@@ -121,7 +137,7 @@ def ensure_conn(conn):
 
 class CommodityDriverLink(BaseModel):
     commodity_name: str = Field(
-        description="Human-readable name of the specific commodity, feedstock, energy input, or end-market driver (e.g., 'High-Purity Nickel', 'Natural Gas', 'Lithium Carbonate', 'Titanium Sponge', 'Copper Foil'). Never return a ticker symbol or FRED code."
+        description="Clean human-readable name of a physical commodity, raw material, feedstock, energy input, or macro end-market driver (e.g., 'High-Purity Nickel', 'Natural Gas', 'Lithium Carbonate', 'Titanium Sponge', 'Copper Foil'). NEVER return customer contracts, OEM revenue, company products, ticker symbols, or FRED codes."
     )
     matched_input_code: Optional[str] = Field(
         default=None,
@@ -141,7 +157,7 @@ class CommodityDriverLink(BaseModel):
         description="Disclosed % of COGS or revenue if explicitly stated, otherwise null.",
     )
     mechanism_detail: str = Field(
-        description="2-sentence institutional explanation of how this commodity impacts gross margins, surcharges, inventory valuation, or revenue."
+        description="2-sentence institutional explanation of how this specific commodity impacts gross margins, surcharges, inventory valuation, or revenue."
     )
     source_quote: str = Field(
         description="Short verbatim phrase from the filing text referencing this raw material, energy input, or commodity driver."
@@ -172,7 +188,7 @@ class SupplyChainLink(BaseModel):
 
 class EnrichmentBackfillSchema(BaseModel):
     commodity_drivers: List[CommodityDriverLink] = Field(
-        description="3 to 6 specific company-level commodity, raw material, feedstock, and energy drivers."
+        description="1 to 6 specific company-level physical commodities, raw materials, feedstocks, and energy drivers (never pad with customer contracts or revenue lines)."
     )
     upstream_suppliers: List[SupplyChainLink] = Field(
         default_factory=list,
@@ -258,6 +274,10 @@ def _norm_counterparty(name: str) -> str:
         name.lower(),
     )
     return re.sub(r"[^a-z0-9]", "", cleaned)
+
+
+def _is_non_materials_sc(counterparty_name: str, material_or_product: str) -> bool:
+    return bool(NON_MATERIALS_SC_RE.search(f"{counterparty_name} {material_or_product}"))
 
 
 def _call_ai(prompt: str, schema) -> Optional[dict]:
@@ -461,11 +481,19 @@ def _quote_exists(quote: str, source_text: str) -> bool:
 
 def save_enrichment(conn, ticker: str, ftype: str, fdate: str, parsed: dict, source_text: str):
     driver_rows = []
+    seen_commodities = set()
     for d in (parsed.get("commodity_drivers") or []):
         cname = (d.get("commodity_name") or "").strip()
         mech = (d.get("mechanism_detail") or "").strip()
         if not cname or not mech:
             continue
+        if INVALID_COMMODITY_RE.search(cname):
+            continue
+        norm_c = cname.lower()
+        if norm_c in seen_commodities:
+            continue
+        seen_commodities.add(norm_c)
+
         code = (d.get("matched_input_code") or "").strip() or None
         driver_rows.append((
             ticker,
@@ -481,7 +509,7 @@ def save_enrichment(conn, ticker: str, ftype: str, fdate: str, parsed: dict, sou
             (d.get("source_quote") or "")[:350],
         ))
 
-    # Deduplicate counterparties per (direction, normalized company name)
+    # Deduplicate counterparties per (direction, normalized company name) and filter non-materials links
     dedup_sc = {}
     for direction, key in (
         ("upstream_supplier", "upstream_suppliers"),
@@ -492,6 +520,8 @@ def save_enrichment(conn, ticker: str, ftype: str, fdate: str, parsed: dict, sou
             cname = (item.get("counterparty_name") or "").strip()
             mat = (item.get("material_or_product") or "").strip()
             if not cname or not mat:
+                continue
+            if _is_non_materials_sc(cname, mat):
                 continue
             quote = (item.get("source_quote") or "").strip()
             if item.get("is_named_entity") and not _quote_exists(quote, source_text):
@@ -608,6 +638,7 @@ def run_backfill(conn=None):
                     e.sub_sector,
                     e.contract_type,
                     e.qualification_years,
+                    e.adv_mat_rev_pct,
                     e.enrichment_backfilled_at,
                     f.filing_type,
                     f.filing_date::text AS filing_date,
@@ -633,6 +664,7 @@ def run_backfill(conn=None):
                 bf.sub_sector,
                 bf.contract_type,
                 bf.qualification_years,
+                bf.adv_mat_rev_pct,
                 bf.filing_type,
                 bf.filing_date,
                 bf.executive_summary,
@@ -666,6 +698,7 @@ def run_backfill(conn=None):
         sub_sector,
         contract_type,
         _,
+        adv_mat_rev_pct,
         ftype,
         fdate,
         exec_summary,
@@ -696,13 +729,18 @@ def run_backfill(conn=None):
                 pass
 
         full_source_text = f"{filing_excerpt}\n{stored_context}".strip()
+        rev_share_note = f"{adv_mat_rev_pct}% of company revenue" if adv_mat_rev_pct is not None else "specialist segment"
 
         prompt = f"""
         You are an institutional advanced materials equity & supply-chain analyst.
-        Analyze the filing text and parsed summary below for {company_name} ({ticker}) | Sub-sector: {sub_sector} | Contract Structure: {contract_type} | Source: {ftype} ({fdate}).
+        Analyze the filing text and parsed summary below for {company_name} ({ticker}) | Assigned Advanced-Materials Sub-sector: {sub_sector} ({rev_share_note}) | Contract Structure: {contract_type} | Source: {ftype} ({fdate}).
+
+        DOMAIN SCOPE LOCK (CRITICAL):
+        - Extract ONLY drivers and value-chain counterparties tied to {company_name}'s "{sub_sector}" / advanced-materials operations.
+        - If {company_name} is a multi-segment conglomerate, STRICTLY EXCLUDE pharmaceuticals/biologics/healthcare drugs, food/seasonings, consumer/office retail, building automation/avionics, software, and financial services.
 
         Extract TWO structured sets of intelligence:
-        1. commodity_drivers: 3 to 6 specific raw materials, feedstocks, energy inputs, and commodity benchmarks that drive this company's costs, margins, or revenues. Use clean human-readable names (never ticker symbols or FRED codes) and map each to the closest canonical code when applicable:
+        1. commodity_drivers: 1 to 6 physical commodities, raw materials, feedstocks, energy inputs, and macro end-market drivers that drive this company's costs, margins, or revenues. Use clean human-readable names (never ticker symbols, FRED codes, customer contracts, OEM revenue lines, or company products—put customer contracts in downstream_customers instead) and map each to the closest canonical code when applicable:
         {CANONICAL_INPUT_GUIDE}
 
         2. upstream_suppliers, competitors & downstream_customers (list each company at most ONCE per category, combining multiple materials/products into one entry):
