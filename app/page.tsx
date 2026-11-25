@@ -10,7 +10,7 @@ import DashboardClient, {
   SupplyChainRow,
   CommodityDriverRow,
 } from "./DashboardClient";
-import ScopedInsightsPanel from "./ScopedInsightsPanel";
+import ScopedInsightsPanel, { ScopedInsightRow } from "./ScopedInsightsPanel";
 import {
   CompanyProduct,
   ExcludedProduct,
@@ -232,6 +232,50 @@ async function DashboardDataLoader() {
     source_quote: row.source_quote,
   }));
 
+  const products: CompanyProduct[] = rawProducts.map((row: any) => ({
+    id: row.id,
+    ticker: row.ticker,
+    name: row.name,
+    category: row.category,
+    business_unit: row.business_unit,
+    status: row.status === "divested" ? "divested" : "active",
+    as_of: row.as_of,
+    advanced:
+      typeof row.advanced === "string"
+        ? JSON.parse(row.advanced)
+        : row.advanced || {
+            performance_spec: "",
+            qualification_months: null,
+            switching_barrier: "",
+          },
+    raw_materials: Array.isArray(row.raw_materials)
+      ? row.raw_materials
+      : typeof row.raw_materials === "string"
+      ? JSON.parse(row.raw_materials)
+      : [],
+    downstream:
+      typeof row.downstream === "string"
+        ? JSON.parse(row.downstream)
+        : row.downstream || {
+            process_step: "",
+            end_product: "",
+            end_demand: "",
+            demand_proxy_ref: null,
+            customers: null,
+          },
+    pricing_structure: row.pricing_structure ?? null,
+    revenue:
+      typeof row.revenue === "string"
+        ? JSON.parse(row.revenue)
+        : row.revenue || { basis: "business_unit", share_pct: null },
+    peers: Array.isArray(row.peers) ? row.peers : [],
+    src:
+      typeof row.src === "string"
+        ? JSON.parse(row.src)
+        : row.src || { type: "inferred", ref: null },
+    conf: row.conf || "med",
+  }));
+
   const narrative = (narratives[0] as MacroNarrativeRow) || null;
 
   return (
@@ -244,11 +288,11 @@ async function DashboardDataLoader() {
         narrative={narrative}
         supplyChain={supplyChain}
         commodityDrivers={commodityDrivers}
-        products={rawProducts as CompanyProduct[]}
+        products={products}
         excludedProducts={rawExcluded as ExcludedProduct[]}
         productProfiles={rawProfiles as CompanyProductProfile[]}
       />
-      <ScopedInsightsPanel insights={insights as any[]} />
+      <ScopedInsightsPanel insights={insights as ScopedInsightRow[]} />
     </>
   );
 }
