@@ -12,6 +12,7 @@ from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
+from ai_usage_logger import record_ai_usage
 
 warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
 
