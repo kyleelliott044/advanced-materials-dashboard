@@ -1499,6 +1499,14 @@ export default function DashboardClient({
     setSelectedMaterialSlug(null);
   };
 
+  const handleFilterByCountry = (country: string) => {
+  setCountryFilter(country);
+  setSelectedTicker(null);
+  setHighlightedProductName(null);
+  setSelectedMaterialSlug(null);
+  setActiveTab("screener");
+};
+
   const handleOpenMaterialInAtlas = (
     materialNameOrSlug: string,
     preferKind?: "raw" | "advanced" | "end_market",
@@ -2164,18 +2172,28 @@ export default function DashboardClient({
                               </div>
                             )}
                           </td>
-                          <td className="py-3.5 px-4 text-xs text-slate-300 whitespace-nowrap">
-                            {eq.country ? (
-                              <span className="inline-flex items-center gap-1.5">
-                                <span className="text-sm leading-none">
-                                  {getCountryFlag(eq.country)}
-                                </span>
+                         <td className="py-3.5 px-4 text-xs text-slate-300 whitespace-nowrap">
+                          {eq.country ? (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setCountryFilter(countryFilter === eq.country ? "ALL" : eq.country!);
+                              }}
+                              title={
+                                countryFilter === eq.country
+                                  ? `Clear ${eq.country} filter`
+                                  : `Filter by ${eq.country}`
+                              }
+                                className="inline-flex items-center gap-1.5 rounded px-1.5 py-0.5 -mx-1.5 hover:bg-sky-500/15 hover:text-sky-300 transition"
+                            >
+                                <span className="text-sm leading-none">{getCountryFlag(eq.country)}</span>
                                 <span>{eq.country}</span>
-                              </span>
-                            ) : (
-                              "—"
-                            )}
-                          </td>
+                            </button>
+                          ) : (
+                            "—"
+                          )}
+                       </td>
                           <td className="py-3.5 px-4 text-right font-mono text-xs text-slate-200 whitespace-nowrap">
                             {formatMarketCap(eq.market_cap_usd)}
                           </td>
@@ -2860,10 +2878,21 @@ export default function DashboardClient({
                         {selectedEquity.sub_sector}
                       </span>
                     )}
-                    {selectedEquity.country && (
-                      <span className="px-2.5 py-0.5 rounded-full text-xs bg-slate-800/90 text-slate-300 border border-slate-700/70">
-                        {selectedEquity.country}
-                      </span>
+                                        {selectedEquity.country && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setCountryFilter(selectedEquity.country!);
+                          setSelectedTicker(null);
+                          setHighlightedProductName(null);
+                          setSelectedMaterialSlug(null);
+                          setActiveTab("screener");
+                        }}
+                        title={`Filter universe by ${selectedEquity.country}`}
+                        className="px-2.5 py-0.5 rounded-full text-xs bg-slate-800/90 text-slate-300 border border-slate-700/70 hover:bg-sky-500/15 hover:text-sky-300 hover:border-sky-500/40 transition"
+                      >
+                        {getCountryFlag(selectedEquity.country)} {selectedEquity.country} ↗
+                      </button>
                     )}
                   </div>
                   <h2 className="text-lg font-semibold text-white">
