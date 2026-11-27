@@ -1197,9 +1197,90 @@ export default function DashboardClient({
     [equities, selectedTicker]
   );
 
-  const selectedEquityProducts = selectedTicker
-    ? tickerProductsMap[selectedTicker] || []
-    : [];
+ const materialById = useMemo(() => {
+    const map = new Map<number, MaterialRecord>();
+    for (const m of materials) map.set(m.id, m);
+    return map;
+  }, [materials]);
+
+  const selectedEquityMaterialLinks = useMemo(() => {
+    if (!selectedTicker) return [];
+    return materialLinks.filter((l) => l.ticker === selectedTicker);
+  }, [selectedTicker, materialLinks]);
+
+  const selectedEquityProducts = useMemo(() => {
+    if (!selectedTicker) return [];
+
+    // 1. Prefer verified T2 sells / makes_captive rows from `company_material_links`
+    const soldOrCaptive = selectedEquityMaterialLinks.filter((l) => {
+      if (l.role !== "sells" && l.role !== "makes_captive") return false;
+      const mat = materialById.get(l.material_id);
+      return Boolean(mat && mat.tier === "T2");
+    });
+
+    if (soldOrCaptive.length > 0) {
+      const consumedInputs = selectedEquityMaterialLinks
+        .filter((l) => l.role === "consumes")
+        .map((l) => {
+          const mat = materialById.get(l.material_id);
+          return mat
+            ? {
+                name: mat.canonical_name,
+                commodity_ref: mat.registry_code,
+                role: "input",
+                basis: "disclosed" as const,
+              }
+            : null;
+        })
+        .filter((x): x is NonNullable<typeof x> => Boolean(x));
+
+      return soldOrCaptive.map((l, idx): CompanyProduct => {
+        const mat = materialById.get(l.material_id)!;
+        return {
+          id: `link-${selectedTicker}-${l.material_id}-${idx}`,
+          ticker: selectedTicker,
+          name: l.product_name || mat.canonical_name,
+          category: mat.canonical_name,
+          business_unit:
+            l.business_unit || selectedEquity?.sub_sector || "Core Materials",
+          status: "active",
+          as_of: l.source_section || "Verified Filing",
+          advanced: {
+            performance_spec:
+              l.performance_spec ||
+              mat.summary ||
+              "Customer-qualified T2 material",
+            qualification_months: null,
+            switching_barrier: "Process requalification required",
+          },
+          raw_materials: consumedInputs,
+          downstream: {
+            process_step: "Customer manufacturing process",
+            end_product: l.end_demand || "Engineered end-product",
+            end_demand: l.end_demand || mat.material_group,
+            demand_proxy_ref: null,
+            customers: null,
+          },
+          pricing_structure: null,
+          revenue: { basis: "business_unit", share_pct: null },
+          peers: [],
+          src: { type: "filing", ref: l.source_section },
+          conf: (l.confidence as "high" | "med" | "low") || "high",
+        };
+      });
+    }
+
+    // 2. Fallback to legacy `company_products` (filtering out fragments <= 4 chars like "Bio")
+    return (tickerProductsMap[selectedTicker] || []).filter(
+      (p) => p.name.trim().length > 4 && p.category.trim().length > 4
+    );
+  }, [
+    selectedTicker,
+    selectedEquityMaterialLinks,
+    materialById,
+    selectedEquity,
+    tickerProductsMap,
+  ]);
 
   const selectedEquityExcluded = selectedTicker
     ? tickerExcludedMap[selectedTicker] || []
