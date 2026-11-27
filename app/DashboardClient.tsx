@@ -12,6 +12,67 @@ import {
   RolledUpDrivers,
 } from "../lib/productRollup";
 
+export interface FilingMetricsRow {
+  ticker: string;
+  source_type: string;
+  filing_type: string;
+  fiscal_period: string;
+  filing_date: string;
+  period_end_date: string;
+  currency: string;
+  revenue: string | number | null;
+  revenue_yoy_pct: string | number | null;
+  gross_profit: string | number | null;
+  gross_margin_pct: string | number | null;
+  gross_margin_yoy_bps: number | null;
+  operating_income: string | number | null;
+  operating_margin_pct: string | number | null;
+  net_income: string | number | null;
+  operating_cash_flow: string | number | null;
+  capex: string | number | null;
+  capex_pct_rev: string | number | null;
+  free_cash_flow: string | number | null;
+  rd_expense: string | number | null;
+  rd_pct_rev: string | number | null;
+  inventory: string | number | null;
+  inventory_days: number | null;
+  cash_and_equivalents: string | number | null;
+  total_debt: string | number | null;
+  net_debt: string | number | null;
+  source_url: string | null;
+}
+
+function formatFilingAmount(
+  val: string | number | null | undefined,
+  currency: string = "USD"
+): string {
+  if (val == null || val === "") return "—";
+  const num = Number(val);
+  if (Number.isNaN(num)) return "—";
+  const sign = num < 0 ? "-" : "";
+  const abs = Math.abs(num);
+  const prefix = currency === "USD" ? "$" : `${currency} `;
+  if (abs >= 1e12) return `${sign}${prefix}${(abs / 1e12).toFixed(2)}T`;
+  if (abs >= 1e9) return `${sign}${prefix}${(abs / 1e9).toFixed(2)}B`;
+  if (abs >= 1e6) return `${sign}${prefix}${(abs / 1e6).toFixed(1)}M`;
+  if (abs >= 1e3) return `${sign}${prefix}${(abs / 1e3).toFixed(0)}K`;
+  return `${sign}${prefix}${abs.toLocaleString()}`;
+}
+
+function formatSignedPct(val: string | number | null | undefined): string {
+  if (val == null || val === "") return "—";
+  const num = Number(val);
+  if (Number.isNaN(num)) return "—";
+  return `${num >= 0 ? "+" : ""}${num.toFixed(1)}% YoY`;
+}
+
+function formatMarginPct(val: string | number | null | undefined): string {
+  if (val == null || val === "") return "—";
+  const num = Number(val);
+  if (Number.isNaN(num)) return "—";
+  return `${num.toFixed(1)}%`;
+}
+
 export interface EquityRow {
   ticker: string;
   company_name: string;
