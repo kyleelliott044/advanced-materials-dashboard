@@ -3147,10 +3147,7 @@ export default function DashboardClient({
                                 >
                                   {prod.name} ↗
                                 </button>
-
-                                <span className="text-slate-500 font-mono">
-                                  &rarr;
-                                </span>
+                                
                                 {prod.downstream.end_demand && (
                                   <>
                                     <span className="text-slate-500 font-mono">
