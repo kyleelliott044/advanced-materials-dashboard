@@ -69,8 +69,9 @@ const INVALID_RAW_TOKENS_RE =
 
 const DANGLING_CONJUNCTION_RE = /^(and|or|&|,|-)\b|\b(and|or|&|,|-)$/i;
 
-const GENERIC_ADV_BUCKET_RE =
-  /^(electronic\s+materials?|advanced\s+materials?(\s+portfolio)?|specialty\s+materials?|performance\s+chemicals?|engineered\s+materials?|industrial\s+materials?|semiconductor\s+materials?|battery\s+materials?)$/i;
+// Reject overly vague single-word or umbrella buckets in All Advanced Materials
+const VAGUE_ADV_BUCKET_RE =
+  /^(electronic\s+materials?|advanced\s+materials?(\s+portfolio)?|specialty\s+materials?|performance\s+chemicals?|engineered\s+materials?|industrial\s+materials?|semiconductor\s+materials?|battery\s+materials?|materials?|chemicals?|polymers?|resins?|metals?|alloys?|mining|rare\s+earth\s+mining|specialty\s+chemicals?|industrial\s+chemicals?|composite\s+materials?|advanced\s+polymers?|electronic\s+chemicals?)$/i;
 
 const CANONICAL_CODE_NAMES: Record<string, string> = {
   "HG=F": "Copper",
@@ -85,7 +86,7 @@ const CANONICAL_CODE_NAMES: Record<string, string> = {
   PNICKUSDM: "Nickel",
   PCOBAUSDM: "Cobalt",
   PNGASEUUSDM: "Natural Gas",
-  WPU101: "Iron & Steel",
+  WPU101: "Iron and Steel",
   NDPR_CN: "Neodymium-Praseodymium (NdPr) Oxide",
   LICARB_CN: "Lithium Carbonate",
   GALLIUM_9999: "Gallium",
@@ -228,42 +229,65 @@ const RAW_MATERIAL_ALIASES: Record<string, string> = {
   cellulose: "Dissolving Wood Pulp",
   "lactic acid": "Lactic Acid",
   "iron ore": "Iron Ore",
-  "steel scrap": "Ferrous & Alloy Steel Scrap",
+  "steel scrap": "Ferrous and Alloy Steel Scrap",
   "stainless steel scrap": "Stainless Steel Scrap",
   "nickel scrap": "Nickel Superalloy Scrap",
-  "iron & steel": "Iron & Steel",
-  "iron and steel": "Iron & Steel",
+  "iron & steel": "Iron and Steel",
+  "iron and steel": "Iron and Steel",
 };
 
+// Exact canonical mappings for Advanced Material classes (always using "and", never "&")
 const ADV_MATERIAL_ALIASES: Record<string, string> = {
-  "photoresists semicon chem": "Photoresists & Semiconductor Chemicals",
-  "photoresists semiconductor chemicals": "Photoresists & Semiconductor Chemicals",
-  "semicon packaging chemicals": "Semiconductor Packaging & Chemicals",
-  "semiconductor packaging chemicals": "Semiconductor Packaging & Chemicals",
-  "compound semicon photonics": "Compound Semiconductors & Photonics",
-  "compound semiconductors photonics": "Compound Semiconductors & Photonics",
-  "natural graphite anode mat": "Natural Graphite Anode Materials",
+  gases: "Industrial and Specialty Gases",
+  "industrial gases": "Industrial and Specialty Gases",
+  "specialty gases": "Industrial and Specialty Gases",
+  "rare earth mining and magnets": "Rare Earth Permanent Magnets",
+  "rare earth mining": "Rare Earth Oxides and Metals",
+  "ndfeb permanent magnets": "Rare Earth Permanent Magnets",
+  "rare earth permanent magnets": "Rare Earth Permanent Magnets",
+  "rare earth oxides and metals": "Rare Earth Oxides and Metals",
+  "polyurethane": "Polyurethanes and Isocyanates",
+  "polyurethanes": "Polyurethanes and Isocyanates",
+  "polyurethane and isocyanates": "Polyurethanes and Isocyanates",
+  "polyurethanes and isocyanates": "Polyurethanes and Isocyanates",
+  "polyurethane and elastomers": "Polyurethanes and Isocyanates",
+  "polyurethane and coatings": "Polyurethanes and Isocyanates",
+  "specialty steel": "Specialty Steel and Alloys",
+  "specialty steel and alloys": "Specialty Steel and Alloys",
+  "stainless and specialty steel": "Specialty Steel and Alloys",
+  "stainless and high performance alloys": "Stainless and High-Performance Alloys",
+  "photoresists and semiconductor chemicals": "Photoresists and Semiconductor Chemicals",
+  "semiconductor packaging and chemicals": "Semiconductor Packaging Materials",
+  "semiconductor packaging": "Semiconductor Packaging Materials",
+  "compound semiconductors and photonics": "Compound Semiconductors and Photonics",
   "natural graphite anode materials": "Natural Graphite Anode Materials",
-  "stainless high perf alloys": "Stainless & High-Performance Alloys",
-  "stainless high performance alloys": "Stainless & High-Performance Alloys",
-  "fluoropolymers titanium tech": "Fluoropolymers & Titanium Technologies",
-  "fluoropolymers titanium technologies": "Fluoropolymers & Titanium Technologies",
+  "synthetic graphite anodes": "Synthetic Graphite Anode Materials",
+  "synthetic graphite anode materials": "Synthetic Graphite Anode Materials",
+  "fluoropolymers and titanium technologies": "Fluoropolymers and PTFE Resins",
+  "fluoropolymers": "Fluoropolymers and PTFE Resins",
   "copper clad laminates": "Copper Clad Laminates (CCL)",
-  "high speed ccl": "High-Speed Copper Clad Laminates (CCL)",
-  "high frequency ccl": "High-Frequency Copper Clad Laminates (CCL)",
+  "high speed copper clad laminates": "High-Speed Copper Clad Laminates (CCL)",
+  "high frequency copper clad laminates": "High-Speed Copper Clad Laminates (CCL)",
   "silicon wafer": "Silicon Wafers",
   "silicon wafers": "Silicon Wafers",
+  "silicon wafers and pvc": "Silicon Wafers",
+  "engineered soi wafers": "Engineered SOI Wafers",
   "silicon carbide wafer": "Silicon Carbide (SiC) Wafers",
   "silicon carbide wafers": "Silicon Carbide (SiC) Wafers",
   "sic wafers": "Silicon Carbide (SiC) Wafers",
-  "cmp slurries": "CMP Slurries & Pads",
-  "cmp slurries pads": "CMP Slurries & Pads",
-  "cmp slurries wet chemicals": "CMP Slurries & Wet Chemicals",
-  "ndfeb permanent magnets": "NdFeB Permanent Magnets",
-  "rare earth permanent magnets": "NdFeB Permanent Magnets",
+  "cmp slurries": "CMP Slurries and Pads",
+  "cmp slurries and pads": "CMP Slurries and Pads",
+  "cmp slurries and wet chemicals": "CMP Slurries and Pads",
+  "cmp slurries and abrasives": "CMP Slurries and Pads",
   "high nickel cathodes": "High-Nickel Cathode Materials",
   "high nickel cathode materials": "High-Nickel Cathode Materials",
+  "cathodes and synthetic anodes": "High-Nickel Cathode Materials",
   "cathode active materials": "High-Nickel Cathode Materials",
+  "olefins and polyolefins": "Polyolefins and Engineered Resins",
+  "packaging and specialty plastics": "Polyolefins and Engineered Resins",
+  "integrated chemicals and materials": "Integrated Specialty Chemicals",
+  "medical devices and biomaterials": "Biocompatible Polymers and Biomaterials",
+  "biomaterials": "Biocompatible Polymers and Biomaterials",
 };
 
 const PRESERVE_UPPER_TOKENS = new Set([
@@ -357,12 +381,13 @@ function canonicalizeRawMaterial(
   let cleaned = (rawName || "").trim();
   if (!cleaned) return null;
 
-  // Reject compound overhead/logistics/generic phrases BEFORE stripping substrings
   if (INVALID_RAW_TOKENS_RE.test(cleaned)) {
     return null;
   }
 
   cleaned = cleaned.replace(/\s*\([^)]*\)/g, " ");
+  cleaned = cleaned.replace(/\./g, "");
+  cleaned = cleaned.replace(/\s*&\s*/g, " and ");
   cleaned = cleaned.replace(
     /\b(futures?|spot|benchmarks?|ind(ex|ices)|prices?|pricing|contracts?|quotes?)\b/gi,
     " "
@@ -377,7 +402,6 @@ function canonicalizeRawMaterial(
     .trim()
     .replace(/^[-–—,:;]+|[-–—,:;]+$/g, "");
 
-  // Reject empty, too-short, or dangling conjunction strings ("And components", "Plastic resins and")
   if (
     !cleaned ||
     cleaned.length < 3 ||
@@ -387,7 +411,7 @@ function canonicalizeRawMaterial(
     return null;
   }
 
-  const lookupKey = cleaned.toLowerCase().replace(/[^a-z0-9&]+/g, " ").trim();
+  const lookupKey = cleaned.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
   if (RAW_MATERIAL_ALIASES[lookupKey]) {
     return RAW_MATERIAL_ALIASES[lookupKey];
   }
@@ -395,29 +419,54 @@ function canonicalizeRawMaterial(
   return toCanonicalTitleCase(cleaned);
 }
 
-function canonicalizeAdvancedMaterial(rawName: string): string {
-  let expanded = (rawName || "").trim();
-  expanded = expanded.replace(/\s*\([^)]*\)/g, " ");
-  expanded = expanded
+function canonicalizeAdvancedMaterial(rawName: string): string | null {
+  let cleaned = (rawName || "").trim();
+  if (!cleaned) return null;
+
+  // Capture preserved parenthetical acronyms before stripping parens
+  const originalAcronym = cleaned.match(/\((CCL|SiC|SOI|ABF|HBM|OLED|EV|PTFE)\)/i);
+
+  // 1. Strip stray periods and normalize slashes / ampersands uniformly to "and"
+  cleaned = cleaned
+    .replace(/\s*\([^)]*\)/g, " ")
+    .replace(/\./g, "")
+    .replace(/\s*&\s*/g, " and ")
+    .replace(/\s*\/\s*/g, " and ");
+
+  // 2. Expand all abbreviations to full canonical words
+  cleaned = cleaned
     .replace(/\bsemicon\b/gi, "Semiconductor")
+    .replace(/\bpkg\b/gi, "Packaging")
+    .replace(/\bind\b/gi, "Industrial")
     .replace(/\bchem\b/gi, "Chemicals")
-    .replace(/\bmat\.?\b/gi, "Materials")
+    .replace(/\bmat\b/gi, "Materials")
     .replace(/\bhigh[- ]perf\b/gi, "High-Performance")
     .replace(/\btech\b/gi, "Technologies")
+    .replace(/\bmfg\b/gi, "Manufacturing")
+    .replace(/\bmining\b/gi, "")
     .replace(/\s+/g, " ")
-    .trim();
+    .trim()
+    .replace(/^[-–—,:;]+|[-–—,:;]+$/g, "");
 
-  const lookupKey = expanded
+  if (!cleaned || cleaned.length < 3 || VAGUE_ADV_BUCKET_RE.test(cleaned)) {
+    return null;
+  }
+
+  const lookupKey = cleaned
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
+
+  // 3. Consolidate polyurethane variants into one canonical class
+  if (lookupKey.startsWith("polyurethane")) {
+    return "Polyurethanes and Isocyanates";
+  }
+
   if (ADV_MATERIAL_ALIASES[lookupKey]) {
     return ADV_MATERIAL_ALIASES[lookupKey];
   }
 
-  // Re-attach preserved parenthetical acronym if originally present
-  const originalAcronym = (rawName || "").match(/\((CCL|SiC|SOI|ABF|HBM|OLED|EV)\)/i);
-  const formatted = toCanonicalTitleCase(expanded);
+  const formatted = toCanonicalTitleCase(cleaned);
   if (originalAcronym && !formatted.includes(originalAcronym[0].toUpperCase())) {
     return `${formatted} (${originalAcronym[1].toUpperCase()})`;
   }
@@ -476,6 +525,7 @@ function normalizeMaterialKey(name: string): string {
   return name
     .toLowerCase()
     .replace(/\s*\([^)]*\)/g, "")
+    .replace(/\s*&\s*/g, " and ")
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
 }
@@ -715,7 +765,7 @@ export function buildMaterialsAtlas({
     );
 
   // =========================================================================
-  // 2. ALL ADVANCED MATERIALS (Normalized & Abbreviation-Expanded)
+  // 2. ALL ADVANCED MATERIALS (Normalized, Deduplicated, No Abbreviations)
   // =========================================================================
   interface AdvBucket {
     name: string;
@@ -730,8 +780,10 @@ export function buildMaterialsAtlas({
   const getOrCreateAdvBucket = (
     matName: string,
     categoryLabel: string
-  ): AdvBucket => {
+  ): AdvBucket | null => {
     const formattedName = canonicalizeAdvancedMaterial(matName);
+    if (!formattedName) return null;
+
     const key = normalizeMaterialKey(formattedName) || formattedName.toLowerCase();
     let bucket = advBuckets.get(key);
     if (!bucket) {
@@ -755,15 +807,15 @@ export function buildMaterialsAtlas({
   for (const prod of products) {
     if (prod.status !== "active") continue;
     const rawCat = (prod.category || prod.name || "").trim();
-    const catName =
-      GENERIC_ADV_BUCKET_RE.test(rawCat) &&
+    const candidate =
+      VAGUE_ADV_BUCKET_RE.test(rawCat) &&
       prod.name &&
-      !GENERIC_ADV_BUCKET_RE.test(prod.name)
+      !VAGUE_ADV_BUCKET_RE.test(prod.name)
         ? prod.name
         : rawCat;
-    if (!catName || GENERIC_ADV_BUCKET_RE.test(catName)) continue;
+    const bucket = getOrCreateAdvBucket(candidate, "Advanced Material Class");
+    if (!bucket) continue;
 
-    const bucket = getOrCreateAdvBucket(catName, "Advanced Material Class");
     if (prod.advanced?.performance_spec && bucket.specs.length < 3) {
       bucket.specs.push(prod.advanced.performance_spec);
     }
@@ -798,8 +850,10 @@ export function buildMaterialsAtlas({
   }
 
   for (const eq of equities) {
-    if (!eq.sub_sector || GENERIC_ADV_BUCKET_RE.test(eq.sub_sector)) continue;
+    if (!eq.sub_sector) continue;
     const bucket = getOrCreateAdvBucket(eq.sub_sector, "Universe Vertical");
+    if (!bucket) continue;
+
     if (!bucket.companies.has(eq.ticker)) {
       bucket.companies.set(eq.ticker, {
         ticker: eq.ticker,
