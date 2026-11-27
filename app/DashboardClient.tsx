@@ -2107,7 +2107,7 @@ export default function DashboardClient({
                 </div>
               </div>
 
-              {/* Clean Segmented Navigation Tabs */}
+             {/* Clean Segmented Navigation Tabs */}
               <div className="flex items-center gap-1.5 overflow-x-auto pt-0.5">
                 {[
                   {
@@ -2129,6 +2129,11 @@ export default function DashboardClient({
                     id: "filings" as DossierTab,
                     label: "Filings & Briefs",
                     count: selectedEquityFilings.length,
+                  },
+                  {
+                    id: "metrics" as DossierTab,
+                    label: "Key Metrics",
+                    count: selectedEquityMetrics ? 1 : 0,
                   },
                 ].map((tab) => {
                   const active = dossierTab === tab.id;
@@ -2157,7 +2162,6 @@ export default function DashboardClient({
                   );
                 })}
               </div>
-            </div>
 
             {/* Scrollable Dossier Tab Body */}
             <div className="flex-1 overflow-y-auto p-6 space-y-5">
