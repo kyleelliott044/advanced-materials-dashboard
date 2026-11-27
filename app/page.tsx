@@ -10,6 +10,7 @@ import DashboardClient, {
   MacroNarrativeRow,
   SupplyChainRow,
   CommodityDriverRow,
+  FilingMetricsRow,
 } from "./DashboardClient";
 import ScopedInsightsPanel, { ScopedInsightRow } from "./ScopedInsightsPanel";
 import {
@@ -34,6 +35,7 @@ async function DashboardDataLoader() {
     rawProducts,
     rawExcluded,
     rawProfiles,
+    rawFilingMetrics,
   ] = await Promise.all([
     sql`
       SELECT
@@ -196,6 +198,37 @@ async function DashboardDataLoader() {
       SELECT ticker, note
       FROM company_product_profiles
     `.catch(() => []),
+    sql`
+      SELECT
+        ticker,
+        source_type,
+        filing_type,
+        fiscal_period,
+        filing_date::text AS filing_date,
+        period_end_date::text AS period_end_date,
+        currency,
+        revenue,
+        revenue_yoy_pct,
+        gross_profit,
+        gross_margin_pct,
+        gross_margin_yoy_bps,
+        operating_income,
+        operating_margin_pct,
+        net_income,
+        operating_cash_flow,
+        capex,
+        capex_pct_rev,
+        free_cash_flow,
+        rd_expense,
+        rd_pct_rev,
+        inventory,
+        inventory_days,
+        cash_and_equivalents,
+        total_debt,
+        net_debt,
+        source_url
+      FROM equity_filing_metrics
+    `.catch(() => []),
   ]);
 
   const equities: EquityRow[] = rawEquities.map((row) => ({
@@ -300,6 +333,7 @@ async function DashboardDataLoader() {
         products={products}
         excludedProducts={rawExcluded as ExcludedProduct[]}
         productProfiles={rawProfiles as CompanyProductProfile[]}
+        filingMetrics={rawFilingMetrics as FilingMetricsRow[]}
       />
       <ScopedInsightsPanel insights={insights as ScopedInsightRow[]} />
       <footer className="max-w-7xl mx-auto px-6 pb-8 pt-4 flex items-center justify-between text-[11px] font-mono text-slate-500 border-t border-slate-800/60">
@@ -329,41 +363,4 @@ export default function HomePage() {
       </Suspense>
     </div>
   );
-}
-
-let filingMetrics: any[] = [];
-try {
-  filingMetrics = await sql`
-    SELECT
-      ticker,
-      source_type,
-      filing_type,
-      fiscal_period,
-      filing_date::text AS filing_date,
-      period_end_date::text AS period_end_date,
-      currency,
-      revenue,
-      revenue_yoy_pct,
-      gross_profit,
-      gross_margin_pct,
-      gross_margin_yoy_bps,
-      operating_income,
-      operating_margin_pct,
-      net_income,
-      operating_cash_flow,
-      capex,
-      capex_pct_rev,
-      free_cash_flow,
-      rd_expense,
-      rd_pct_rev,
-      inventory,
-      inventory_days,
-      cash_and_equivalents,
-      total_debt,
-      net_debt,
-      source_url
-    FROM equity_filing_metrics;
-  `;
-} catch {
-  filingMetrics = [];
 }
