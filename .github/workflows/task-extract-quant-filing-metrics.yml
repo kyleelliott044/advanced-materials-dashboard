@@ -1,4 +1,4 @@
-name: Task: Extract Quantitative Filing Metrics
+name: "Task: Extract Quantitative Filing Metrics"
 
 on:
   schedule:
