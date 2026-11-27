@@ -69,9 +69,26 @@ const INVALID_RAW_TOKENS_RE =
 
 const DANGLING_CONJUNCTION_RE = /^(and|or|&|,|-)\b|\b(and|or|&|,|-)$/i;
 
-// Reject overly vague single-word or umbrella buckets in All Advanced Materials
-const VAGUE_ADV_BUCKET_RE =
-  /^(electronic\s+materials?|advanced\s+materials?(\s+portfolio)?|specialty\s+materials?|performance\s+chemicals?|engineered\s+materials?|industrial\s+materials?|semiconductor\s+materials?|battery\s+materials?|materials?|chemicals?|polymers?|resins?|metals?|alloys?|mining|rare\s+earth\s+mining|specialty\s+chemicals?|industrial\s+chemicals?|composite\s+materials?|advanced\s+polymers?|electronic\s+chemicals?)$/i;
+// Vague umbrellas or non-material assemblies/processes that should never form a standalone card
+const VAGUE_OR_NON_MATERIAL_ADV_RE =
+  /^(electronic|electronic\s+materials?|advanced\s+materials?(\s+portfolio)?|specialty\s+materials?|performance\s+chemicals?|engineered\s+materials?|industrial\s+materials?|semiconductor\s+materials?|battery\s+materials?|materials?|chemicals?|polymers?|resins?|plastics?|metals?|alloys?|mining|rare\s+earth\s+mining|specialty\s+chemicals?|industrial\s+chemicals?|composite\s+materials?|advanced\s+polymers?|electronic\s+chemicals?|batteries|battery\s+cells?|devices?|parts?|components?)$/i;
+
+// Cohesive phrases where "and" belongs inside a single material class (do NOT split on "and")
+const COHESIVE_AND_CLASSES = new Set([
+  "cmp slurries and pads",
+  "specialty steel and alloys",
+  "stainless and high performance alloys",
+  "industrial and specialty gases",
+  "polyurethanes and isocyanates",
+  "polyolefins and engineered resins",
+  "rare earth oxides and metals",
+  "lithium hydroxide and carbonate",
+  "fluoropolymers and fluorochemicals",
+  "compound semiconductors and photonics",
+  "photoresists and semiconductor chemicals",
+  "biocompatible polymers and biomaterials",
+  "optical fiber and display glass",
+]);
 
 const CANONICAL_CODE_NAMES: Record<string, string> = {
   "HG=F": "Copper",
@@ -236,35 +253,59 @@ const RAW_MATERIAL_ALIASES: Record<string, string> = {
   "iron and steel": "Iron and Steel",
 };
 
-// Exact canonical mappings for Advanced Material classes (always using "and", never "&")
+// Canonical mappings for individual Advanced Material classes (post-split)
 const ADV_MATERIAL_ALIASES: Record<string, string> = {
+  // Case Study 1: Battery Electrolytes & Fluorochem
+  "battery electrolyte": "Battery Electrolytes",
+  "battery electrolytes": "Battery Electrolytes",
+  fluorochem: "Fluoropolymers and Fluorochemicals",
+  fluorochemicals: "Fluoropolymers and Fluorochemicals",
+  fluoropolymers: "Fluoropolymers and Fluorochemicals",
+  "fluoropolymers and titanium technologies": "Fluoropolymers and Fluorochemicals",
+
+  // Case Study 2: Carbon Fiber, Advanced Films, Tire Cord
+  "carbon fiber": "Carbon Fiber Composites",
+  "carbon fibers": "Carbon Fiber Composites",
+  "carbon fiber composites": "Carbon Fiber Composites",
+  "aerospace carbon fiber composites": "Carbon Fiber Composites",
+  "advanced films": "Advanced Polymer Films",
+  "polymer films": "Advanced Polymer Films",
+  "tire cord": "Industrial Tire Cord Fabrics",
+  "tire cord fabrics": "Industrial Tire Cord Fabrics",
+
+  // Case Study 4: Lithium Refining -> Lithium Hydroxide & Carbonate
+  "lithium refining": "Lithium Hydroxide and Carbonate",
+  "lithium chemicals": "Lithium Hydroxide and Carbonate",
+  "lithium carbonate": "Lithium Hydroxide and Carbonate",
+  "lithium hydroxide": "Lithium Hydroxide and Carbonate",
+
+  // Gases, Rare Earths, Polyurethanes, Steels, Semis
   gases: "Industrial and Specialty Gases",
   "industrial gases": "Industrial and Specialty Gases",
   "specialty gases": "Industrial and Specialty Gases",
   "rare earth mining and magnets": "Rare Earth Permanent Magnets",
-  "rare earth mining": "Rare Earth Oxides and Metals",
+  "rare earth magnets": "Rare Earth Permanent Magnets",
   "ndfeb permanent magnets": "Rare Earth Permanent Magnets",
   "rare earth permanent magnets": "Rare Earth Permanent Magnets",
+  "rare earth oxides": "Rare Earth Oxides and Metals",
+  "rare earth metals": "Rare Earth Oxides and Metals",
   "rare earth oxides and metals": "Rare Earth Oxides and Metals",
-  "polyurethane": "Polyurethanes and Isocyanates",
-  "polyurethanes": "Polyurethanes and Isocyanates",
-  "polyurethane and isocyanates": "Polyurethanes and Isocyanates",
+  polyurethane: "Polyurethanes and Isocyanates",
+  polyurethanes: "Polyurethanes and Isocyanates",
   "polyurethanes and isocyanates": "Polyurethanes and Isocyanates",
-  "polyurethane and elastomers": "Polyurethanes and Isocyanates",
-  "polyurethane and coatings": "Polyurethanes and Isocyanates",
   "specialty steel": "Specialty Steel and Alloys",
   "specialty steel and alloys": "Specialty Steel and Alloys",
   "stainless and specialty steel": "Specialty Steel and Alloys",
   "stainless and high performance alloys": "Stainless and High-Performance Alloys",
+  photoresists: "Photoresists and Semiconductor Chemicals",
   "photoresists and semiconductor chemicals": "Photoresists and Semiconductor Chemicals",
-  "semiconductor packaging and chemicals": "Semiconductor Packaging Materials",
   "semiconductor packaging": "Semiconductor Packaging Materials",
+  "semiconductor packaging and chemicals": "Semiconductor Packaging Materials",
+  "compound semiconductors": "Compound Semiconductors and Photonics",
   "compound semiconductors and photonics": "Compound Semiconductors and Photonics",
   "natural graphite anode materials": "Natural Graphite Anode Materials",
   "synthetic graphite anodes": "Synthetic Graphite Anode Materials",
   "synthetic graphite anode materials": "Synthetic Graphite Anode Materials",
-  "fluoropolymers and titanium technologies": "Fluoropolymers and PTFE Resins",
-  "fluoropolymers": "Fluoropolymers and PTFE Resins",
   "copper clad laminates": "Copper Clad Laminates (CCL)",
   "high speed copper clad laminates": "High-Speed Copper Clad Laminates (CCL)",
   "high frequency copper clad laminates": "High-Speed Copper Clad Laminates (CCL)",
@@ -285,9 +326,8 @@ const ADV_MATERIAL_ALIASES: Record<string, string> = {
   "cathode active materials": "High-Nickel Cathode Materials",
   "olefins and polyolefins": "Polyolefins and Engineered Resins",
   "packaging and specialty plastics": "Polyolefins and Engineered Resins",
-  "integrated chemicals and materials": "Integrated Specialty Chemicals",
   "medical devices and biomaterials": "Biocompatible Polymers and Biomaterials",
-  "biomaterials": "Biocompatible Polymers and Biomaterials",
+  biomaterials: "Biocompatible Polymers and Biomaterials",
 };
 
 const PRESERVE_UPPER_TOKENS = new Set([
@@ -419,26 +459,21 @@ function canonicalizeRawMaterial(
   return toCanonicalTitleCase(cleaned);
 }
 
-function canonicalizeAdvancedMaterial(rawName: string): string | null {
-  let cleaned = (rawName || "").trim();
-  if (!cleaned) return null;
-
-  // Capture preserved parenthetical acronyms before stripping parens
-  const originalAcronym = cleaned.match(/\((CCL|SiC|SOI|ABF|HBM|OLED|EV|PTFE)\)/i);
-
-  // 1. Strip stray periods and normalize slashes / ampersands uniformly to "and"
-  cleaned = cleaned
+/**
+ * Normalizes a single atomic Advanced Material segment (after splitting compound "and" labels).
+ */
+function normalizeSingleAdvSegment(
+  segment: string,
+  originalAcronym: RegExpMatchArray | null
+): string | null {
+  const cleaned = segment
     .replace(/\s*\([^)]*\)/g, " ")
     .replace(/\./g, "")
-    .replace(/\s*&\s*/g, " and ")
-    .replace(/\s*\/\s*/g, " and ");
-
-  // 2. Expand all abbreviations to full canonical words
-  cleaned = cleaned
     .replace(/\bsemicon\b/gi, "Semiconductor")
     .replace(/\bpkg\b/gi, "Packaging")
     .replace(/\bind\b/gi, "Industrial")
     .replace(/\bchem\b/gi, "Chemicals")
+    .replace(/\bfluorochem\b/gi, "Fluorochemicals")
     .replace(/\bmat\b/gi, "Materials")
     .replace(/\bhigh[- ]perf\b/gi, "High-Performance")
     .replace(/\btech\b/gi, "Technologies")
@@ -448,7 +483,7 @@ function canonicalizeAdvancedMaterial(rawName: string): string | null {
     .trim()
     .replace(/^[-–—,:;]+|[-–—,:;]+$/g, "");
 
-  if (!cleaned || cleaned.length < 3 || VAGUE_ADV_BUCKET_RE.test(cleaned)) {
+  if (!cleaned || cleaned.length < 3 || VAGUE_OR_NON_MATERIAL_ADV_RE.test(cleaned)) {
     return null;
   }
 
@@ -457,7 +492,6 @@ function canonicalizeAdvancedMaterial(rawName: string): string | null {
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
 
-  // 3. Consolidate polyurethane variants into one canonical class
   if (lookupKey.startsWith("polyurethane")) {
     return "Polyurethanes and Isocyanates";
   }
@@ -471,6 +505,60 @@ function canonicalizeAdvancedMaterial(rawName: string): string | null {
     return `${formatted} (${originalAcronym[1].toUpperCase()})`;
   }
   return formatted;
+}
+
+/**
+ * Resolves an Advanced Material label into 1 or more canonical material classes:
+ * - Preserves cohesive "and" classes (e.g., "CMP Slurries and Pads", "Specialty Steel and Alloys").
+ * - Splits multi-product "and" labels (e.g., "Battery Electrolytes and Fluorochem" -> ["Battery Electrolytes", "Fluoropolymers and Fluorochemicals"]).
+ * - Drops generic/non-material halves (e.g., "Carbon Fiber and Advanced Materials" -> ["Carbon Fiber Composites"], "Lithium Refining and Batteries" -> ["Lithium Hydroxide and Carbonate"]).
+ */
+function resolveAdvancedMaterialClasses(rawName: string): string[] {
+  const raw = (rawName || "").trim();
+  if (!raw) return [];
+
+  const originalAcronym = raw.match(/\((CCL|SiC|SOI|ABF|HBM|OLED|EV|PTFE)\)/i);
+
+  const normalizedConnectors = raw
+    .replace(/\./g, "")
+    .replace(/\s*&\s*/g, " and ")
+    .replace(/\s*\/\s*/g, " and ")
+    .replace(/\s+/g, " ")
+    .trim();
+
+  const fullLookupKey = normalizedConnectors
+    .replace(/\s*\([^)]*\)/g, " ")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+
+  // 1. Direct alias or cohesive single-class match
+  if (ADV_MATERIAL_ALIASES[fullLookupKey]) {
+    return [ADV_MATERIAL_ALIASES[fullLookupKey]];
+  }
+  if (COHESIVE_AND_CLASSES.has(fullLookupKey)) {
+    const single = normalizeSingleAdvSegment(normalizedConnectors, originalAcronym);
+    return single ? [single] : [];
+  }
+
+  // 2. Split compound "X and Y" strings into separate material classes and filter out vague/non-material halves
+  if (/\band\b/i.test(normalizedConnectors)) {
+    const parts = normalizedConnectors.split(/\s+\band\b\s+/i);
+    const results: string[] = [];
+    const seen = new Set<string>();
+    for (const part of parts) {
+      const resolved = normalizeSingleAdvSegment(part, originalAcronym);
+      if (resolved && !seen.has(resolved.toLowerCase())) {
+        seen.add(resolved.toLowerCase());
+        results.push(resolved);
+      }
+    }
+    return results;
+  }
+
+  // 3. Single standalone segment
+  const single = normalizeSingleAdvSegment(normalizedConnectors, originalAcronym);
+  return single ? [single] : [];
 }
 
 const CURATED_SUMMARIES: Record<string, string> = {
@@ -765,7 +853,7 @@ export function buildMaterialsAtlas({
     );
 
   // =========================================================================
-  // 2. ALL ADVANCED MATERIALS (Normalized, Deduplicated, No Abbreviations)
+  // 2. ALL ADVANCED MATERIALS (Compound "and" Split + Canonical Class Merge)
   // =========================================================================
   interface AdvBucket {
     name: string;
@@ -778,17 +866,14 @@ export function buildMaterialsAtlas({
   const advBuckets = new Map<string, AdvBucket>();
 
   const getOrCreateAdvBucket = (
-    matName: string,
+    canonicalClassName: string,
     categoryLabel: string
-  ): AdvBucket | null => {
-    const formattedName = canonicalizeAdvancedMaterial(matName);
-    if (!formattedName) return null;
-
-    const key = normalizeMaterialKey(formattedName) || formattedName.toLowerCase();
+  ): AdvBucket => {
+    const key = normalizeMaterialKey(canonicalClassName) || canonicalClassName.toLowerCase();
     let bucket = advBuckets.get(key);
     if (!bucket) {
       bucket = {
-        name: formattedName,
+        name: canonicalClassName,
         categoryLabel,
         specs: [],
         endMarkets: new Set<string>(),
@@ -807,69 +892,78 @@ export function buildMaterialsAtlas({
   for (const prod of products) {
     if (prod.status !== "active") continue;
     const rawCat = (prod.category || prod.name || "").trim();
-    const candidate =
-      VAGUE_ADV_BUCKET_RE.test(rawCat) &&
-      prod.name &&
-      !VAGUE_ADV_BUCKET_RE.test(prod.name)
-        ? prod.name
-        : rawCat;
-    const bucket = getOrCreateAdvBucket(candidate, "Advanced Material Class");
-    if (!bucket) continue;
-
-    if (prod.advanced?.performance_spec && bucket.specs.length < 3) {
-      bucket.specs.push(prod.advanced.performance_spec);
+    let resolvedClasses = resolveAdvancedMaterialClasses(rawCat);
+    if (resolvedClasses.length === 0 && prod.name) {
+      resolvedClasses = resolveAdvancedMaterialClasses(prod.name);
     }
-    if (prod.downstream?.end_demand) {
-      bucket.endMarkets.add(prod.downstream.end_demand);
-    }
+    if (resolvedClasses.length === 0) continue;
 
     const eq = equityMap.get(prod.ticker);
     if (!eq) continue;
-    let link = bucket.companies.get(prod.ticker);
-    if (!link) {
-      link = {
-        ticker: eq.ticker,
-        companyName: eq.company_name,
-        subSector: eq.sub_sector,
-        country: eq.country,
-        marketCapUsd: eq.market_cap_usd,
-        contractType: eq.contract_type,
-        linkedProducts: [],
-        sourceOrigin: "product",
-      };
-      bucket.companies.set(prod.ticker, link);
+
+    for (const className of resolvedClasses) {
+      const bucket = getOrCreateAdvBucket(className, "Advanced Material Class");
+      if (prod.advanced?.performance_spec && bucket.specs.length < 3) {
+        bucket.specs.push(prod.advanced.performance_spec);
+      }
+      if (prod.downstream?.end_demand) {
+        bucket.endMarkets.add(prod.downstream.end_demand);
+      }
+
+      let link = bucket.companies.get(prod.ticker);
+      if (!link) {
+        link = {
+          ticker: eq.ticker,
+          companyName: eq.company_name,
+          subSector: eq.sub_sector,
+          country: eq.country,
+          marketCapUsd: eq.market_cap_usd,
+          contractType: eq.contract_type,
+          linkedProducts: [],
+          sourceOrigin: "product",
+        };
+        bucket.companies.set(prod.ticker, link);
+      }
+      const alreadyLinked = link.linkedProducts.some(
+        (lp) => lp.name.toLowerCase() === prod.name.toLowerCase()
+      );
+      if (!alreadyLinked) {
+        link.linkedProducts.push({
+          id: prod.id,
+          name: prod.name,
+          category: prod.category,
+          businessUnit: prod.business_unit,
+          detail: prod.advanced?.performance_spec,
+          endDemand: prod.downstream?.end_demand,
+        });
+      }
     }
-    link.linkedProducts.push({
-      id: prod.id,
-      name: prod.name,
-      category: prod.category,
-      businessUnit: prod.business_unit,
-      detail: prod.advanced?.performance_spec,
-      endDemand: prod.downstream?.end_demand,
-    });
   }
 
   for (const eq of equities) {
     if (!eq.sub_sector) continue;
-    const bucket = getOrCreateAdvBucket(eq.sub_sector, "Universe Vertical");
-    if (!bucket) continue;
+    const resolvedClasses = resolveAdvancedMaterialClasses(eq.sub_sector);
+    if (resolvedClasses.length === 0) continue;
 
-    if (!bucket.companies.has(eq.ticker)) {
-      bucket.companies.set(eq.ticker, {
-        ticker: eq.ticker,
-        companyName: eq.company_name,
-        subSector: eq.sub_sector,
-        country: eq.country,
-        marketCapUsd: eq.market_cap_usd,
-        contractType: eq.contract_type,
-        linkedProducts: [
-          {
-            name: eq.sub_sector,
-            detail: "Primary advanced materials segment",
-          },
-        ],
-        sourceOrigin: "sector_rule",
-      });
+    for (const className of resolvedClasses) {
+      const bucket = getOrCreateAdvBucket(className, "Universe Vertical");
+      if (!bucket.companies.has(eq.ticker)) {
+        bucket.companies.set(eq.ticker, {
+          ticker: eq.ticker,
+          companyName: eq.company_name,
+          subSector: eq.sub_sector,
+          country: eq.country,
+          marketCapUsd: eq.market_cap_usd,
+          contractType: eq.contract_type,
+          linkedProducts: [
+            {
+              name: eq.sub_sector,
+              detail: "Primary advanced materials segment",
+            },
+          ],
+          sourceOrigin: "sector_rule",
+        });
+      }
     }
   }
 
