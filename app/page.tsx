@@ -18,6 +18,10 @@ import {
   ExcludedProduct,
   CompanyProductProfile,
 } from "../lib/productRollup";
+import {
+  MaterialRecord,
+  CompanyMaterialLinkRow,
+} from "../lib/materialsAtlas";
 
 async function DashboardDataLoader() {
   await connection();
@@ -36,6 +40,8 @@ async function DashboardDataLoader() {
     rawExcluded,
     rawProfiles,
     rawFilingMetrics,
+    rawMaterials,
+    rawMaterialLinks,
   ] = await Promise.all([
     sql`
       SELECT
@@ -229,6 +235,34 @@ async function DashboardDataLoader() {
         source_url
       FROM equity_filing_metrics
     `.catch(() => []),
+    sql`
+      SELECT
+        id,
+        slug,
+        canonical_name,
+        tier,
+        material_group,
+        registry_code,
+        summary
+      FROM materials
+      WHERE tier IN ('T0', 'T1', 'T2')
+      ORDER BY canonical_name ASC
+    `.catch(() => []),
+    sql`
+      SELECT
+        ticker,
+        material_id,
+        role,
+        product_name,
+        business_unit,
+        performance_spec,
+        end_demand,
+        source_section,
+        source_quote,
+        confidence
+      FROM company_material_links
+      ORDER BY ticker ASC, id ASC
+    `.catch(() => []),
   ]);
 
   const equities: EquityRow[] = rawEquities.map((row) => ({
@@ -318,6 +352,31 @@ async function DashboardDataLoader() {
     conf: row.conf || "med",
   }));
 
+  const materials: MaterialRecord[] = rawMaterials.map((row: any) => ({
+    id: Number(row.id),
+    slug: row.slug,
+    canonical_name: row.canonical_name,
+    tier: row.tier,
+    material_group: row.material_group,
+    registry_code: row.registry_code ?? null,
+    summary: row.summary ?? null,
+  }));
+
+  const materialLinks: CompanyMaterialLinkRow[] = rawMaterialLinks.map(
+    (row: any) => ({
+      ticker: row.ticker,
+      material_id: Number(row.material_id),
+      role: row.role,
+      product_name: row.product_name ?? null,
+      business_unit: row.business_unit ?? null,
+      performance_spec: row.performance_spec ?? null,
+      end_demand: row.end_demand ?? null,
+      source_section: row.source_section ?? null,
+      source_quote: row.source_quote,
+      confidence: row.confidence ?? null,
+    })
+  );
+
   const narrative = (narratives[0] as MacroNarrativeRow) || null;
 
   return (
@@ -334,6 +393,8 @@ async function DashboardDataLoader() {
         excludedProducts={rawExcluded as ExcludedProduct[]}
         productProfiles={rawProfiles as CompanyProductProfile[]}
         filingMetrics={rawFilingMetrics as FilingMetricsRow[]}
+        materials={materials}
+        materialLinks={materialLinks}
       />
       <ScopedInsightsPanel insights={insights as ScopedInsightRow[]} />
       <footer className="max-w-7xl mx-auto px-6 pb-8 pt-4 flex items-center justify-between text-[11px] font-mono text-slate-500 border-t border-slate-800/60">
