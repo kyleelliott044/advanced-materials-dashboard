@@ -167,7 +167,7 @@ type SortOption =
   | "products_desc"
   | "ticker_asc";
 
-type DossierTab = "products" | "value_chain" | "commodities" | "filings";
+type DossierTab = "products" | "value_chain" | "commodities" | "filings" | "metrics";
 
 const CONTRACT_BADGES: Record<string, { label: string; style: string }> = {
   take_or_pay: {
@@ -662,7 +662,7 @@ export default function DashboardClient({
       window.removeEventListener("terminal:select-ticker", handleSelectTicker);
   }, []);
 
-  // Close company dossier on Escape key
+  // Close company  on Escape key
   useEffect(() => {
     if (!selectedTicker) return;
     const onKeyDown = (e: KeyboardEvent) => {
