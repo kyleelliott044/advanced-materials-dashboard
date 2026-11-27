@@ -777,15 +777,67 @@ export default function DashboardClient({
     return map;
   }, [productProfiles]);
 
-  // Product rollup per company (strictly status === 'active')
+  // Product rollup per company: unified across `company_material_links` (primary) and `company_products` (fallback)
   const tickerRollupMap = useMemo(() => {
+    const matMap = new Map<number, MaterialRecord>();
+    for (const m of materials) matMap.set(m.id, m);
+
+    const linksByTicker = new Map<string, CompanyMaterialLinkRow[]>();
+    for (const l of materialLinks) {
+      const arr = linksByTicker.get(l.ticker) || [];
+      arr.push(l);
+      linksByTicker.set(l.ticker, arr);
+    }
+
     const map: Record<string, RolledUpDrivers> = {};
     for (const eq of equities) {
-      const prods = tickerProductsMap[eq.ticker] || [];
-      map[eq.ticker] = rollupCompanyProducts(prods, validRegistryCodes);
+      const tLinks = linksByTicker.get(eq.ticker) || [];
+      const soldT2 = tLinks.filter((l) => {
+        if (l.role !== "sells" && l.role !== "makes_captive") return false;
+        const m = matMap.get(l.material_id);
+        return Boolean(m && m.tier === "T2");
+      });
+
+      if (soldT2.length > 0) {
+        const costCodes: string[] = [];
+        const unlogged: string[] = [];
+        for (const l of tLinks) {
+          if (l.role !== "consumes") continue;
+          const m = matMap.get(l.material_id);
+          if (!m) continue;
+          if (m.registry_code && validRegistryCodes.has(m.registry_code)) {
+            if (!costCodes.includes(m.registry_code)) {
+              costCodes.push(m.registry_code);
+            }
+          } else if (!unlogged.includes(m.canonical_name)) {
+            unlogged.push(m.canonical_name);
+          }
+        }
+        map[eq.ticker] = {
+          activeProductCount: soldT2.length,
+          costInputCodes: costCodes,
+          demandProxyCodes: [],
+          unloggedMaterials: unlogged,
+          isProductDerived: true,
+        };
+      } else {
+        const cleanedLegacy = (tickerProductsMap[eq.ticker] || []).filter(
+          (p) => p.name.trim().length > 4 && p.category.trim().length > 4
+        );
+        map[eq.ticker] = rollupCompanyProducts(
+          cleanedLegacy,
+          validRegistryCodes
+        );
+      }
     }
     return map;
-  }, [equities, tickerProductsMap, validRegistryCodes]);
+  }, [
+    equities,
+    materials,
+    materialLinks,
+    tickerProductsMap,
+    validRegistryCodes,
+  ]);
 
   // Reverse indexes: commodity_ref -> products -> companies & category -> peers
   const commodityReverseIndex = useMemo(
@@ -1197,7 +1249,7 @@ export default function DashboardClient({
     [equities, selectedTicker]
   );
 
- const materialById = useMemo(() => {
+  const materialById = useMemo(() => {
     const map = new Map<number, MaterialRecord>();
     for (const m of materials) map.set(m.id, m);
     return map;
@@ -1441,6 +1493,35 @@ export default function DashboardClient({
     setActiveTab("screener");
     setSelectedTicker(null);
     setSelectedMaterialSlug(null);
+  };
+
+  const handleOpenMaterialInAtlas = (
+    materialNameOrSlug: string,
+    preferKind?: "raw" | "advanced"
+  ) => {
+    const q = materialNameOrSlug.toLowerCase().trim();
+    const advMatch = atlasAdvancedMaterials.find(
+      (m) => m.slug === q || m.name.toLowerCase() === q
+    );
+    const rawMatch = atlasRawMaterials.find(
+      (m) => m.slug === q || m.name.toLowerCase() === q
+    );
+    const hit =
+      preferKind === "advanced"
+        ? advMatch || rawMatch
+        : preferKind === "raw"
+        ? rawMatch || advMatch
+        : advMatch || rawMatch;
+
+    if (hit) {
+      setMaterialsSubTab(hit.kind);
+      setSelectedMaterialSlug(hit.slug);
+      setActiveTab("materials");
+      setSelectedTicker(null);
+      return;
+    }
+
+    handleSelectCategoryFromDossier(materialNameOrSlug);
   };
 
   const activeProductsCount = selectedEquityProducts.filter(
@@ -2053,16 +2134,22 @@ export default function DashboardClient({
                           </td>
                           <td className="py-3.5 px-4 text-center font-mono">
                             {rollup && rollup.activeProductCount > 0 ? (
-                              <span
-                                className="inline-flex items-center px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 text-xs font-semibold"
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  setSelectedTicker(eq.ticker);
+                                  setDossierTab("products");
+                                }}
+                                className="inline-flex items-center px-2 py-0.5 rounded bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/30 text-xs font-semibold transition"
                                 title={
                                   rollup.unloggedMaterials.length > 0
                                     ? `${rollup.activeProductCount} active products (${rollup.unloggedMaterials.length} unlogged raw materials)`
-                                    : `${rollup.activeProductCount} active products`
+                                    : `${rollup.activeProductCount} active products — click to inspect`
                                 }
                               >
                                 {rollup.activeProductCount}
-                              </span>
+                              </button>
                             ) : (
                               <span className="text-xs text-slate-600">—</span>
                             )}
@@ -2795,7 +2882,7 @@ export default function DashboardClient({
                           <strong className="text-sky-400">Downstream End-Demand</strong>
                         </span>
                         <span className="font-mono text-[10px]">
-                          Click solid chips to filter
+                          Click chips to inspect in Materials Atlas
                         </span>
                       </div>
 
@@ -2825,14 +2912,15 @@ export default function DashboardClient({
                                     <button
                                       type="button"
                                       onClick={() =>
-                                        handleSelectCategoryFromDossier(
-                                          prod.category
+                                        handleOpenMaterialInAtlas(
+                                          prod.category,
+                                          "advanced"
                                         )
                                       }
-                                      title="Click to view all peer companies in this product category"
+                                      title="Open this T2 material class in Materials Atlas"
                                       className="px-2 py-0.5 rounded bg-purple-500/15 hover:bg-purple-500/25 text-purple-300 border border-purple-500/35 text-[11px] font-medium transition cursor-pointer"
                                     >
-                                      {prod.category}
+                                      {prod.category} ↗
                                     </button>
                                   </div>
                                   <div className="text-[11px] font-mono text-slate-400">
@@ -2870,39 +2958,29 @@ export default function DashboardClient({
                                             rm.commodity_ref
                                           )
                                       );
-                                      if (isLogged && rm.commodity_ref) {
-                                        return (
-                                          <button
-                                            key={`${rm.name}-${rIdx}`}
-                                            type="button"
-                                            onClick={() =>
-                                              handleSelectCommodityFromDossier(
-                                                rm.commodity_ref!
-                                              )
-                                            }
-                                            title={`Logged registry commodity: ${getCommodityDisplayName(
-                                              rm.commodity_ref
-                                            )} (${rm.role} • ${rm.basis}). Click to filter companies.`}
-                                            className="px-2.5 py-1 rounded-md bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-solid border-amber-400/60 font-medium transition cursor-pointer"
-                                          >
-                                            {formatShortCostInput(
-                                              rm.name,
-                                              rm.commodity_ref
-                                            )}
-                                          </button>
-                                        );
-                                      }
                                       return (
-                                        <span
+                                        <button
                                           key={`${rm.name}-${rIdx}`}
-                                          title={`Unlogged raw material (${rm.role} • ${rm.basis})`}
-                                          className="px-2.5 py-1 rounded-md bg-slate-900/70 text-slate-400 border border-dashed border-slate-600 inline-flex items-center gap-1.5"
+                                          type="button"
+                                          onClick={() =>
+                                            handleOpenMaterialInAtlas(
+                                              rm.name,
+                                              "raw"
+                                            )
+                                          }
+                                          title={`Inspect ${rm.name} in Materials Atlas (${rm.role})`}
+                                          className={`px-2.5 py-1 rounded-md font-medium transition cursor-pointer ${
+                                            isLogged
+                                              ? "bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-solid border-amber-400/60"
+                                              : "bg-slate-900/70 hover:bg-slate-800 text-slate-300 border border-dashed border-slate-600"
+                                          }`}
                                         >
-                                          <span>{rm.name}</span>
-                                          <span className="text-[9px] font-mono uppercase text-slate-500">
-                                            unlogged
-                                          </span>
-                                        </span>
+                                          {formatShortCostInput(
+                                            rm.name,
+                                            rm.commodity_ref
+                                          )}{" "}
+                                          ↗
+                                        </button>
                                       );
                                     }
                                   )}
