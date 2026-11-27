@@ -33,7 +33,12 @@ NON_ADV_MAT_RE = re.compile(
     r"post-?it|scotch\s+tape|consumer\s+retail|apparel|footwear|cosmetics?|"
     r"enterprise\s+software|cloud\s+saas|avionics|building\s+automation|"
     r"insurance|banking|residential\s+housing|turnkey\s+machinery|capital\s+equipment|metrology|"
-    r"recycling"
+    r"recycling|"
+    r"battery\s+cells?|prismatic\s+cells?|cylindrical\s+cells?|pouch\s+cells?|"
+    r"battery\s+modules?|battery\s+packs?|ess\s+(racks?|systems?|batteries)|"
+    r"energy\s+storage\s+systems?|all-?solid-?state\s+batter(y|ies)|"
+    r"optical\s+transceivers?|wiring\s+harness(es)?|connectors?|cables?|"
+    r"sensors?|actuators?|housings?|display\s+panels?|sub-?assembl(y|ies)|finished\s+components?"
     r")\b",
     re.IGNORECASE,
 )
@@ -394,15 +399,15 @@ def run_product_extraction(conn):
         prompt = f"""
         Decompose {company_name} ({ticker}) | Assigned Advanced-Materials Sub-sector: {sub_sector} ({rev_share_note}) into specific engineered advanced-materials products.
 
-        CONGLOMERATE & DOMAIN SCOPE LOCK (CRITICAL):
-        - Extract ONLY engineered materials, specialty chemicals, alloys, wafers, films, fibers, gases, or ceramics belonging to the company's "{sub_sector}" operations.
-        - If {company_name} is a diversified conglomerate, STRICTLY IGNORE all non-materials divisions (Pharmaceuticals/Biologics/Healthcare drugs, Food/Seasonings/Beverages, Consumer/Office Retail, Building Automation/Avionics, Software, Financial Services, Turnkey Equipment/Machinery, Recycling operations) and list those excluded divisions in excluded[] instead.
+        CONGLOMERATE & MATERIALS-VS-COMPONENTS BOUNDARY (CRITICAL):
+        - Extract ONLY true engineered materials, formulated chemicals, resins, epoxy molding compounds (EMC), CMP slurries, spin-on dielectrics (SOD), OLED host/dopant materials, photoresists, specialty gases, wafers, films, fibers, powders, precursors, or specialty alloys belonging to "{sub_sector}".
+        - STRICTLY EXCLUDE assembled components, discrete devices, and finished battery cells/modules/packs (e.g., prismatic/cylindrical/pouch EV battery cells, ESS racks, optical transceivers, connectors, sensors, housings, display panels, machinery/equipment) as well as pharma, food, consumer goods, and software. Put all excluded components/divisions in excluded[] instead.
 
         STRICT INCLUSION GATE (ALL 4 MUST HOLD, OTHERWISE PUT IN excluded[]):
-        1. Performance-specified engineered material (not finished consumer goods, drugs, food, or machinery).
-        2. Qualified inside a customer's manufacturing process.
-        3. Switching requires customer requalification.
-        4. Sold as a material input to a downstream manufacturer (NEVER include generic segment names like "recycling business" or "electronics division").
+        1. Material-form product (chemical formulation, resin, slurry, wafer, film, fiber, powder, or alloy—NOT an assembled component, cell, module, or device).
+        2. Performance-specified and qualified inside a customer's manufacturing process.
+        3. Switching requires customer process requalification.
+        4. Never a generic segment label (e.g., "electronic materials division", "battery business", "recycling operations").
 
         RULES:
         - Never invent facts, customer names, qualification months, or product revenue shares. Unknown = null.
