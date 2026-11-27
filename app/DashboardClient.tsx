@@ -14,6 +14,9 @@ import {
 import {
   buildMaterialsAtlas,
   MaterialAtlasEntry,
+  MaterialRecord,
+  CompanyMaterialLinkRow,
+  AtlasCompanyLink,
 } from "../lib/materialsAtlas";
 
 export interface FilingMetricsRow {
@@ -557,6 +560,8 @@ export default function DashboardClient({
   excludedProducts = [],
   productProfiles = [],
   filingMetrics = [],
+  materials = [],
+  materialLinks = [],
 }: {
   equities: EquityRow[];
   inputs: RawInputRow[];
@@ -569,6 +574,8 @@ export default function DashboardClient({
   excludedProducts?: ExcludedProduct[];
   productProfiles?: CompanyProductProfile[];
   filingMetrics?: FilingMetricsRow[];
+  materials?: MaterialRecord[];
+  materialLinks?: CompanyMaterialLinkRow[];
 }) {
   // Deduplicate repeated company rows (e.g., 120290 vs 120290.KS)
   const equities = useMemo(() => {
@@ -896,7 +903,7 @@ export default function DashboardClient({
     return map;
   }, [supplyChain]);
 
-  // Materials Atlas: All Raw Materials & All Advanced Materials
+  // Materials Atlas: Tier-based T0/T1 (Inputs & Intermediates) & T2 (Products)
   const {
     rawMaterials: atlasRawMaterials,
     advancedMaterials: atlasAdvancedMaterials,
@@ -910,6 +917,8 @@ export default function DashboardClient({
         sensitivities,
         macroCodeSet,
         inputNameMap,
+        materials,
+        materialLinks,
       }),
     [
       equities,
@@ -919,6 +928,8 @@ export default function DashboardClient({
       sensitivities,
       macroCodeSet,
       inputNameMap,
+      materials,
+      materialLinks,
     ]
   );
 
@@ -1363,6 +1374,90 @@ export default function DashboardClient({
     selectedEquityDrivers.length > 0
       ? selectedEquityDrivers.length
       : selectedEquitySensitivities.length;
+
+  const renderMaterialCompanyCard = (
+    comp: AtlasCompanyLink,
+    sectionLabel: string,
+    accentClass: string
+  ) => {
+    const badge =
+      CONTRACT_BADGES[comp.contractType || ""] || {
+        label: comp.contractType || "Standard",
+        style: "bg-slate-800 text-slate-300 border-slate-700",
+      };
+    return (
+      <button
+        key={`${comp.role}-${comp.ticker}`}
+        type="button"
+        onClick={() => setSelectedTicker(comp.ticker)}
+        className="text-left rounded-xl bg-[#111827]/90 hover:bg-[#151f33] border border-slate-800 hover:border-sky-500/50 p-4 transition space-y-2.5 group"
+      >
+        <div className="flex items-start justify-between gap-2">
+          <div>
+            <div className="flex items-center gap-2 flex-wrap">
+              <span className="font-mono font-bold text-sm text-sky-400 group-hover:underline">
+                {comp.ticker}
+              </span>
+              <span className="font-semibold text-sm text-white">
+                {comp.companyName}
+              </span>
+              {comp.country && (
+                <span className="text-xs">{getCountryFlag(comp.country)}</span>
+              )}
+              <span
+                className={`px-1.5 py-0.2 rounded text-[9px] font-mono uppercase border ${accentClass}`}
+              >
+                {comp.role === "sells"
+                  ? "Producer"
+                  : comp.role === "consumes"
+                  ? "Consumer"
+                  : "Captive"}
+              </span>
+            </div>
+            <div className="text-xs text-slate-400 mt-0.5">{comp.subSector}</div>
+          </div>
+
+          <div className="text-right shrink-0 space-y-1">
+            <div className="font-mono text-xs text-slate-200">
+              {formatMarketCap(comp.marketCapUsd)}
+            </div>
+            <span
+              className={`inline-block px-2 py-0.2 rounded-full text-[10px] border ${badge.style}`}
+            >
+              {badge.label}
+            </span>
+          </div>
+        </div>
+
+        {comp.linkedProducts.length > 0 && (
+          <div className="pt-2 border-t border-slate-800/80 space-y-1.5">
+            <div className="text-[10px] font-mono uppercase text-slate-500">
+              {sectionLabel}
+            </div>
+            {comp.linkedProducts.slice(0, 4).map((lp, i) => (
+              <div key={`${lp.name}-${i}`} className="space-y-0.5">
+                <div className="text-xs text-slate-300 flex items-center justify-between gap-2">
+                  <span className="font-medium text-white truncate">
+                    • {lp.name}
+                  </span>
+                  {lp.detail && (
+                    <span className="text-[10px] font-mono text-slate-400 truncate max-w-[240px]">
+                      {lp.detail}
+                    </span>
+                  )}
+                </div>
+                {lp.sourceQuote && (
+                  <p className="text-[11px] text-slate-400 italic line-clamp-2 pl-2.5 border-l border-slate-700">
+                    &ldquo;{lp.sourceQuote}&rdquo;
+                  </p>
+                )}
+              </div>
+            ))}
+          </div>
+        )}
+      </button>
+    );
+  };
 
   return (
     <div className="min-h-screen bg-[#090d16] text-slate-100 font-sans selection:bg-sky-500/30">
@@ -2094,10 +2189,10 @@ export default function DashboardClient({
           </section>
         )}
 
-        {/* TAB 3: MATERIALS ATLAS (All Raw Materials & All Advanced Materials) */}
+        {/* TAB 3: MATERIALS ATLAS (T0/T1 Raw Inputs & Intermediates vs. T2 Engineered Products) */}
         {activeTab === "materials" && (
           <section className="space-y-6">
-            {/* Sub-Navigation Switcher: All Raw Materials vs. All Advanced Materials */}
+            {/* Sub-Navigation Switcher: Raw Materials (T0/T1) vs. Advanced Materials (T2) */}
             <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-[#111827]/90 border border-slate-800 rounded-2xl p-4">
               <div className="inline-flex rounded-xl bg-[#090d16] border border-slate-800 p-1 self-start">
                 <button
@@ -2112,7 +2207,7 @@ export default function DashboardClient({
                       : "text-slate-400 hover:text-slate-200"
                   }`}
                 >
-                  <span>All Raw Materials</span>
+                  <span>Raw Inputs &amp; Intermediates (T0–T1)</span>
                   <span
                     className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
                       materialsSubTab === "raw"
@@ -2136,7 +2231,7 @@ export default function DashboardClient({
                       : "text-slate-400 hover:text-slate-200"
                   }`}
                 >
-                  <span>All Advanced Materials</span>
+                  <span>Advanced Materials Products (T2)</span>
                   <span
                     className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
                       materialsSubTab === "advanced"
@@ -2154,8 +2249,8 @@ export default function DashboardClient({
                   type="text"
                   placeholder={
                     materialsSubTab === "raw"
-                      ? "Search raw materials (e.g. Copper, Lithium, Gallium)..."
-                      : "Search advanced materials (e.g. Silicon Wafers, CCL)..."
+                      ? "Search T0/T1 inputs (e.g. Copper, Polysilicon, Lithium)..."
+                      : "Search T2 products (e.g. CMP Slurries, Aramid, SiC)..."
                   }
                   value={materialSearch}
                   onChange={(e) => setMaterialSearch(e.target.value)}
@@ -2176,6 +2271,7 @@ export default function DashboardClient({
                   return (
                     m.name.toLowerCase().includes(q) ||
                     m.categoryLabel.toLowerCase().includes(q) ||
+                    m.tier.toLowerCase().includes(q) ||
                     m.summary.toLowerCase().includes(q) ||
                     m.companies.some(
                       (c) =>
@@ -2193,16 +2289,23 @@ export default function DashboardClient({
                   >
                     <div className="space-y-2">
                       <div className="flex items-center justify-between gap-2">
-                        <span
-                          className={`text-[10px] font-mono uppercase px-2 py-0.5 rounded border ${
-                            mat.kind === "raw"
-                              ? "bg-amber-500/10 text-amber-300 border-amber-500/30"
-                              : "bg-sky-500/10 text-sky-300 border-sky-500/30"
-                          }`}
-                        >
-                          {mat.categoryLabel}
-                        </span>
-                        <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 text-[10px] font-mono font-semibold">
+                        <div className="flex items-center gap-1.5 min-w-0">
+                          <span
+                            className={`text-[10px] font-mono font-bold px-1.5 py-0.5 rounded border shrink-0 ${
+                              mat.tier === "T0"
+                                ? "bg-amber-500/15 text-amber-300 border-amber-500/35"
+                                : mat.tier === "T1"
+                                ? "bg-purple-500/15 text-purple-300 border-purple-500/35"
+                                : "bg-sky-500/15 text-sky-300 border-sky-500/35"
+                            }`}
+                          >
+                            {mat.tier}
+                          </span>
+                          <span className="text-[10px] font-mono uppercase text-slate-400 truncate">
+                            {mat.categoryLabel}
+                          </span>
+                        </div>
+                        <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 text-[10px] font-mono font-semibold shrink-0">
                           {mat.companies.length}{" "}
                           {mat.companies.length === 1 ? "Company" : "Companies"}
                         </span>
@@ -2215,6 +2318,28 @@ export default function DashboardClient({
                       <p className="text-xs text-slate-400 line-clamp-2 leading-relaxed">
                         {mat.summary}
                       </p>
+
+                      {mat.kind === "raw" &&
+                        (mat.producers.length > 0 || mat.consumers.length > 0) && (
+                          <div className="flex items-center gap-2 text-[10px] font-mono pt-0.5">
+                            {mat.producers.length > 0 && (
+                              <span className="text-emerald-400">
+                                {mat.producers.length} Producer
+                                {mat.producers.length === 1 ? "" : "s"}
+                              </span>
+                            )}
+                            {mat.producers.length > 0 &&
+                              mat.consumers.length > 0 && (
+                                <span className="text-slate-600">•</span>
+                              )}
+                            {mat.consumers.length > 0 && (
+                              <span className="text-amber-300">
+                                {mat.consumers.length} Consumer
+                                {mat.consumers.length === 1 ? "" : "s"}
+                              </span>
+                            )}
+                          </div>
+                        )}
                     </div>
 
                     <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between gap-2">
@@ -2244,7 +2369,7 @@ export default function DashboardClient({
         )}
       </main>
 
-      {/* Slide-Over Material Dossier Drawer (Matches Stock Dossier UX) */}
+      {/* Slide-Over Material Dossier Drawer (Producers, Consumers & Captive Roles) */}
       {selectedAtlasMaterial && !selectedEquity && (
         <div
           onClick={() => setSelectedMaterialSlug(null)}
@@ -2260,15 +2385,20 @@ export default function DashboardClient({
                 <div className="space-y-1.5">
                   <div className="flex items-center gap-2 flex-wrap">
                     <span
-                      className={`px-2.5 py-0.5 rounded text-[10px] font-mono uppercase font-semibold border ${
-                        selectedAtlasMaterial.kind === "raw"
+                      className={`px-2 py-0.5 rounded text-[10px] font-mono uppercase font-bold border ${
+                        selectedAtlasMaterial.tier === "T0"
                           ? "bg-amber-500/15 text-amber-300 border-amber-500/35"
+                          : selectedAtlasMaterial.tier === "T1"
+                          ? "bg-purple-500/15 text-purple-300 border-purple-500/35"
                           : "bg-sky-500/15 text-sky-300 border-sky-500/35"
                       }`}
                     >
-                      {selectedAtlasMaterial.kind === "raw"
-                        ? "Raw Material / Feedstock"
-                        : "Engineered Advanced Material"}
+                      {selectedAtlasMaterial.tier} •{" "}
+                      {selectedAtlasMaterial.tier === "T0"
+                        ? "Primary Commodity"
+                        : selectedAtlasMaterial.tier === "T1"
+                        ? "Refined Intermediate"
+                        : "Engineered T2 Product"}
                     </span>
                     <span className="text-xs font-mono text-slate-400">
                       {selectedAtlasMaterial.categoryLabel}
@@ -2332,93 +2462,71 @@ export default function DashboardClient({
               </div>
             </div>
 
-            {/* Scrollable Linked Companies Body */}
-            <div className="flex-1 overflow-y-auto p-6 space-y-4">
+            {/* Scrollable Role-Partitioned Companies Body */}
+            <div className="flex-1 overflow-y-auto p-6 space-y-6">
               <div className="flex items-center justify-between gap-2 flex-wrap">
-                <h3 className="text-xs font-mono uppercase tracking-wider text-slate-400">
-                  {selectedAtlasMaterial.kind === "raw"
-                    ? `Companies Consuming ${selectedAtlasMaterial.name} (${selectedAtlasMaterial.companies.length})`
-                    : `Companies Selling ${selectedAtlasMaterial.name} (${selectedAtlasMaterial.companies.length})`}
-                </h3>
-                <span className="text-[11px] text-sky-400">
-                  Click any company to open full stock dossier &rarr;
+                <span className="text-[11px] font-mono text-slate-400">
+                  Role-separated value-chain links • Click any company to open full stock dossier
                 </span>
               </div>
 
-              <div className="grid grid-cols-1 gap-3">
-                {selectedAtlasMaterial.companies.map((comp) => {
-                  const badge =
-                    CONTRACT_BADGES[comp.contractType || ""] || {
-                      label: comp.contractType || "Standard",
-                      style: "bg-slate-800 text-slate-300 border-slate-700",
-                    };
-                  return (
-                    <button
-                      key={comp.ticker}
-                      type="button"
-                      onClick={() => setSelectedTicker(comp.ticker)}
-                      className="text-left rounded-xl bg-[#111827]/90 hover:bg-[#151f33] border border-slate-800 hover:border-sky-500/50 p-4 transition space-y-2.5 group"
-                    >
-                      <div className="flex items-start justify-between gap-2">
-                        <div>
-                          <div className="flex items-center gap-2">
-                            <span className="font-mono font-bold text-sm text-sky-400 group-hover:underline">
-                              {comp.ticker}
-                            </span>
-                            <span className="font-semibold text-sm text-white">
-                              {comp.companyName}
-                            </span>
-                            {comp.country && (
-                              <span className="text-xs">
-                                {getCountryFlag(comp.country)}
-                              </span>
-                            )}
-                          </div>
-                          <div className="text-xs text-slate-400 mt-0.5">
-                            {comp.subSector}
-                          </div>
-                        </div>
+              {/* 1. PRODUCERS (`sells`) */}
+              {selectedAtlasMaterial.producers.length > 0 && (
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-xs font-mono uppercase tracking-wider text-emerald-400 font-semibold">
+                      Producers &amp; Suppliers Selling {selectedAtlasMaterial.name} (
+                      {selectedAtlasMaterial.producers.length})
+                    </h3>
+                  </div>
+                  <div className="grid grid-cols-1 gap-3">
+                    {selectedAtlasMaterial.producers.map((comp) =>
+                      renderMaterialCompanyCard(
+                        comp,
+                        "Commercial Product Lines Sold:",
+                        "bg-emerald-500/15 text-emerald-300 border-emerald-500/35"
+                      )
+                    )}
+                  </div>
+                </div>
+              )}
 
-                        <div className="text-right shrink-0 space-y-1">
-                          <div className="font-mono text-xs text-slate-200">
-                            {formatMarketCap(comp.marketCapUsd)}
-                          </div>
-                          <span
-                            className={`inline-block px-2 py-0.2 rounded-full text-[10px] border ${badge.style}`}
-                          >
-                            {badge.label}
-                          </span>
-                        </div>
-                      </div>
+              {/* 2. CAPTIVE INTEGRATED PRODUCERS (`makes_captive`) */}
+              {selectedAtlasMaterial.captiveUsers.length > 0 && (
+                <div className="space-y-3">
+                  <h3 className="text-xs font-mono uppercase tracking-wider text-purple-300 font-semibold">
+                    Captive Internal Production ({selectedAtlasMaterial.captiveUsers.length})
+                  </h3>
+                  <div className="grid grid-cols-1 gap-3">
+                    {selectedAtlasMaterial.captiveUsers.map((comp) =>
+                      renderMaterialCompanyCard(
+                        comp,
+                        "Captive Internal Use:",
+                        "bg-purple-500/15 text-purple-300 border-purple-500/35"
+                      )
+                    )}
+                  </div>
+                </div>
+              )}
 
-                      {comp.linkedProducts.length > 0 && (
-                        <div className="pt-2 border-t border-slate-800/80 space-y-1.5">
-                          <div className="text-[10px] font-mono uppercase text-slate-500">
-                            {selectedAtlasMaterial.kind === "raw"
-                              ? "Consumed In:"
-                              : "Product Lines Sold:"}
-                          </div>
-                          {comp.linkedProducts.slice(0, 4).map((lp, i) => (
-                            <div
-                              key={`${lp.name}-${i}`}
-                              className="text-xs text-slate-300 flex items-center justify-between gap-2"
-                            >
-                              <span className="font-medium text-white truncate">
-                                • {lp.name}
-                              </span>
-                              {lp.detail && (
-                                <span className="text-[10px] font-mono text-slate-400 truncate max-w-[240px]">
-                                  {lp.detail}
-                                </span>
-                              )}
-                            </div>
-                          ))}
-                        </div>
-                      )}
-                    </button>
-                  );
-                })}
-              </div>
+              {/* 3. CONSUMERS (`consumes`) */}
+              {selectedAtlasMaterial.consumers.length > 0 && (
+                <div className="space-y-3">
+                  <h3 className="text-xs font-mono uppercase tracking-wider text-amber-300 font-semibold">
+                    Downstream Consumers Buying {selectedAtlasMaterial.name} (
+                    {selectedAtlasMaterial.consumers.length})
+                  </h3>
+                  <div className="grid grid-cols-1 gap-3">
+                    {selectedAtlasMaterial.consumers.map((comp) =>
+                      renderMaterialCompanyCard(
+                        comp,
+                        "Consumed In / Input Exposure:",
+                        "bg-amber-500/15 text-amber-300 border-amber-500/35"
+                      )
+                    )}
+                  </div>
+                </div>
+              )}
             </div>
           </div>
         </div>
