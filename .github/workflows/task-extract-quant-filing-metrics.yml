@@ -1,0 +1,38 @@
+name: Extract Quantitative Filing Metrics
+
+on:
+  schedule:
+    - cron: "0 7 * * 1"
+  workflow_dispatch:
+    inputs:
+      batch_limit:
+        description: "Number of companies to process in this run"
+        required: true
+        default: "150"
+        type: string
+
+jobs:
+  extract-quant-filing-metrics:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests "psycopg[binary]" yfinance
+
+      - name: Extract Quantitative Filing Metrics
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          METRICS_BATCH_LIMIT: ${{ github.event.inputs.batch_limit || '40' }}
+        run: python pipeline/extract_filing_metrics.py

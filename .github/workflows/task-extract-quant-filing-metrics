@@ -1,5 +1,0 @@
-- name: Extract Quantitative Filing Metrics
-        env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          METRICS_BATCH_LIMIT: "40"
-        run: python pipeline/extract_filing_metrics.py
