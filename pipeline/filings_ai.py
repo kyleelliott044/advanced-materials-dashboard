@@ -27,9 +27,126 @@ SEC_HEADERS = {
 }
 
 INVALID_COMMODITY_RE = re.compile(
-    r"\b(contract|revenue|customer|oem|backlog|sales|earnings|agreement|segment|business)\b",
+    r"^\s*("
+    r"labor|direct\s+labor|manufacturing\s+labor|"
+    r"raw\s+materials?|direct\s+materials?|other\s+raw\s+materials?|"
+    r"feedstocks?|industrial\s+feedstocks?|chemical\s+feedstocks?|petrochemical\s+feedstocks?|"
+    r"specialty\s+chemical\s+intermediates?|chemical\s+intermediates?|intermediates?|"
+    r"specialty\s+chemicals?|industrial\s+chemicals?|base\s+chemicals?|"
+    r"commodities|metals?|precious\s+metals?|rare\s+earths?|minerals?|polymers?|resins?|plastic\s+resins?|"
+    r"energy|electricity|power|utilities|water|freight|logistics|transportation|"
+    r"packaging|consumables?|components?|parts?|equipment|tooling|scrap|general|other"
+    r")\s*$"
+    r"|\b(contract|revenue|customer|oem|backlog|sales|earnings|agreement|segment|business|labor|raw\s+materials?|industrial\s+feedstocks?|specialty\s+chemical\s+intermediates?)\b",
     re.IGNORECASE,
 )
+
+CANONICAL_CODE_NAMES = {
+    "HG=F": "Copper",
+    "NG=F": "Natural Gas",
+    "CL=F": "WTI Crude Oil",
+    "BZ=F": "Brent Crude Oil",
+    "ALI=F": "Aluminum",
+    "PL=F": "Platinum",
+    "SI=F": "Silver",
+    "PNICKUSDM": "Nickel",
+    "PCOBAUSDM": "Cobalt",
+    "PNGASEUUSDM": "Natural Gas",
+    "WPU101": "Iron & Steel",
+    "NDPR_CN": "Neodymium-Praseodymium (NdPr) Oxide",
+    "LICARB_CN": "Lithium Carbonate",
+    "GALLIUM_9999": "Gallium",
+    "GERMANIUM_INGOT": "Germanium",
+    "POLYSILICON_N": "Polysilicon",
+    "SPHERICAL_GRAPHITE": "Spherical Graphite",
+    "COBALT_SULFATE": "Cobalt Sulfate",
+    "CARBON_FIBER_T700": "Polyacrylonitrile (PAN) Precursor",
+}
+
+PRESERVE_ACRONYMS = {
+    "wti": "WTI",
+    "pan": "PAN",
+    "bpa": "BPA",
+    "lng": "Natural Gas",
+    "ndpr": "NdPr",
+    "pvc": "PVC",
+    "ptfe": "PTFE",
+    "pfa": "PFA",
+    "peek": "PEEK",
+    "pps": "PPS",
+    "mdi": "MDI",
+    "tdi": "TDI",
+    "lipf6": "LiPF6",
+    "sic": "SiC",
+    "gan": "GaN",
+    "gaas": "GaAs",
+    "inp": "InP",
+}
+
+
+def normalize_raw_material_name(raw_name: str, matched_code: Optional[str] = None) -> Optional[str]:
+    if matched_code and matched_code in CANONICAL_CODE_NAMES:
+        return CANONICAL_CODE_NAMES[matched_code]
+    cleaned = re.sub(r"\s*\([^)]*\)", " ", (raw_name or "").strip())
+    cleaned = re.sub(
+        r"\b(futures?|spot|benchmarks?|ind(ex|ices)|prices?|pricing|contracts?|quotes?|feedstocks?|raw\s+materials?)\b",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"^(european|global|us|u\.s\.|north\s+american|asian|chinese|domestic|imported|refined|raw|crude|primary|virgin|pure|ultra[- ]?pure|high[- ]?purity|electronic[- ]?grade|battery[- ]?grade|n[- ]?type)\s+",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -–—,:;")
+    if not cleaned or len(cleaned) < 3 or INVALID_COMMODITY_RE.search(cleaned):
+        return None
+    if cleaned.lower() in ("european natural gas", "ttf natural gas", "lng", "liquefied natural gas"):
+        return "Natural Gas"
+    words = []
+    for idx, w in enumerate(cleaned.split(" ")):
+        low = w.lower()
+        if low in PRESERVE_ACRONYMS:
+            words.append(PRESERVE_ACRONYMS[low])
+        elif idx > 0 and low in ("and", "or", "of", "in", "for", "to", "with"):
+            words.append(low)
+        else:
+            words.append(w.capitalize())
+    return " ".join(words)
+
+
+def fetch_canonical_raw_materials(conn) -> str:
+    """Queries live canonical raw material names from Neon so the LLM reuses existing labels before minting new ones."""
+    conn = ensure_conn(conn)
+    names = set(CANONICAL_CODE_NAMES.values())
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT DISTINCT commodity_name
+            FROM equity_commodity_drivers
+            WHERE exposure_role = 'Cost Input'
+              AND commodity_name IS NOT NULL;
+        """)
+        for (cname,) in cur.fetchall():
+            norm = normalize_raw_material_name(cname)
+            if norm:
+                names.add(norm)
+        try:
+            cur.execute("""
+                SELECT DISTINCT elem->>'name'
+                FROM company_products, jsonb_array_elements(raw_materials) AS elem
+                WHERE status = 'active' AND elem->>'name' IS NOT NULL;
+            """)
+            for (rname,) in cur.fetchall():
+                norm = normalize_raw_material_name(rname)
+                if norm:
+                    names.add(norm)
+        except Exception:
+            pass
+    sorted_names = sorted(names)[:120]
+    return ", ".join(sorted_names)
+
 
 NON_MATERIALS_SC_RE = re.compile(
     r"\b("
@@ -100,18 +217,16 @@ CANONICAL_INPUT_GUIDE = """
 - SI=F: Silver
 - PNICKUSDM: Nickel
 - PCOBAUSDM: Cobalt
-- PNGASEUUSDM: European Natural Gas
+- PNGASEUUSDM: Natural Gas
 - WPU101: Iron & Steel
-- WPU061: Industrial Chemicals
-- WPU066: Plastic Resins & Polymers
-- NDPR_CN: Neodymium-Praseodymium (NdPr) Rare Earths
-- LICARB_CN: Lithium Carbonate / Hydroxide
+- NDPR_CN: Neodymium-Praseodymium (NdPr) Oxide
+- LICARB_CN: Lithium Carbonate
 - GALLIUM_9999: Gallium
 - GERMANIUM_INGOT: Germanium
-- POLYSILICON_N: Polysilicon / Silicon Wafers
-- SPHERICAL_GRAPHITE: Graphite (Natural / Synthetic)
+- POLYSILICON_N: Polysilicon
+- SPHERICAL_GRAPHITE: Spherical Graphite
 - COBALT_SULFATE: Cobalt Sulfate
-- CARBON_FIBER_T700: Carbon Fiber / PAN Precursor
+- CARBON_FIBER_T700: Polyacrylonitrile (PAN) Precursor
 - SMH: Semiconductor Wafer Fab Demand
 - ITA: Aerospace & Defense Build Rates
 - LIT: Lithium & EV Battery Supply Chain
@@ -421,7 +536,7 @@ SENSITIVITY_RULES = [
 # Pydantic Schemas
 class CommodityDriverLink(BaseModel):
     commodity_name: str = Field(
-        description="Clean, human-readable name of a physical commodity, raw material, feedstock, energy input, or macro end-market driver (e.g., 'High-Purity Nickel', 'Natural Gas', 'Lithium Carbonate', 'Titanium Sponge', 'Copper Foil', 'Epoxy Resins'). NEVER return customer contracts, OEM revenue lines, company products, ticker symbols, or FRED codes."
+        description="Clean, human-readable name of a specific physical commodity, raw material, chemical feedstock, gas, or macro end-market driver (e.g., 'Nickel', 'Natural Gas', 'Lithium Carbonate', 'Titanium Sponge', 'Copper', 'Epoxy Resin'). NEVER return 'Labor', 'Electricity', 'Utilities', 'Raw Materials', 'Industrial Feedstock', 'Specialty Chemical Intermediates', regional prefixes ('European', 'Global'), or contract suffixes ('Spot', 'Futures')."
     )
     matched_input_code: Optional[str] = Field(
         default=None,
@@ -450,7 +565,7 @@ class CommodityDriverLink(BaseModel):
 
 class DriverBackfillBatch(BaseModel):
     commodity_drivers: List[CommodityDriverLink] = Field(
-        description="1 to 6 specific, company-level physical commodities, raw materials, and energy drivers (never pad with customer contracts or revenue lines)."
+        description="1 to 6 specific, company-level physical commodities, raw materials, and chemical feedstocks (never pad with labor, utilities, generic umbrella terms, or customer contracts)."
     )
 
 
@@ -494,7 +609,7 @@ class FilingSummarySchema(BaseModel):
     key_risks: str = Field(description="Top 1-2 operational, geopolitical, or cyclical risks highlighted in the report.")
     commodity_drivers: List[CommodityDriverLink] = Field(
         default_factory=list,
-        description="1 to 6 specific physical raw materials, energy inputs, feedstocks, and commodity benchmarks that drive this company's costs or revenues (never pad with customer contracts or revenue lines).",
+        description="1 to 6 specific physical raw materials, chemical feedstocks, gases, and commodity benchmarks that drive this company's costs or revenues (never labor, utilities, generic umbrella terms, or customer contracts).",
     )
     upstream_suppliers: List[SupplyChainLink] = Field(
         default_factory=list,
@@ -549,18 +664,16 @@ def save_commodity_drivers(conn, ticker: str, filing_type: str, filing_date: str
     rows = []
     seen_commodities = set()
     for d in (drivers or []):
-        cname = (d.get("commodity_name") or "").strip()
+        code = (d.get("matched_input_code") or "").strip() or None
+        cname = normalize_raw_material_name(d.get("commodity_name") or "", code)
         mech = (d.get("mechanism_detail") or "").strip()
         if not cname or not mech:
-            continue
-        if INVALID_COMMODITY_RE.search(cname):
             continue
         norm_c = cname.lower()
         if norm_c in seen_commodities:
             continue
         seen_commodities.add(norm_c)
 
-        code = (d.get("matched_input_code") or "").strip() or None
         rows.append((
             ticker,
             cname[:100],
@@ -898,6 +1011,7 @@ def extract_filing_text(cik_unpadded: str, accession_number: str, primary_doc: s
 
 def process_sec_filings(conn, limit_tickers=4):
     conn = ensure_conn(conn)
+    existing_raw_vocab = fetch_canonical_raw_materials(conn)
     sec_by_ticker, sec_by_name = fetch_sec_ticker_map()
     with conn.cursor() as cur:
         cur.execute("""
@@ -963,9 +1077,16 @@ def process_sec_filings(conn, limit_tickers=4):
                 - Focus ONLY on {company_name}'s "{sub_sector}" / advanced-materials operations.
                 - If {company_name} is a multi-segment conglomerate, STRICTLY EXCLUDE pharmaceuticals/biologics/healthcare drugs, food/seasonings, consumer/office retail, building automation/avionics, software, and financial services from your summary, commodity drivers, and value-chain links.
 
+                RAW MATERIAL NAMING RULE (OPEN-ENDED CANONICAL RESOLUTION):
+                - Must be a SPECIFIC physical chemical, metal, mineral, gas, or hydrocarbon feedstock (e.g., 'Copper', 'Natural Gas', 'Lithium Carbonate', 'Epoxy Resin', 'Polysilicon', 'Titanium Sponge').
+                - STRICTLY FORBIDDEN: 'Labor', 'Electricity', 'Utilities', 'Freight', 'Raw Materials', 'Industrial Feedstock', 'Specialty Chemical Intermediates', customer contracts, OEM revenue lines, or regional/market suffixes like 'European', 'Global', 'Spot', or 'Futures'.
+                - FIRST check if the input matches one of our existing canonical raw materials in Neon and reuse that EXACT spelling:
+                  [{existing_raw_vocab}]
+                - ONLY if it is a genuinely distinct physical feedstock not in that list, mint a new specific Title Case name.
+
                 1. Identify the exact fiscal_period (e.g., 'FY2025 10-K', 'Q3 2026 10-Q', 'FY2025 20-F', 'H1 2026 6-K Interim').
                 2. Extract operational insights on demand trends, pricing power/raw material pass-through, backlog/capex (ONLY if stated; return null if not disclosed), and risks.
-                3. Extract 1 to 6 physical commodities, raw materials, feedstocks, and energy drivers (clean human-readable names; NEVER customer contracts, OEM revenue lines, company products, or ticker symbols—put customer contracts in downstream_customers instead) matched to:
+                3. Extract 1 to 6 physical commodities, raw materials, feedstocks, and macro/commodity drivers matched to:
                 {CANONICAL_INPUT_GUIDE}
                 4. Extract any explicitly disclosed upstream suppliers, named competitors, or downstream customers (list each company at most ONCE per category) with verbatim quotes.
 
@@ -1110,6 +1231,7 @@ def process_international_briefs(conn, limit_tickers=4):
     - Semi-annual reporters: 2 most recent filings (Annual + Half-Year, or 2 Half-Year reports).
     """
     conn = ensure_conn(conn)
+    existing_raw_vocab = fetch_canonical_raw_materials(conn)
     sec_by_ticker, sec_by_name = fetch_sec_ticker_map()
     with conn.cursor() as cur:
         cur.execute("""
@@ -1184,11 +1306,18 @@ def process_international_briefs(conn, limit_tickers=4):
                 - Focus ONLY on {company_name}'s "{sub_sector}" / advanced-materials operations.
                 - If {company_name} is a multi-segment conglomerate, STRICTLY EXCLUDE pharmaceuticals/biologics/healthcare drugs, food/seasonings, consumer/office retail, building automation/avionics, software, and financial services from your summary, commodity drivers, and value-chain links.
 
+                RAW MATERIAL NAMING RULE (OPEN-ENDED CANONICAL RESOLUTION):
+                - Must be a SPECIFIC physical chemical, metal, mineral, gas, or hydrocarbon feedstock (e.g., 'Copper', 'Natural Gas', 'Lithium Carbonate', 'Epoxy Resin', 'Polysilicon', 'Titanium Sponge').
+                - STRICTLY FORBIDDEN: 'Labor', 'Electricity', 'Utilities', 'Freight', 'Raw Materials', 'Industrial Feedstock', 'Specialty Chemical Intermediates', customer contracts, OEM revenue lines, or regional/market suffixes like 'European', 'Global', 'Spot', or 'Futures'.
+                - FIRST check if the input matches one of our existing canonical raw materials in Neon and reuse that EXACT spelling:
+                  [{existing_raw_vocab}]
+                - ONLY if it is a genuinely distinct physical feedstock not in that list, mint a new specific Title Case name.
+
                 CRITICAL RULES:
                 - Set fiscal_period to the exact period label for {report_date} (e.g., 'FY2025 Annual Report', 'H1 2026 Half-Year Report', or 'Q3 2026 Quarterly Report').
                 - Analyze sequential and YoY revenue & margin changes in pricing_and_margins using the reported figures above.
                 - Only report capex_and_backlog if explicitly stated in the financial metrics, profile, or headlines below; return null if not disclosed.
-                - Extract 1 to 6 physical commodities, raw materials, and energy drivers (NEVER customer contracts, OEM revenue lines, or company products—put customer contracts in downstream_customers instead) matched to:
+                - Extract 1 to 6 physical commodities, raw materials, and macro/commodity drivers matched to:
                 {CANONICAL_INPUT_GUIDE}
                 - Extract any explicitly named upstream suppliers, competitors, or downstream customers (list each company at most ONCE per category) with verbatim quotes.
 
@@ -1254,6 +1383,7 @@ def process_international_briefs(conn, limit_tickers=4):
 def backfill_existing_filing_drivers(conn, limit_tickers=2):
     """Populates per-stock AI commodity drivers for stocks whose filings were already parsed in earlier runs."""
     conn = ensure_conn(conn)
+    existing_raw_vocab = fetch_canonical_raw_materials(conn)
     with conn.cursor() as cur:
         cur.execute(f"""
             SELECT DISTINCT ON (f.ticker)
@@ -1276,8 +1406,16 @@ def backfill_existing_filing_drivers(conn, limit_tickers=2):
         rev_share_note = f"{adv_mat_rev_pct}% of company revenue" if adv_mat_rev_pct is not None else "specialist segment"
         prompt = f"""
         You are an institutional advanced materials commodity & equity analyst.
-        For {company_name} ({ticker}), Assigned Sub-sector: {sub_sector} ({rev_share_note}), Contract Type: {contract_type}, identify 1 to 6 physical raw materials, energy inputs, feedstocks, and commodity benchmarks that drive its advanced-materials costs, margins, or revenues.
-        Use clean human-readable commodity names (NEVER customer contracts, OEM revenue lines, company products, ticker symbols, or FRED codes) and map each to the closest canonical code when applicable:
+        For {company_name} ({ticker}), Assigned Sub-sector: {sub_sector} ({rev_share_note}), Contract Type: {contract_type}, identify 1 to 6 specific physical raw materials, chemical feedstocks, gases, and commodity benchmarks that drive its advanced-materials costs, margins, or revenues.
+
+        RAW MATERIAL NAMING RULE (OPEN-ENDED CANONICAL RESOLUTION):
+        - Must be a SPECIFIC physical chemical, metal, mineral, gas, or hydrocarbon feedstock (e.g., 'Copper', 'Natural Gas', 'Lithium Carbonate', 'Epoxy Resin', 'Polysilicon', 'Titanium Sponge').
+        - STRICTLY FORBIDDEN: 'Labor', 'Electricity', 'Utilities', 'Freight', 'Raw Materials', 'Industrial Feedstock', 'Specialty Chemical Intermediates', customer contracts, OEM revenue lines, or regional/market suffixes like 'European', 'Global', 'Spot', or 'Futures'.
+        - FIRST check if the input matches one of our existing canonical raw materials in Neon and reuse that EXACT spelling:
+          [{existing_raw_vocab}]
+        - ONLY if it is a genuinely distinct physical feedstock not in that list, mint a new specific Title Case name.
+
+        Map each to the closest canonical code when applicable:
         {CANONICAL_INPUT_GUIDE}
 
         FILING CONTEXT ({ftype} {fdate}):
