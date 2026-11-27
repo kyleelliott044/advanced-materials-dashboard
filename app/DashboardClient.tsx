@@ -685,6 +685,11 @@ export default function DashboardClient({
       window.removeEventListener("terminal:select-ticker", handleSelectTicker);
   }, []);
 
+  // Snap to the top of the page when switching top-level tabs or Atlas sub-tabs
+  useEffect(() => {
+    window.scrollTo({ top: 0, behavior: "instant" });
+  }, [activeTab, materialsSubTab]);
+
   // Close active slide-over drawer on Escape key
   useEffect(() => {
     if (!selectedTicker && !selectedMaterialSlug) return;
