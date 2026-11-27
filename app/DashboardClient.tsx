@@ -675,15 +675,21 @@ export default function DashboardClient({
       window.removeEventListener("terminal:select-ticker", handleSelectTicker);
   }, []);
 
-  // Close company dossier on Escape key
+  // Close active slide-over drawer on Escape key
   useEffect(() => {
-    if (!selectedTicker) return;
+    if (!selectedTicker && !selectedMaterialSlug) return;
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === "Escape") setSelectedTicker(null);
+      if (e.key === "Escape") {
+        if (selectedTicker) {
+          setSelectedTicker(null);
+        } else if (selectedMaterialSlug) {
+          setSelectedMaterialSlug(null);
+        }
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selectedTicker]);
+  }, [selectedTicker, selectedMaterialSlug]);
 
   // Reset dossier sub-tab when switching companies
   useEffect(() => {
@@ -1334,6 +1340,7 @@ export default function DashboardClient({
     setSelectedProductCategory(null);
     setActiveTab("screener");
     setSelectedTicker(null);
+    setSelectedMaterialSlug(null);
   };
 
   const handleSelectCategoryFromDossier = (category: string) => {
@@ -1341,6 +1348,7 @@ export default function DashboardClient({
     setSelectedCommodity(null);
     setActiveTab("screener");
     setSelectedTicker(null);
+    setSelectedMaterialSlug(null);
   };
 
   const activeProductsCount = selectedEquityProducts.filter(
@@ -2141,275 +2149,280 @@ export default function DashboardClient({
                 </button>
               </div>
 
-              {!selectedAtlasMaterial && (
-                <div className="w-full sm:w-80">
-                  <input
-                    type="text"
-                    placeholder={
-                      materialsSubTab === "raw"
-                        ? "Search raw materials (e.g. Copper, Lithium, Gallium)..."
-                        : "Search advanced materials (e.g. Silicon Wafers, CCL)..."
-                    }
-                    value={materialSearch}
-                    onChange={(e) => setMaterialSearch(e.target.value)}
-                    className="w-full rounded-lg bg-[#090d16] border border-slate-700/80 px-3.5 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-sky-500"
-                  />
-                </div>
-              )}
+              <div className="w-full sm:w-80">
+                <input
+                  type="text"
+                  placeholder={
+                    materialsSubTab === "raw"
+                      ? "Search raw materials (e.g. Copper, Lithium, Gallium)..."
+                      : "Search advanced materials (e.g. Silicon Wafers, CCL)..."
+                  }
+                  value={materialSearch}
+                  onChange={(e) => setMaterialSearch(e.target.value)}
+                  className="w-full rounded-lg bg-[#090d16] border border-slate-700/80 px-3.5 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-sky-500"
+                />
+              </div>
             </div>
 
-            {/* SUBPAGE VIEW: Selected Material Summary + All Linked Companies */}
-            {selectedAtlasMaterial ? (
-              <div className="space-y-5">
-                <button
-                  type="button"
-                  onClick={() => setSelectedMaterialSlug(null)}
-                  className="inline-flex items-center gap-1.5 text-xs font-mono text-sky-400 hover:text-sky-300"
-                >
-                  <span>
-                    &larr; Back to{" "}
-                    {selectedAtlasMaterial.kind === "raw"
-                      ? "All Raw Materials"
-                      : "All Advanced Materials"}
-                  </span>
-                </button>
-
-                {/* Material Summary Card */}
-                <div className="rounded-2xl bg-gradient-to-br from-[#11192c] via-[#0f172a] to-[#0b1120] border border-slate-700/80 p-6 space-y-4 shadow-xl">
-                  <div className="flex items-start justify-between gap-4 flex-wrap">
-                    <div className="space-y-1.5">
-                      <div className="flex items-center gap-2 flex-wrap">
+            {/* MASTER DIRECTORY GRID */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+              {(materialsSubTab === "raw"
+                ? atlasRawMaterials
+                : atlasAdvancedMaterials
+              )
+                .filter((m) => {
+                  if (!materialSearch.trim()) return true;
+                  const q = materialSearch.toLowerCase();
+                  return (
+                    m.name.toLowerCase().includes(q) ||
+                    m.categoryLabel.toLowerCase().includes(q) ||
+                    m.summary.toLowerCase().includes(q) ||
+                    m.companies.some(
+                      (c) =>
+                        c.ticker.toLowerCase().includes(q) ||
+                        c.companyName.toLowerCase().includes(q)
+                    )
+                  );
+                })
+                .map((mat) => (
+                  <button
+                    key={mat.slug}
+                    type="button"
+                    onClick={() => setSelectedMaterialSlug(mat.slug)}
+                    className="text-left rounded-xl bg-[#111827]/90 hover:bg-[#151f33] border border-slate-800 hover:border-sky-500/45 p-5 transition flex flex-col justify-between gap-4 group"
+                  >
+                    <div className="space-y-2">
+                      <div className="flex items-center justify-between gap-2">
                         <span
-                          className={`px-2.5 py-0.5 rounded text-[10px] font-mono uppercase font-semibold border ${
-                            selectedAtlasMaterial.kind === "raw"
-                              ? "bg-amber-500/15 text-amber-300 border-amber-500/35"
-                              : "bg-sky-500/15 text-sky-300 border-sky-500/35"
+                          className={`text-[10px] font-mono uppercase px-2 py-0.5 rounded border ${
+                            mat.kind === "raw"
+                              ? "bg-amber-500/10 text-amber-300 border-amber-500/30"
+                              : "bg-sky-500/10 text-sky-300 border-sky-500/30"
                           }`}
                         >
-                          {selectedAtlasMaterial.kind === "raw"
-                            ? "Raw Material / Feedstock"
-                            : "Engineered Advanced Material"}
+                          {mat.categoryLabel}
                         </span>
-                        <span className="text-xs font-mono text-slate-400">
-                          {selectedAtlasMaterial.categoryLabel}
+                        <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 text-[10px] font-mono font-semibold">
+                          {mat.companies.length}{" "}
+                          {mat.companies.length === 1 ? "Company" : "Companies"}
                         </span>
-                        {selectedAtlasMaterial.spotPriceLabel && (
-                          <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 text-[11px] font-mono">
-                            Spot: {selectedAtlasMaterial.spotPriceLabel}
+                      </div>
+
+                      <h3 className="text-base font-semibold text-white group-hover:text-sky-300 transition">
+                        {mat.name}
+                      </h3>
+
+                      <p className="text-xs text-slate-400 line-clamp-2 leading-relaxed">
+                        {mat.summary}
+                      </p>
+                    </div>
+
+                    <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between gap-2">
+                      <div className="flex flex-wrap gap-1">
+                        {mat.companies.slice(0, 4).map((c) => (
+                          <span
+                            key={c.ticker}
+                            className="px-1.5 py-0.5 rounded bg-[#090d16] text-sky-400 border border-slate-700/80 font-mono text-[10px]"
+                          >
+                            {c.ticker}
+                          </span>
+                        ))}
+                        {mat.companies.length > 4 && (
+                          <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 font-mono text-[10px]">
+                            +{mat.companies.length - 4}
                           </span>
                         )}
                       </div>
-                      <h2 className="text-2xl font-bold text-white tracking-tight">
-                        {selectedAtlasMaterial.name}
-                      </h2>
-                    </div>
-
-                    {selectedAtlasMaterial.registryCode && (
-                      <button
-                        type="button"
-                        onClick={() =>
-                          handleSelectCommodityFromDossier(
-                            selectedAtlasMaterial.registryCode!
-                          )
-                        }
-                        className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-mono text-sky-300 border border-slate-700 transition"
-                      >
-                        Filter Matrix by Feed ↗
-                      </button>
-                    )}
-                  </div>
-
-                  <p className="text-sm text-slate-200 leading-relaxed max-w-4xl">
-                    {selectedAtlasMaterial.summary}
-                  </p>
-
-                  {selectedAtlasMaterial.endMarkets.length > 0 && (
-                    <div className="flex items-center gap-2 flex-wrap pt-1">
-                      <span className="text-[11px] font-mono uppercase text-slate-500">
-                        Key Downstream Applications:
+                      <span className="text-xs font-mono text-sky-400 shrink-0">
+                        Inspect &rarr;
                       </span>
-                      {selectedAtlasMaterial.endMarkets.map((em) => (
-                        <span
-                          key={em}
-                          className="px-2.5 py-0.5 rounded-full bg-slate-800/90 text-slate-300 border border-slate-700 text-xs"
-                        >
-                          {em}
-                        </span>
-                      ))}
                     </div>
-                  )}
-                </div>
-
-                {/* Company Links Grid */}
-                <div className="space-y-3">
-                  <div className="flex items-center justify-between">
-                    <h3 className="text-sm font-semibold text-white">
-                      {selectedAtlasMaterial.kind === "raw"
-                        ? `Companies Using ${selectedAtlasMaterial.name} in Their Advanced Materials Business (${selectedAtlasMaterial.companies.length})`
-                        : `Companies Manufacturing & Selling ${selectedAtlasMaterial.name} (${selectedAtlasMaterial.companies.length})`}
-                    </h3>
-                    <span className="text-xs text-slate-400">
-                      Click any company link to open full dossier &rarr;
-                    </span>
-                  </div>
-
-                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
-                    {selectedAtlasMaterial.companies.map((comp) => {
-                      const badge =
-                        CONTRACT_BADGES[comp.contractType || ""] || {
-                          label: comp.contractType || "Standard",
-                          style: "bg-slate-800 text-slate-300 border-slate-700",
-                        };
-                      return (
-                        <button
-                          key={comp.ticker}
-                          type="button"
-                          onClick={() => setSelectedTicker(comp.ticker)}
-                          className="text-left rounded-xl bg-[#111827]/90 hover:bg-[#151f33] border border-slate-800 hover:border-sky-500/50 p-4 transition space-y-2.5 group"
-                        >
-                          <div className="flex items-start justify-between gap-2">
-                            <div>
-                              <div className="flex items-center gap-2">
-                                <span className="font-mono font-bold text-sm text-sky-400 group-hover:underline">
-                                  {comp.ticker}
-                                </span>
-                                <span className="font-semibold text-sm text-white">
-                                  {comp.companyName}
-                                </span>
-                                {comp.country && (
-                                  <span className="text-xs">
-                                    {getCountryFlag(comp.country)}
-                                  </span>
-                                )}
-                              </div>
-                              <div className="text-xs text-slate-400 mt-0.5">
-                                {comp.subSector}
-                              </div>
-                            </div>
-
-                            <div className="text-right shrink-0 space-y-1">
-                              <div className="font-mono text-xs text-slate-200">
-                                {formatMarketCap(comp.marketCapUsd)}
-                              </div>
-                              <span
-                                className={`inline-block px-2 py-0.2 rounded-full text-[10px] border ${badge.style}`}
-                              >
-                                {badge.label}
-                              </span>
-                            </div>
-                          </div>
-
-                          {comp.linkedProducts.length > 0 && (
-                            <div className="pt-2 border-t border-slate-800/80 space-y-1.5">
-                              <div className="text-[10px] font-mono uppercase text-slate-500">
-                                {selectedAtlasMaterial.kind === "raw"
-                                  ? "Consumed In:"
-                                  : "Product Lines Sold:"}
-                              </div>
-                              {comp.linkedProducts.slice(0, 3).map((lp, i) => (
-                                <div
-                                  key={`${lp.name}-${i}`}
-                                  className="text-xs text-slate-300 flex items-center justify-between gap-2"
-                                >
-                                  <span className="font-medium text-white truncate">
-                                    • {lp.name}
-                                  </span>
-                                  {lp.detail && (
-                                    <span className="text-[10px] font-mono text-slate-400 truncate max-w-[200px]">
-                                      {lp.detail}
-                                    </span>
-                                  )}
-                                </div>
-                              ))}
-                            </div>
-                          )}
-                        </button>
-                      );
-                    })}
-                  </div>
-                </div>
-              </div>
-            ) : (
-              /* MASTER DIRECTORY GRID: All Raw Materials or All Advanced Materials */
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
-                {(materialsSubTab === "raw"
-                  ? atlasRawMaterials
-                  : atlasAdvancedMaterials
-                )
-                  .filter((m) => {
-                    if (!materialSearch.trim()) return true;
-                    const q = materialSearch.toLowerCase();
-                    return (
-                      m.name.toLowerCase().includes(q) ||
-                      m.categoryLabel.toLowerCase().includes(q) ||
-                      m.summary.toLowerCase().includes(q) ||
-                      m.companies.some(
-                        (c) =>
-                          c.ticker.toLowerCase().includes(q) ||
-                          c.companyName.toLowerCase().includes(q)
-                      )
-                    );
-                  })
-                  .map((mat) => (
-                    <button
-                      key={mat.slug}
-                      type="button"
-                      onClick={() => setSelectedMaterialSlug(mat.slug)}
-                      className="text-left rounded-xl bg-[#111827]/90 hover:bg-[#151f33] border border-slate-800 hover:border-sky-500/45 p-5 transition flex flex-col justify-between gap-4 group"
-                    >
-                      <div className="space-y-2">
-                        <div className="flex items-center justify-between gap-2">
-                          <span
-                            className={`text-[10px] font-mono uppercase px-2 py-0.5 rounded border ${
-                              mat.kind === "raw"
-                                ? "bg-amber-500/10 text-amber-300 border-amber-500/30"
-                                : "bg-sky-500/10 text-sky-300 border-sky-500/30"
-                            }`}
-                          >
-                            {mat.categoryLabel}
-                          </span>
-                          <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 text-[10px] font-mono font-semibold">
-                            {mat.companies.length}{" "}
-                            {mat.companies.length === 1 ? "Company" : "Companies"}
-                          </span>
-                        </div>
-
-                        <h3 className="text-base font-semibold text-white group-hover:text-sky-300 transition">
-                          {mat.name}
-                        </h3>
-
-                        <p className="text-xs text-slate-400 line-clamp-2 leading-relaxed">
-                          {mat.summary}
-                        </p>
-                      </div>
-
-                      <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between gap-2">
-                        <div className="flex flex-wrap gap-1">
-                          {mat.companies.slice(0, 4).map((c) => (
-                            <span
-                              key={c.ticker}
-                              className="px-1.5 py-0.5 rounded bg-[#090d16] text-sky-400 border border-slate-700/80 font-mono text-[10px]"
-                            >
-                              {c.ticker}
-                            </span>
-                          ))}
-                          {mat.companies.length > 4 && (
-                            <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 font-mono text-[10px]">
-                              +{mat.companies.length - 4}
-                            </span>
-                          )}
-                        </div>
-                        <span className="text-xs font-mono text-sky-400 shrink-0">
-                          Inspect &rarr;
-                        </span>
-                      </div>
-                    </button>
-                  ))}
-              </div>
-            )}
+                  </button>
+                ))}
+            </div>
           </section>
         )}
       </main>
+
+      {/* Slide-Over Material Dossier Drawer (Matches Stock Dossier UX) */}
+      {selectedAtlasMaterial && !selectedEquity && (
+        <div
+          onClick={() => setSelectedMaterialSlug(null)}
+          className="fixed inset-0 z-50 flex justify-end bg-black/75 backdrop-blur-sm"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="w-full max-w-3xl bg-[#0b111e] border-l border-slate-800 h-full flex flex-col shadow-2xl"
+          >
+            {/* Sticky Material Drawer Header */}
+            <div className="px-6 pt-5 pb-4 bg-[#0d1424] border-b border-slate-800/90 space-y-3 shrink-0">
+              <div className="flex items-start justify-between gap-4">
+                <div className="space-y-1.5">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    <span
+                      className={`px-2.5 py-0.5 rounded text-[10px] font-mono uppercase font-semibold border ${
+                        selectedAtlasMaterial.kind === "raw"
+                          ? "bg-amber-500/15 text-amber-300 border-amber-500/35"
+                          : "bg-sky-500/15 text-sky-300 border-sky-500/35"
+                      }`}
+                    >
+                      {selectedAtlasMaterial.kind === "raw"
+                        ? "Raw Material / Feedstock"
+                        : "Engineered Advanced Material"}
+                    </span>
+                    <span className="text-xs font-mono text-slate-400">
+                      {selectedAtlasMaterial.categoryLabel}
+                    </span>
+                    {selectedAtlasMaterial.spotPriceLabel && (
+                      <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 text-[11px] font-mono">
+                        Spot: {selectedAtlasMaterial.spotPriceLabel}
+                      </span>
+                    )}
+                  </div>
+                  <h2 className="text-xl font-bold text-white tracking-tight">
+                    {selectedAtlasMaterial.name}
+                  </h2>
+                </div>
+
+                <div className="flex items-center gap-2 shrink-0">
+                  {selectedAtlasMaterial.registryCode && (
+                    <button
+                      type="button"
+                      onClick={() =>
+                        handleSelectCommodityFromDossier(
+                          selectedAtlasMaterial.registryCode!
+                        )
+                      }
+                      className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-mono text-sky-300 border border-slate-700 transition"
+                    >
+                      Filter Matrix ↗
+                    </button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => setSelectedMaterialSlug(null)}
+                    className="px-3 py-1.5 rounded-lg bg-slate-800/90 hover:bg-slate-700 text-xs font-medium text-slate-200 border border-slate-700/80 transition"
+                  >
+                    Close ✕
+                  </button>
+                </div>
+              </div>
+
+              {/* Summary Box Always Visible at Top */}
+              <div className="rounded-xl bg-[#090d16] border border-slate-800/90 p-3.5 space-y-2.5">
+                <p className="text-xs text-slate-200 leading-relaxed">
+                  {selectedAtlasMaterial.summary}
+                </p>
+
+                {selectedAtlasMaterial.endMarkets.length > 0 && (
+                  <div className="flex items-center gap-1.5 flex-wrap pt-1 border-t border-slate-800/70">
+                    <span className="text-[10px] font-mono uppercase text-slate-500">
+                      End-Markets:
+                    </span>
+                    {selectedAtlasMaterial.endMarkets.map((em) => (
+                      <span
+                        key={em}
+                        className="px-2 py-0.5 rounded-full bg-slate-800/90 text-slate-300 border border-slate-700 text-[11px]"
+                      >
+                        {em}
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            </div>
+
+            {/* Scrollable Linked Companies Body */}
+            <div className="flex-1 overflow-y-auto p-6 space-y-4">
+              <div className="flex items-center justify-between gap-2 flex-wrap">
+                <h3 className="text-xs font-mono uppercase tracking-wider text-slate-400">
+                  {selectedAtlasMaterial.kind === "raw"
+                    ? `Companies Consuming ${selectedAtlasMaterial.name} (${selectedAtlasMaterial.companies.length})`
+                    : `Companies Selling ${selectedAtlasMaterial.name} (${selectedAtlasMaterial.companies.length})`}
+                </h3>
+                <span className="text-[11px] text-sky-400">
+                  Click any company to open full stock dossier &rarr;
+                </span>
+              </div>
+
+              <div className="grid grid-cols-1 gap-3">
+                {selectedAtlasMaterial.companies.map((comp) => {
+                  const badge =
+                    CONTRACT_BADGES[comp.contractType || ""] || {
+                      label: comp.contractType || "Standard",
+                      style: "bg-slate-800 text-slate-300 border-slate-700",
+                    };
+                  return (
+                    <button
+                      key={comp.ticker}
+                      type="button"
+                      onClick={() => setSelectedTicker(comp.ticker)}
+                      className="text-left rounded-xl bg-[#111827]/90 hover:bg-[#151f33] border border-slate-800 hover:border-sky-500/50 p-4 transition space-y-2.5 group"
+                    >
+                      <div className="flex items-start justify-between gap-2">
+                        <div>
+                          <div className="flex items-center gap-2">
+                            <span className="font-mono font-bold text-sm text-sky-400 group-hover:underline">
+                              {comp.ticker}
+                            </span>
+                            <span className="font-semibold text-sm text-white">
+                              {comp.companyName}
+                            </span>
+                            {comp.country && (
+                              <span className="text-xs">
+                                {getCountryFlag(comp.country)}
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-xs text-slate-400 mt-0.5">
+                            {comp.subSector}
+                          </div>
+                        </div>
+
+                        <div className="text-right shrink-0 space-y-1">
+                          <div className="font-mono text-xs text-slate-200">
+                            {formatMarketCap(comp.marketCapUsd)}
+                          </div>
+                          <span
+                            className={`inline-block px-2 py-0.2 rounded-full text-[10px] border ${badge.style}`}
+                          >
+                            {badge.label}
+                          </span>
+                        </div>
+                      </div>
+
+                      {comp.linkedProducts.length > 0 && (
+                        <div className="pt-2 border-t border-slate-800/80 space-y-1.5">
+                          <div className="text-[10px] font-mono uppercase text-slate-500">
+                            {selectedAtlasMaterial.kind === "raw"
+                              ? "Consumed In:"
+                              : "Product Lines Sold:"}
+                          </div>
+                          {comp.linkedProducts.slice(0, 4).map((lp, i) => (
+                            <div
+                              key={`${lp.name}-${i}`}
+                              className="text-xs text-slate-300 flex items-center justify-between gap-2"
+                            >
+                              <span className="font-medium text-white truncate">
+                                • {lp.name}
+                              </span>
+                              {lp.detail && (
+                                <span className="text-[10px] font-mono text-slate-400 truncate max-w-[240px]">
+                                  {lp.detail}
+                                </span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Clean Tabbed Slide-Over Company Dossier Drawer */}
       {selectedEquity && (
