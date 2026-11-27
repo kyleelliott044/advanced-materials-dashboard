@@ -21,6 +21,11 @@ on:
         required: false
         default: "10"
         type: string
+      metrics_batch_limit:
+        description: "Quantitative filing metrics batch size"
+        required: false
+        default: "40"
+        type: string
 
 concurrency:
   group: master-pipeline
@@ -57,4 +62,12 @@ jobs:
     needs: [step-3-backfill-enrichment, step-4-extract-products]
     if: ${{ !cancelled() }}
     uses: ./.github/workflows/task-validate-products.yml
+    secrets: inherit
+
+  step-6-extract-quant-metrics:
+    needs: [step-5-validate-products]
+    if: ${{ !cancelled() }}
+    uses: ./.github/workflows/task-extract-quant-filing-metrics.yml
+    with:
+      batch_limit: ${{ inputs.metrics_batch_limit || '40' }}
     secrets: inherit
