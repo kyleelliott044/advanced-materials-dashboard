@@ -8,16 +8,14 @@ export interface AtlasCompanyLink {
   marketCapUsd: number | null;
   contractType: string | null;
   /** Specific product(s) that either consume this raw material or represent this advanced material */
-  linkedProducts: {
-    id?: number;
+linkedProducts: {
+    id?: string | number;
     name: string;
     category?: string;
     businessUnit?: string;
-    detail?: string; // e.g. role/basis for raw material, or performance_spec for advanced material
+    detail?: string;
     endDemand?: string;
   }[];
-  sourceOrigin: "product" | "filing_driver" | "sector_rule";
-}
 
 export interface MaterialAtlasEntry {
   slug: string;
