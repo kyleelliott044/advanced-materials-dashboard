@@ -252,6 +252,111 @@ const RAW_MATERIAL_ALIASES: Record<string, string> = {
   "iron and steel": "Iron and Steel",
 };
 
+// ---------- Advanced-material admission rules ----------
+
+type RejectTrace = { segment: string; reason: string };
+interface ResolveOpts {
+  strict?: boolean; // alias/family hits only; never mint a class from free text
+  trace?: RejectTrace[]; // optional sink for rejection reasons
+}
+
+const SPELLING_FIXES: [RegExp, string][] = [
+  [/\bspeciality\b/gi, "Specialty"],
+  [/\bspecialities\b/gi, "Specialties"],
+];
+const fixSpelling = (s: string) =>
+  SPELLING_FIXES.reduce((acc, [re, rep]) => acc.replace(re, rep), s);
+const stripParens = (s: string) => s.replace(/\s*\([^)]*\)?/g, " ");
+
+const STOP_TOKENS = new Set([
+  "and", "or", "of", "for", "in", "the", "to", "with", "a", "an", "from",
+  "used", "serving", "supporting", "enabling",
+]);
+
+// Adjectives that cannot be a product on their own
+const MODIFIER_TOKENS = new Set([
+  "stainless", "specialty", "specialties", "advanced", "engineered", "performance",
+  "high", "industrial", "electronic", "precision", "structural", "functional",
+  "premium", "technical", "specialized", "custom", "proprietary", "next",
+  "generation", "novel", "innovative", "critical", "strategic", "synthetic",
+  "natural", "ultra", "pure", "purity", "grade",
+]);
+
+// Generic head nouns that name a category of thing, not a thing
+const GENERIC_HEAD_TOKENS = new Set([
+  "material", "materials", "chemical", "chemicals", "product", "products",
+  "solution", "solutions", "technology", "technologies", "system", "systems",
+  "service", "services", "portfolio", "offering", "offerings", "business",
+  "segment", "segments", "division", "line", "equipment", "device", "devices",
+  "component", "components", "part", "parts", "application", "applications",
+  "market", "markets", "industry", "industries", "sector", "sectors",
+  "mineral", "minerals", "ore", "ores", "metal", "metals",
+]);
+
+// Activities, not outputs
+const PROCESS_TOKENS = new Set([
+  "mining", "refining", "processing", "recycling", "smelting", "extraction",
+  "production", "manufacturing", "fabrication", "separation", "distribution",
+  "trading", "supply", "sales", "beneficiation",
+]);
+
+// End markets / verticals, not products
+const END_MARKET_TOKENS = new Set([
+  "semiconductor", "semiconductors", "electronics", "aerospace", "defense",
+  "defence", "automotive", "medical", "healthcare", "energy", "nuclear",
+  "mobility", "optics", "battery", "batteries",
+]);
+
+// Residuals that survive token stripping but are still not a product
+const BARE_AMBIGUOUS_PHRASES = new Set(["rare earth", "rare earths"]);
+
+// "Materials for X", "Chemicals used in X", "... Industry", "... Manufacturing"
+const DESCRIPTIVE_PHRASE_RE =
+  /^(materials?|chemicals?|products?|solutions?|technolog(y|ies)|components?|equipment|systems?|services?|supplies|consumables?)\s+(for|used\s+(in|for)|in|serving|supporting|enabling|to)\b|\b(manufacturing|fabrication|industry|industries|sectors?|markets?|applications?|segments?|business|division|operations)$/i;
+
+// Raw feedstocks must not also appear as advanced products. Keys and canonical values both count.
+const RAW_KEY_SET = new Set<string>(
+  [...Object.keys(RAW_MATERIAL_ALIASES), ...Object.values(RAW_MATERIAL_ALIASES)].map(
+    normalizeMaterialKey
+  )
+);
+
+// Pattern-level aliases for families of phrasings that exact-key aliases miss
+const FAMILY_ALIASES: [RegExp, string][] = [
+  [/\b(stainless|specialty)\b.*\b(steels?|alloys?)\b/, "Specialty Steel and Alloys"],
+  [/\brare earth\b.*\b(refin\w*|process\w*|separat\w*)\b/, "Rare Earth Oxides and Metals"],
+];
+function matchFamilyAlias(lookupKey: string): string | null {
+  for (const [re, canonical] of FAMILY_ALIASES) if (re.test(lookupKey)) return canonical;
+  return null;
+}
+
+function tokenize(s: string): string[] {
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim().split(" ").filter(Boolean);
+}
+
+/** True if at least one token survives that could name a physical product. */
+function isInformativeProduct(phrase: string): boolean {
+  const residual = tokenize(phrase).filter(
+    (t) =>
+      !STOP_TOKENS.has(t) &&
+      !MODIFIER_TOKENS.has(t) &&
+      !GENERIC_HEAD_TOKENS.has(t) &&
+      !PROCESS_TOKENS.has(t) &&
+      !END_MARKET_TOKENS.has(t)
+  );
+  if (residual.length === 0) return false;
+  return !BARE_AMBIGUOUS_PHRASES.has(residual.join(" "));
+}
+
+function advRejectionReason(cleaned: string, lookupKey: string): string | null {
+  if (VAGUE_OR_NON_MATERIAL_ADV_RE.test(cleaned)) return "vague-umbrella";
+  if (DESCRIPTIVE_PHRASE_RE.test(cleaned)) return "descriptive-phrase";
+  if (RAW_KEY_SET.has(lookupKey)) return "raw-feedstock";
+  if (!isInformativeProduct(cleaned)) return "no-product-noun";
+  return null;
+}
+
 const ADV_MATERIAL_ALIASES: Record<string, string> = {
   "battery electrolyte": "Battery Electrolytes",
   "battery electrolytes": "Battery Electrolytes",
