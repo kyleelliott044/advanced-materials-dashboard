@@ -25,6 +25,148 @@ GENERIC_SEGMENT_RE = re.compile(
     re.IGNORECASE,
 )
 
+GENERIC_ADV_CATEGORY_RE = re.compile(
+    r"^\s*(electronic\s+materials?|advanced\s+materials?(\s+portfolio)?|"
+    r"specialty\s+materials?|performance\s+chemicals?|engineered\s+materials?|"
+    r"industrial\s+materials?|semiconductor\s+materials?|battery\s+materials?)\s*$",
+    re.IGNORECASE,
+)
+
+INVALID_RAW_MATERIAL_RE = re.compile(
+    r"^\s*("
+    r"labor|direct\s+labor|manufacturing\s+labor|"
+    r"raw\s+materials?|direct\s+materials?|other\s+raw\s+materials?|"
+    r"feedstocks?|industrial\s+feedstocks?|chemical\s+feedstocks?|petrochemical\s+feedstocks?|"
+    r"specialty\s+chemical\s+intermediates?|chemical\s+intermediates?|intermediates?|"
+    r"specialty\s+chemicals?|industrial\s+chemicals?|base\s+chemicals?|"
+    r"commodities|metals?|precious\s+metals?|rare\s+earths?|minerals?|polymers?|resins?|plastic\s+resins?|"
+    r"energy|electricity|power|utilities|water|freight|logistics|transportation|"
+    r"packaging|consumables?|components?|parts?|equipment|tooling|scrap|general|other"
+    r")\s*$"
+    r"|\b(labor|raw\s+materials?|industrial\s+feedstocks?|specialty\s+chemical\s+intermediates?)\b",
+    re.IGNORECASE,
+)
+
+CANONICAL_CODE_NAMES = {
+    "HG=F": "Copper",
+    "NG=F": "Natural Gas",
+    "CL=F": "WTI Crude Oil",
+    "BZ=F": "Brent Crude Oil",
+    "ALI=F": "Aluminum",
+    "PL=F": "Platinum",
+    "SI=F": "Silver",
+    "PNICKUSDM": "Nickel",
+    "PCOBAUSDM": "Cobalt",
+    "PNGASEUUSDM": "Natural Gas",
+    "WPU101": "Iron & Steel",
+    "NDPR_CN": "Neodymium-Praseodymium (NdPr) Oxide",
+    "LICARB_CN": "Lithium Carbonate",
+    "GALLIUM_9999": "Gallium",
+    "GERMANIUM_INGOT": "Germanium",
+    "POLYSILICON_N": "Polysilicon",
+    "SPHERICAL_GRAPHITE": "Spherical Graphite",
+    "COBALT_SULFATE": "Cobalt Sulfate",
+    "CARBON_FIBER_T700": "Polyacrylonitrile (PAN) Precursor",
+}
+
+PRESERVE_ACRONYMS = {
+    "wti": "WTI",
+    "pan": "PAN",
+    "bpa": "BPA",
+    "lng": "Natural Gas",
+    "ndpr": "NdPr",
+    "pvc": "PVC",
+    "ptfe": "PTFE",
+    "pfa": "PFA",
+    "peek": "PEEK",
+    "pps": "PPS",
+    "mdi": "MDI",
+    "tdi": "TDI",
+    "lipf6": "LiPF6",
+    "sic": "SiC",
+    "gan": "GaN",
+    "gaas": "GaAs",
+    "inp": "InP",
+    "ccl": "CCL",
+    "abf": "ABF",
+    "cmp": "CMP",
+    "euv": "EUV",
+    "arf": "ArF",
+    "oled": "OLED",
+    "mlcc": "MLCC",
+    "soi": "SOI",
+    "hbm": "HBM",
+    "ic": "IC",
+    "rf": "RF",
+    "ev": "EV",
+    "pgm": "PGM",
+    "pvoh": "PVOH",
+    "ncma": "NCMA",
+    "nmc": "NMC",
+    "lfp": "LFP",
+    "ndfeb": "NdFeB",
+}
+
+LOWER_CONNECTORS = {"and", "or", "of", "in", "for", "to", "with"}
+
+
+def _to_canonical_title_case(raw: str) -> str:
+    words = []
+    for idx, w in enumerate(raw.split(" ")):
+        low = w.lower()
+        clean_low = low.strip("()")
+        if clean_low in PRESERVE_ACRONYMS:
+            token = PRESERVE_ACRONYMS[clean_low]
+            words.append(f"({token})" if low.startswith("(") and low.endswith(")") else token)
+        elif idx > 0 and low in LOWER_CONNECTORS:
+            words.append(low)
+        elif "-" in w:
+            parts = []
+            for p in w.split("-"):
+                p_low = p.lower()
+                if p_low in PRESERVE_ACRONYMS:
+                    parts.append(PRESERVE_ACRONYMS[p_low])
+                else:
+                    parts.append(p.capitalize())
+            words.append("-".join(parts))
+        else:
+            words.append(w.capitalize())
+    return " ".join(words)
+
+
+def normalize_raw_material_name(raw_name: str, matched_code: Optional[str] = None) -> Optional[str]:
+    if matched_code and matched_code in CANONICAL_CODE_NAMES:
+        return CANONICAL_CODE_NAMES[matched_code]
+    cleaned = re.sub(r"\s*\([^)]*\)", " ", (raw_name or "").strip())
+    cleaned = re.sub(
+        r"\b(futures?|spot|benchmarks?|ind(ex|ices)|prices?|pricing|contracts?|quotes?|feedstocks?|raw\s+materials?)\b",
+        " ",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(
+        r"^(european|global|us|u\.s\.|north\s+american|asian|chinese|domestic|imported|refined|raw|crude|primary|virgin|pure|ultra[- ]?pure|high[- ]?purity|electronic[- ]?grade|battery[- ]?grade|n[- ]?type)\s+",
+        "",
+        cleaned,
+        flags=re.IGNORECASE,
+    )
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -–—,:;")
+    if not cleaned or len(cleaned) < 3 or INVALID_RAW_MATERIAL_RE.search(cleaned):
+        return None
+    if cleaned.lower() in ("european natural gas", "ttf natural gas", "lng", "liquefied natural gas"):
+        return "Natural Gas"
+    return _to_canonical_title_case(cleaned)
+
+
+def normalize_adv_category(raw_cat: str, fallback_name: str = "") -> str:
+    cat = re.sub(r"\s+", " ", (raw_cat or "").strip())
+    if not cat or GENERIC_ADV_CATEGORY_RE.match(cat):
+        alt = re.sub(r"\s+", " ", (fallback_name or "").strip())
+        if alt and not GENERIC_ADV_CATEGORY_RE.match(alt):
+            cat = alt
+    return _to_canonical_title_case(cat) if cat else "Specialty Engineered Materials"
+
+
 NON_ADV_MAT_RE = re.compile(
     r"\b("
     r"pharmaceuticals?|oncology|biologics?|vaccines?|therapeutics?|clinical\s+trials?|"
@@ -108,8 +250,53 @@ def ensure_conn(conn):
     return connect_db()
 
 
+def fetch_live_taxonomy(conn) -> tuple[str, str]:
+    """Fetches live canonical Advanced Material categories & Raw Material names from Neon."""
+    conn = ensure_conn(conn)
+    categories = set()
+    raw_mats = set(CANONICAL_CODE_NAMES.values())
+
+    with conn.cursor() as cur:
+        cur.execute("""
+            SELECT DISTINCT category
+            FROM company_products
+            WHERE status = 'active' AND category IS NOT NULL;
+        """)
+        for (cat,) in cur.fetchall():
+            clean_cat = normalize_adv_category(cat)
+            if clean_cat and not GENERIC_ADV_CATEGORY_RE.match(clean_cat):
+                categories.add(clean_cat)
+
+        cur.execute("""
+            SELECT DISTINCT elem->>'name'
+            FROM company_products, jsonb_array_elements(raw_materials) AS elem
+            WHERE status = 'active' AND elem->>'name' IS NOT NULL;
+        """)
+        for (rname,) in cur.fetchall():
+            norm = normalize_raw_material_name(rname)
+            if norm:
+                raw_mats.add(norm)
+
+        try:
+            cur.execute("""
+                SELECT DISTINCT commodity_name
+                FROM equity_commodity_drivers
+                WHERE exposure_role = 'Cost Input' AND commodity_name IS NOT NULL;
+            """)
+            for (cname,) in cur.fetchall():
+                norm = normalize_raw_material_name(cname)
+                if norm:
+                    raw_mats.add(norm)
+        except Exception:
+            pass
+
+    return ", ".join(sorted(categories)[:100]), ", ".join(sorted(raw_mats)[:120])
+
+
 class RawMaterialSpec(BaseModel):
-    name: str = Field(description="Specific chemical, metal, mineral, or feedstock name.")
+    name: str = Field(
+        description="Specific physical chemical, metal, mineral, gas, or hydrocarbon feedstock (e.g., 'Copper', 'Natural Gas', 'Lithium Carbonate', 'Epoxy Resin'). NEVER 'Labor', 'Utilities', 'Raw Materials', 'Industrial Feedstock', 'Specialty Chemical Intermediates', or 'Spot'/'Futures'/'European' prefixes."
+    )
     commodity_ref: Optional[str] = Field(
         default=None,
         description="Exact input_code from the provided registry list ONLY if an exact match exists; otherwise null. NEVER invent codes.",
@@ -150,8 +337,8 @@ class SourceSpec(BaseModel):
 
 class ProductItem(BaseModel):
     id: str = Field(description="Lowercase slug prefixed with ticker, e.g. 'entg-cmp-slurries'.")
-    name: str
-    category: str
+    name: str = Field(description="Specific engineered material product name (never an umbrella division like 'Electronic Materials').")
+    category: str = Field(description="Canonical engineered material class—reuse an existing category from the live taxonomy when applicable, or mint a specific Title Case material class if novel.")
     business_unit: str
     status: Literal["active", "divested"]
     as_of: str = Field(description="Reporting period, e.g. 'FY2025' or 'Q3 2026'.")
@@ -365,6 +552,8 @@ def run_product_extraction(conn):
     for idx, (ticker, company_name, sub_sector, adv_mat_rev_pct, _) in enumerate(targets, start=1):
         print(f"[{idx}/{len(targets)}] Extracting {ticker} ({company_name})...", flush=True)
         conn = ensure_conn(conn)
+        existing_categories, existing_raw_materials = fetch_live_taxonomy(conn)
+
         with conn.cursor() as cur:
             cur.execute("""
                 SELECT filing_type, filing_date::text, headline, executive_summary, pricing_and_margins, capex_and_backlog
@@ -402,6 +591,18 @@ def run_product_extraction(conn):
         CONGLOMERATE & MATERIALS-VS-COMPONENTS BOUNDARY (CRITICAL):
         - Extract ONLY true engineered materials, formulated chemicals, resins, epoxy molding compounds (EMC), CMP slurries, spin-on dielectrics (SOD), OLED host/dopant materials, photoresists, specialty gases, wafers, films, fibers, powders, precursors, or specialty alloys belonging to "{sub_sector}".
         - STRICTLY EXCLUDE assembled components, discrete devices, and finished battery cells/modules/packs (e.g., prismatic/cylindrical/pouch EV battery cells, ESS racks, optical transceivers, connectors, sensors, housings, display panels, machinery/equipment) as well as pharma, food, consumer goods, and software. Put all excluded components/divisions in excluded[] instead.
+
+        ADVANCED MATERIAL CATEGORY & NAME RESOLUTION (OPEN-ENDED CANONICAL):
+        - Never use vague umbrella division names like 'Electronic Materials', 'Advanced Materials', 'Specialty Materials', or 'Performance Chemicals' as a product name or category.
+        - For each product's `category`, FIRST check if it fits one of our existing canonical categories in Neon and reuse that EXACT spelling:
+          [{existing_categories}]
+        - ONLY if the product represents a genuinely distinct engineered material class not covered above, mint a new specific Title Case category name.
+
+        RAW MATERIALS RESOLUTION (OPEN-ENDED CANONICAL):
+        - List ONLY specific physical chemicals, metals, minerals, gases, or hydrocarbons (never 'Labor', 'Utilities', 'Raw Materials', 'Industrial Feedstock', 'Specialty Chemical Intermediates', or 'Spot'/'Futures'/'European' prefixes).
+        - Reuse an EXACT existing canonical raw material name when applicable:
+          [{existing_raw_materials}]
+        - Otherwise mint a new specific Title Case physical feedstock name.
 
         STRICT INCLUSION GATE (ALL 4 MUST HOLD, OTHERWISE PUT IN excluded[]):
         1. Material-form product (chemical formulation, resin, slurry, wafer, film, fiber, powder, or alloy—NOT an assembled component, cell, module, or device).
@@ -454,7 +655,11 @@ def run_product_extraction(conn):
                     ds_raw.get("end_demand") or "",
                 ])
 
-                if GENERIC_SEGMENT_RE.search(prod_name) or NON_ADV_MAT_RE.search(check_blob):
+                if (
+                    GENERIC_SEGMENT_RE.search(prod_name)
+                    or GENERIC_ADV_CATEGORY_RE.match(prod_name)
+                    or NON_ADV_MAT_RE.search(check_blob)
+                ):
                     excluded_items.append({
                         "name": prod_name,
                         "reason": "Excluded non-advanced-materials division, finished good, or generic segment.",
@@ -467,12 +672,19 @@ def run_product_extraction(conn):
                 seen_product_names.add(norm_prod)
 
                 cleaned_rms = []
+                seen_rm_names = set()
                 for rm in prod.get("raw_materials", []):
                     cref = rm.get("commodity_ref")
                     if cref not in registry:
                         cref = None
+                    clean_rm_name = normalize_raw_material_name(rm.get("name") or "", cref)
+                    if not clean_rm_name:
+                        continue
+                    if clean_rm_name.lower() in seen_rm_names:
+                        continue
+                    seen_rm_names.add(clean_rm_name.lower())
                     cleaned_rms.append({
-                        "name": rm.get("name", "Unknown material"),
+                        "name": clean_rm_name,
                         "commodity_ref": cref,
                         "role": rm.get("role", "input"),
                         "basis": rm.get("basis") if rm.get("basis") in ("disclosed", "inferred") else "inferred",
@@ -512,6 +724,7 @@ def run_product_extraction(conn):
                 conf = prod.get("conf") if prod.get("conf") in ("high", "med", "low") else "med"
                 valid_peers = list(dict.fromkeys(p for p in prod.get("peers", []) if p in universe and p != ticker))
                 prod_id = _normalize_product_slug(prod.get("id", ""), ticker, prod_name)
+                clean_category = normalize_adv_category(prod.get("category") or "", prod_name)
 
                 cur.execute(
                     """
@@ -540,7 +753,7 @@ def run_product_extraction(conn):
                         prod_id,
                         ticker,
                         prod_name,
-                        prod["category"],
+                        clean_category,
                         prod.get("business_unit", sub_sector or "Core Materials"),
                         status,
                         prod.get("as_of", "FY2025"),
