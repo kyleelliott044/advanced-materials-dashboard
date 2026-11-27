@@ -48,6 +48,13 @@ NON_US_EXCHANGE_SUFFIX_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Identifies FY2024 or older filings (including calendar-year FY2024 10-K/20-F filings submitted through May 2025)
+STALE_FY24_SQL = """(
+    f.filing_date < '2025-01-01'
+    OR COALESCE(f.fiscal_period, '') ~* '\\m(fy\\s*)?202[0-4]\\M'
+    OR (f.filing_type IN ('10-K', '20-F', '40-F', '10-K/A', '20-F/A') AND f.filing_date < '2025-06-01')
+)"""
+
 
 def _build_gemini_client():
     if not GEMINI_API_KEY:
@@ -1248,7 +1255,7 @@ def backfill_existing_filing_drivers(conn, limit_tickers=2):
     """Populates per-stock AI commodity drivers for stocks whose filings were already parsed in earlier runs."""
     conn = ensure_conn(conn)
     with conn.cursor() as cur:
-        cur.execute("""
+        cur.execute(f"""
             SELECT DISTINCT ON (f.ticker)
                 f.ticker, e.company_name, e.sub_sector, e.contract_type, e.adv_mat_rev_pct,
                 f.filing_type, f.filing_date::text, f.executive_summary,
@@ -1257,7 +1264,10 @@ def backfill_existing_filing_drivers(conn, limit_tickers=2):
             JOIN equities_universe e ON f.ticker = e.ticker
             LEFT JOIN equity_commodity_drivers d ON f.ticker = d.ticker
             WHERE d.ticker IS NULL
-            ORDER BY f.ticker, f.filing_date DESC
+            ORDER BY
+                f.ticker,
+                CASE WHEN {STALE_FY24_SQL} THEN 1 ELSE 0 END ASC,
+                f.filing_date DESC
             LIMIT %s;
         """, (limit_tickers,))
         rows = cur.fetchall()
@@ -1401,19 +1411,43 @@ def generate_market_macro_narrative(conn):
         """)
         commodities = cur.fetchall()
 
-        cur.execute("""
-            SELECT f.ticker, e.company_name, e.sub_sector, f.filing_type, f.filing_date,
-                   f.headline, f.executive_summary, f.pricing_and_margins, f.capex_and_backlog
-            FROM company_filings_ai f
-            JOIN equities_universe e ON f.ticker = e.ticker
-            ORDER BY f.filing_date DESC
-            LIMIT 60;
+        cur.execute(f"""
+            WITH ranked_filings AS (
+                SELECT DISTINCT ON (f.ticker)
+                    f.ticker,
+                    e.company_name,
+                    e.sub_sector,
+                    f.filing_type,
+                    f.filing_date,
+                    f.headline,
+                    f.executive_summary,
+                    f.pricing_and_margins,
+                    f.capex_and_backlog,
+                    CASE WHEN {STALE_FY24_SQL} THEN TRUE ELSE FALSE END AS is_stale_fy24
+                FROM company_filings_ai f
+                JOIN equities_universe e ON f.ticker = e.ticker
+                ORDER BY
+                    f.ticker,
+                    CASE WHEN {STALE_FY24_SQL} THEN 1 ELSE 0 END ASC,
+                    f.filing_date DESC,
+                    f.id DESC
+            )
+            SELECT
+                ticker, company_name, sub_sector, filing_type, filing_date,
+                headline, executive_summary, pricing_and_margins, capex_and_backlog,
+                is_stale_fy24
+            FROM ranked_filings
+            ORDER BY is_stale_fy24 ASC, filing_date DESC;
         """)
-        filings = cur.fetchall()
+        all_latest = cur.fetchall()
 
-    if not filings:
+    if not all_latest:
         print("No filings available yet to synthesize macro narrative.", flush=True)
         return conn
+
+    # Disqualify FY2024-only companies whenever newer FY2025+ filings exist
+    fresh_filings = [r for r in all_latest if not r[9]]
+    filings = (fresh_filings if fresh_filings else all_latest)[:60]
 
     comm_text = "\n".join([f"- {c[1]}: {c[2]} {c[3]} (as of {c[4]})" for c in commodities])
     filings_text = "\n".join([
@@ -1423,7 +1457,7 @@ def generate_market_macro_narrative(conn):
 
     prompt = f"""
     You are the Chief Materials & Industrial Strategist at an institutional macro fund.
-    Synthesize the live commodity/macro backdrop alongside the latest 10-K, 10-Q, and earnings reports across our global advanced materials universe into a cohesive, actionable market narrative.
+    Synthesize the live commodity/macro backdrop alongside the latest FY2025/FY2026 10-K, 10-Q, and earnings reports across our global advanced materials universe into a cohesive, actionable market narrative.
     Connect specific company commentary directly to commodity price trends, AI infrastructure capex, aerospace/defense build rates, and battery/electrification supply chains.
 
     LIVE COMMODITIES & MACRO INPUTS:
@@ -1534,7 +1568,7 @@ def _match_allowed_scope(raw_name: str, allowed_keys: list[str]) -> Optional[str
 def generate_scoped_insights(conn):
     conn = ensure_conn(conn)
     with conn.cursor() as cur:
-        cur.execute("""
+        cur.execute(f"""
             WITH latest_per_ticker AS (
                 SELECT DISTINCT ON (f.ticker)
                     f.ticker,
@@ -1553,41 +1587,59 @@ def generate_scoped_insights(conn):
                     f.pricing_and_margins,
                     f.capex_and_backlog,
                     f.key_risks,
-                    f.theme_tags
+                    f.theme_tags,
+                    CASE WHEN {STALE_FY24_SQL} THEN TRUE ELSE FALSE END AS is_stale_fy24
                 FROM company_filings_ai f
                 JOIN equities_universe e ON f.ticker = e.ticker
-                WHERE f.filing_date >= '2025-01-01'
-                  AND COALESCE(f.fiscal_period, '') !~* '\m202[0-4]\M'
-                  AND NOT (f.filing_type IN ('10-K', '20-F', '40-F') AND f.filing_date < '2025-04-01')
-                ORDER BY f.ticker, f.filing_date DESC
+                ORDER BY
+                    f.ticker,
+                    CASE WHEN {STALE_FY24_SQL} THEN 1 ELSE 0 END ASC,
+                    f.filing_date DESC,
+                    f.id DESC
             ),
             driver_agg AS (
                 SELECT
-                    ticker,
+                    d.ticker,
                     STRING_AGG(
-                        commodity_name || ' (' || exposure_role || ', ' || impact_direction ||
-                        COALESCE(', ' || pass_through_lag, '') ||
-                        COALESCE(', ' || cogs_or_rev_share_pct::text || '% share', '') || ')',
-                        '; ' ORDER BY cogs_or_rev_share_pct DESC NULLS LAST, commodity_name ASC
+                        d.commodity_name || ' (' || d.exposure_role || ', ' || d.impact_direction ||
+                        COALESCE(', ' || d.pass_through_lag, '') ||
+                        COALESCE(', ' || d.cogs_or_rev_share_pct::text || '% share', '') || ')',
+                        '; ' ORDER BY d.cogs_or_rev_share_pct DESC NULLS LAST, d.commodity_name ASC
                     ) AS drivers_summary
-                FROM equity_commodity_drivers
-                GROUP BY ticker
+                FROM equity_commodity_drivers d
+                JOIN latest_per_ticker l ON d.ticker = l.ticker
+                WHERE NOT (
+                    l.is_stale_fy24 = FALSE
+                    AND (
+                        d.source_filing_date < '2025-01-01'
+                        OR (d.source_filing_type IN ('10-K', '20-F', '40-F', '10-K/A', '20-F/A') AND d.source_filing_date < '2025-06-01')
+                    )
+                )
+                GROUP BY d.ticker
             ),
             sc_agg AS (
                 SELECT
-                    ticker,
+                    s.ticker,
                     STRING_AGG(
-                        CASE direction
+                        CASE s.direction
                             WHEN 'upstream_supplier' THEN 'Supplier: '
                             WHEN 'downstream_customer' THEN 'Customer: '
                             ELSE 'Competitor: '
-                        END || counterparty_name || ' [' || material_or_product ||
-                        CASE WHEN is_sole_source THEN ', SOLE/10%+' ELSE '' END ||
-                        COALESCE(', ' || exposure_pct::text || '%', '') || ']',
-                        '; ' ORDER BY is_sole_source DESC, exposure_pct DESC NULLS LAST
+                        END || s.counterparty_name || ' [' || s.material_or_product ||
+                        CASE WHEN s.is_sole_source THEN ', SOLE/10%+' ELSE '' END ||
+                        COALESCE(', ' || s.exposure_pct::text || '%', '') || ']',
+                        '; ' ORDER BY s.is_sole_source DESC, s.exposure_pct DESC NULLS LAST
                     ) AS supply_chain_summary
-                FROM equity_supply_chain
-                GROUP BY ticker
+                FROM equity_supply_chain s
+                JOIN latest_per_ticker l ON s.ticker = l.ticker
+                WHERE NOT (
+                    l.is_stale_fy24 = FALSE
+                    AND (
+                        s.source_filing_date < '2025-01-01'
+                        OR (s.source_filing_type IN ('10-K', '20-F', '40-F', '10-K/A', '20-F/A') AND s.source_filing_date < '2025-06-01')
+                    )
+                )
+                GROUP BY s.ticker
             )
             SELECT
                 l.ticker,
@@ -1608,11 +1660,12 @@ def generate_scoped_insights(conn):
                 l.key_risks,
                 l.theme_tags,
                 d.drivers_summary,
-                s.supply_chain_summary
+                s.supply_chain_summary,
+                l.is_stale_fy24
             FROM latest_per_ticker l
             LEFT JOIN driver_agg d ON l.ticker = d.ticker
             LEFT JOIN sc_agg s ON l.ticker = s.ticker
-            ORDER BY l.market_cap_usd DESC NULLS LAST, l.filing_date DESC, l.ticker ASC;
+            ORDER BY l.is_stale_fy24 ASC, l.market_cap_usd DESC NULLS LAST, l.filing_date DESC, l.ticker ASC;
         """)
         rows = cur.fetchall()
 
@@ -1620,20 +1673,21 @@ def generate_scoped_insights(conn):
         print("No filings available yet for scoped insights.", flush=True)
         return conn
 
-    by_sub: dict[str, list[tuple[str, str]]] = {}
+    # Each entry tuple is (ticker, formatted_line, is_stale_fy24)
+    by_sub: dict[str, list[tuple[str, str, bool]]] = {}
     sub_max_mcap: dict[str, float] = {}
     sub_latest_ord: dict[str, int] = {}
 
-    by_theme: dict[str, list[tuple[str, str]]] = {}
+    by_theme: dict[str, list[tuple[str, str, bool]]] = {}
     theme_max_mcap: dict[str, float] = {}
     theme_latest_ord: dict[str, int] = {}
 
-    all_lines: list[str] = []
+    all_entries: list[tuple[str, str, bool]] = []
 
     for (
         ticker, cname, sub_sector, country, mcap, rev_pct, contract, qual_yrs,
         ftype, fdate, fperiod, headline, summary, margins, capex, risks,
-        tags, drivers_str, sc_str
+        tags, drivers_str, sc_str, is_stale_fy24
     ) in rows:
         mcap_val = float(mcap) if mcap is not None else 0.0
         date_ord = fdate.toordinal() if hasattr(fdate, "toordinal") else 0
@@ -1650,28 +1704,39 @@ def generate_scoped_insights(conn):
             f"Key Risks: {risks or 'N/A'} | Commodity Drivers: {drivers_str or 'N/A'} | "
             f"Value Chain & Peers: {sc_str or 'N/A'}"
         )
-        all_lines.append(line)
+        entry = (ticker, line, bool(is_stale_fy24))
+        all_entries.append(entry)
 
-        by_sub.setdefault(broad_sub, []).append((ticker, line))
-        sub_max_mcap[broad_sub] = max(sub_max_mcap.get(broad_sub, 0.0), mcap_val)
-        sub_latest_ord[broad_sub] = max(sub_latest_ord.get(broad_sub, 0), date_ord)
+        by_sub.setdefault(broad_sub, []).append(entry)
+        if not is_stale_fy24:
+            sub_max_mcap[broad_sub] = max(sub_max_mcap.get(broad_sub, 0.0), mcap_val)
+            sub_latest_ord[broad_sub] = max(sub_latest_ord.get(broad_sub, 0), date_ord)
 
         for tag in (tags or []):
-            by_theme.setdefault(tag, []).append((ticker, line))
-            theme_max_mcap[tag] = max(theme_max_mcap.get(tag, 0.0), mcap_val)
-            theme_latest_ord[tag] = max(theme_latest_ord.get(tag, 0), date_ord)
+            by_theme.setdefault(tag, []).append(entry)
+            if not is_stale_fy24:
+                theme_max_mcap[tag] = max(theme_max_mcap.get(tag, 0.0), mcap_val)
+                theme_latest_ord[tag] = max(theme_latest_ord.get(tag, 0), date_ord)
+
+    def _active_entries(entries: list[tuple[str, str, bool]]) -> list[tuple[str, str, bool]]:
+        fresh = [e for e in entries if not e[2]]
+        return fresh if fresh else entries
 
     all_insights: list[dict] = []
+    actual_counts: dict[tuple[str, str], int] = {}
 
-    # 1. Industry-wide synthesis (single focused call so it never truncates on Groq)
-    all_tickers_set = {r[0] for r in rows}
+    # 1. Industry-wide synthesis (disqualify FY2024-only tickers when FY2025+ filings exist)
+    active_industry = _active_entries(all_entries)
+    all_tickers_set = {tk for tk, _, _ in active_industry}
+    actual_counts[("industry", "Advanced Materials")] = len(active_industry)
+
     industry_prompt = f"""
     You are a Senior Advanced Materials Equity Strategist.
     Generate ONE ScopeInsight with scope_type='industry' and scope_name='Advanced Materials' synthesizing across our covered global universe below.
-    Weigh the largest companies and most recent filings most heavily, incorporating Commodity Drivers, Value Chain bottlenecks, Contract Structures, and Key Risks.
+    Base your sentiment and takeaways strictly on the most recent FY2025/FY2026 filings shown below, incorporating Commodity Drivers, Value Chain bottlenecks, Contract Structures, and Key Risks.
 
-    === INDUSTRY: Advanced Materials (Total Covered Companies: {len(rows)}) ===
-    {chr(10).join(all_lines[:15])}
+    === INDUSTRY: Advanced Materials (Total Active Companies: {len(active_industry)}) ===
+    {chr(10).join(ln for _, ln, _ in active_industry[:15])}
     """
     ai_resp = call_gemini(industry_prompt, InsightBatchSchema)
     if ai_resp:
@@ -1684,7 +1749,7 @@ def generate_scoped_insights(conn):
     # 2. Theme synthesis in compact batches of 4 themes (prevents prompt/token truncation on fallback)
     theme_items = sorted(
         by_theme.items(),
-        key=lambda x: (-len(x[1]), -theme_max_mcap.get(x[0], 0.0), -theme_latest_ord.get(x[0], 0)),
+        key=lambda x: (-len(_active_entries(x[1])), -theme_max_mcap.get(x[0], 0.0), -theme_latest_ord.get(x[0], 0)),
     )[:8]
 
     for i in range(0, len(theme_items), 4):
@@ -1692,16 +1757,18 @@ def generate_scoped_insights(conn):
         theme_blocks = []
         allowed_by_theme: dict[str, set[str]] = {}
         for tname, entries in batch:
-            allowed_by_theme[tname] = {tk for tk, _ in entries}
-            joined = "\n  ".join(ln for _, ln in entries[:5])
-            theme_blocks.append(f"=== THEME: {tname} (Total Covered Companies: {len(entries)}) ===\n  {joined}")
+            active = _active_entries(entries)
+            actual_counts[("theme", tname)] = len(active)
+            allowed_by_theme[tname] = {tk for tk, _, _ in active}
+            joined = "\n  ".join(ln for _, ln, _ in active[:5])
+            theme_blocks.append(f"=== THEME: {tname} (Total Active Companies: {len(active)}) ===\n  {joined}")
 
         theme_prompt = f"""
         You are a Senior Advanced Materials Equity Strategist.
         Generate ONE ScopeInsight (with scope_type='theme') for EACH theme block below.
         CRITICAL RULES:
         - Set scope_name to the EXACT theme title shown after '=== THEME: ' (e.g., {', '.join(repr(k) for k in allowed_by_theme)}).
-        - Synthesize across the multiple companies inside each block (never just one stock when multiple are listed).
+        - Base sentiment strictly on the recent filings inside each block (never just one stock when multiple are listed).
         - Set top_tickers ONLY to tickers present inside that exact theme block.
 
         {chr(10).join(theme_blocks)}
@@ -1723,7 +1790,7 @@ def generate_scoped_insights(conn):
     # 3. Broad Sub-Industry verticals (max 8 broad buckets, synthesized in batches of 4)
     sub_items = sorted(
         by_sub.items(),
-        key=lambda x: (-len(x[1]), -sub_max_mcap.get(x[0], 0.0), -sub_latest_ord.get(x[0], 0)),
+        key=lambda x: (-len(_active_entries(x[1])), -sub_max_mcap.get(x[0], 0.0), -sub_latest_ord.get(x[0], 0)),
     )
 
     for i in range(0, len(sub_items), 4):
@@ -1731,16 +1798,18 @@ def generate_scoped_insights(conn):
         blocks = []
         allowed_by_sub: dict[str, set[str]] = {}
         for sub_name, entries in batch:
-            allowed_by_sub[sub_name] = {tk for tk, _ in entries}
-            joined = "\n  ".join(ln for _, ln in entries[:6])
-            blocks.append(f"=== SUB-INDUSTRY: {sub_name} (Total Covered Companies: {len(entries)}) ===\n  {joined}")
+            active = _active_entries(entries)
+            actual_counts[("sub_industry", sub_name)] = len(active)
+            allowed_by_sub[sub_name] = {tk for tk, _, _ in active}
+            joined = "\n  ".join(ln for _, ln, _ in active[:6])
+            blocks.append(f"=== SUB-INDUSTRY: {sub_name} (Total Active Companies: {len(active)}) ===\n  {joined}")
 
         sub_prompt = f"""
         You are a Senior Advanced Materials Equity Strategist.
         Generate ONE ScopeInsight (with scope_type='sub_industry') for EACH sub-industry block below.
         CRITICAL RULES:
         - Set scope_name to the EXACT vertical title shown after '=== SUB-INDUSTRY: ' (e.g., {', '.join(repr(k) for k in allowed_by_sub)}).
-        - Synthesize across ALL covered companies inside that block, comparing leaders, pricing power, and raw material exposure.
+        - Synthesize across ALL covered companies inside that block, basing sentiment strictly on the recent filings shown.
         - Set top_tickers ONLY to tickers present inside that exact block.
 
         {chr(10).join(blocks)}
@@ -1780,13 +1849,7 @@ def generate_scoped_insights(conn):
         for item in all_insights:
             stype = item["scope_type"]
             sname = item["scope_name"]
-            count = (
-                len(rows)
-                if stype == "industry"
-                else len(by_sub.get(sname, []))
-                if stype == "sub_industry"
-                else len(by_theme.get(sname, []))
-            )
+            count = actual_counts.get((stype, sname), 1)
             cur.execute("""
                 INSERT INTO sector_theme_insights (
                     scope_type, scope_name, generated_date, filing_count, sentiment,
