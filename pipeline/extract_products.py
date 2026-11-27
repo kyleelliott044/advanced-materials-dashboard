@@ -4,10 +4,11 @@ import re
 import time
 import json
 from collections import Counter
-from typing import List, Optional, Literal, Tuple, get_args
+from typing import List, Optional, Literal, Dict, Tuple
 import requests
 import psycopg
 import yfinance as yf
+from bs4 import BeautifulSoup
 from pydantic import BaseModel, Field
 from google import genai
 from google.genai import types
@@ -22,630 +23,35 @@ GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY", "")
 BATCH_LIMIT = int(os.environ.get("PRODUCT_BATCH_LIMIT", "15"))
 
-GENERIC_SEGMENT_RE = re.compile(
-    r"\b(business|segment|division|operations|services|activities)\b",
+SEC_HEADERS = {
+    "User-Agent": "AdvancedMaterialsResearchPlatform research@materials-macro.io",
+    "Accept-Encoding": "gzip, deflate",
+}
+
+NON_US_EXCHANGE_SUFFIX_RE = re.compile(
+    r"\.(DE|F|PA|AS|BR|SW|L|MI|MC|ST|HE|OL|CO|VI|WA|T|KS|KQ|TW|TWO|HK|SS|SZ|SI|AX|TO|V|SA|MX|JO|TA|SR)$",
     re.IGNORECASE,
 )
 
-GENERIC_ADV_CATEGORY_RE = re.compile(
-    r"^\s*(electronic\s+materials?|advanced\s+materials?(\s+portfolio)?|"
-    r"specialty\s+materials?|performance\s+chemicals?|engineered\s+materials?|"
-    r"industrial\s+materials?|semiconductor\s+materials?|battery\s+materials?)\s*$",
-    re.IGNORECASE,
-)
-
-INVALID_RAW_MATERIAL_RE = re.compile(
+# Strictly rejected non-materials across both passes
+REJECTED_NON_MATERIAL_RE = re.compile(
     r"^\s*("
-    r"labor|direct\s+labor|manufacturing\s+labor|"
-    r"raw\s+materials?|direct\s+materials?|other\s+raw\s+materials?|"
-    r"feedstocks?|industrial\s+feedstocks?|chemical\s+feedstocks?|petrochemical\s+feedstocks?|"
-    r"specialty\s+chemical\s+intermediates?|chemical\s+intermediates?|intermediates?|"
-    r"specialty\s+chemicals?|industrial\s+chemicals?|base\s+chemicals?|"
-    r"commodities|metals?|precious\s+metals?|rare\s+earths?|minerals?|polymers?|resins?|plastic\s+resins?|"
-    r"energy|electricity|power|utilities|water|freight|logistics|transportation|"
-    r"packaging|consumables?|components?|parts?|equipment|tooling|scrap|general|other"
-    r")\s*$"
-    r"|\b(labor|raw\s+materials?|industrial\s+feedstocks?|specialty\s+chemical\s+intermediates?)\b",
+    r"labor|direct\s+labor|electricity|fuel|fuel\s+energy|energy|power|utilities|"
+    r"freight|logistics|packaging|water|raw\s+materials?|feedstocks?|consumables?|"
+    r"equipment|machinery|components?|parts?|services?|recycling|mining"
+    r")\s*$",
     re.IGNORECASE,
 )
 
-CANONICAL_CODE_NAMES = {
-    "HG=F": "Copper",
-    "NG=F": "Natural Gas",
-    "CL=F": "WTI Crude Oil",
-    "BZ=F": "Brent Crude Oil",
-    "ALI=F": "Aluminum",
-    "PL=F": "Platinum",
-    "SI=F": "Silver",
-    "PNICKUSDM": "Nickel",
-    "PCOBAUSDM": "Cobalt",
-    "PNGASEUUSDM": "Natural Gas",
-    "WPU101": "Iron and Steel",
-    "NDPR_CN": "Neodymium-Praseodymium (NdPr) Oxide",
-    "LICARB_CN": "Lithium Carbonate",
-    "GALLIUM_9999": "Gallium",
-    "GERMANIUM_INGOT": "Germanium",
-    "POLYSILICON_N": "Polysilicon",
-    "SPHERICAL_GRAPHITE": "Spherical Graphite",
-    "COBALT_SULFATE": "Cobalt Sulfate",
-    "CARBON_FIBER_T700": "Polyacrylonitrile (PAN) Precursor",
-}
-
-PRESERVE_ACRONYMS = {
-    "wti": "WTI",
-    "pan": "PAN",
-    "bpa": "BPA",
-    "lng": "LNG",
-    "ndpr": "NdPr",
-    "pvc": "PVC",
-    "ptfe": "PTFE",
-    "pfa": "PFA",
-    "peek": "PEEK",
-    "pps": "PPS",
-    "mdi": "MDI",
-    "tdi": "TDI",
-    "lipf6": "LiPF6",
-    "sic": "SiC",
-    "gan": "GaN",
-    "gaas": "GaAs",
-    "inp": "InP",
-    "ccl": "CCL",
-    "abf": "ABF",
-    "cmp": "CMP",
-    "euv": "EUV",
-    "arf": "ArF",
-    "oled": "OLED",
-    "mlcc": "MLCC",
-    "soi": "SOI",
-    "hbm": "HBM",
-    "ic": "IC",
-    "rf": "RF",
-    "ev": "EV",
-    "pgm": "PGM",
-    "pvoh": "PVOH",
-    "ncma": "NCMA",
-    "nmc": "NMC",
-    "lfp": "LFP",
-    "ndfeb": "NdFeB",
-}
-
-LOWER_CONNECTORS = {"and", "or", "of", "in", "for", "to", "with"}
-
-
-def _to_canonical_title_case(raw: str) -> str:
-    words = []
-    for idx, w in enumerate(raw.split(" ")):
-        low = w.lower()
-        clean_low = low.strip("()")
-        if clean_low in PRESERVE_ACRONYMS:
-            token = PRESERVE_ACRONYMS[clean_low]
-            words.append(f"({token})" if low.startswith("(") and low.endswith(")") else token)
-        elif idx > 0 and low in LOWER_CONNECTORS:
-            words.append(low)
-        elif "-" in w:
-            parts = []
-            for p in w.split("-"):
-                p_low = p.lower()
-                if p_low in PRESERVE_ACRONYMS:
-                    parts.append(PRESERVE_ACRONYMS[p_low])
-                else:
-                    parts.append(p.capitalize())
-            words.append("-".join(parts))
-        else:
-            words.append(w.capitalize())
-    return " ".join(words)
-
-
-def normalize_raw_material_name(raw_name: str, matched_code: Optional[str] = None) -> Optional[str]:
-    if matched_code and matched_code in CANONICAL_CODE_NAMES:
-        return CANONICAL_CODE_NAMES[matched_code]
-    cleaned = re.sub(r"\s*\([^)]*\)", " ", (raw_name or "").strip())
-    cleaned = re.sub(
-        r"\b(futures?|spot|benchmarks?|ind(ex|ices)|prices?|pricing|contracts?|quotes?|feedstocks?|raw\s+materials?)\b",
-        " ",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
-    cleaned = re.sub(
-        r"^(european|global|us|u\.s\.|north\s+american|asian|chinese|domestic|imported|refined|raw|crude|primary|virgin|pure|ultra[- ]?pure|high[- ]?purity|electronic[- ]?grade|battery[- ]?grade|n[- ]?type)\s+",
-        "",
-        cleaned,
-        flags=re.IGNORECASE,
-    )
-    cleaned = re.sub(r"\s+", " ", cleaned).strip(" -–—,:;")
-    if not cleaned or len(cleaned) < 3 or INVALID_RAW_MATERIAL_RE.search(cleaned):
-        return None
-    if cleaned.lower() in ("european natural gas", "ttf natural gas", "lng", "liquefied natural gas"):
-        return "Natural Gas"
-    return _to_canonical_title_case(cleaned)
-
-
-# ---------------------------------------------------------------------------
-# Advanced-material admission rules
-#
-# A category or product name is admitted only if (1) a curated alias/family
-# mapping claims it, or (2) after stripping modifiers, generic heads, process
-# words and end-market words, at least one token that could name a physical
-# product survives, it is not a descriptive phrase, and it is not an
-# unprocessed raw feedstock. Curated mappings always run before heuristics.
-# Keep ADV_MATERIAL_ALIASES / COHESIVE_AND_CLASSES in sync with the TS atlas.
-# ---------------------------------------------------------------------------
-
-MaterialForm = Literal[
-    "chemical_formulation",
-    "polymer_or_resin",
-    "slurry_or_abrasive",
-    "wafer_or_substrate",
-    "film_or_laminate",
-    "fiber_or_composite",
-    "powder_or_oxide",
-    "specialty_gas",
-    "alloy_or_metal_product",
-    "ceramic_or_glass",
-    "magnet",
-    "electrolyte_or_electrode_material",
-    "not_a_material",
-]
-MATERIAL_FORMS = set(get_args(MaterialForm))
-
-_SPELLING_FIXES = [
-    (re.compile(r"\bspeciality\b", re.IGNORECASE), "Specialty"),
-    (re.compile(r"\bspecialities\b", re.IGNORECASE), "Specialties"),
-]
-
-
-def _fix_spelling(s: str) -> str:
-    for pat, rep in _SPELLING_FIXES:
-        s = pat.sub(rep, s)
-    return s
-
-
-def _key(s: str) -> str:
-    return re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).strip()
-
-
-def _tokens(s: str) -> List[str]:
-    k = _key(s)
-    return k.split() if k else []
-
-
-def _strip_parens(s: str) -> str:
-    # Strips closed "(...)" and broken unclosed "(..." tags.
-    return re.sub(r"\s*\([^)]*\)?", " ", s)
-
-
-STOP_TOKENS = {
-    "and", "or", "of", "for", "in", "the", "to", "with", "a", "an", "from",
-    "used", "serving", "supporting", "enabling",
-}
-
-# Adjectives that cannot be a product on their own.
-MODIFIER_TOKENS = {
-    "stainless", "specialty", "specialties", "advanced", "engineered", "performance",
-    "high", "industrial", "electronic", "precision", "structural", "functional",
-    "premium", "technical", "specialized", "custom", "proprietary", "next",
-    "generation", "novel", "innovative", "critical", "strategic", "synthetic",
-    "natural", "ultra", "pure", "purity", "grade",
-}
-
-# Generic head nouns that name a category of thing, not a thing.
-GENERIC_HEAD_TOKENS = {
-    "material", "materials", "chemical", "chemicals", "product", "products",
-    "solution", "solutions", "technology", "technologies", "system", "systems",
-    "service", "services", "portfolio", "offering", "offerings", "business",
-    "segment", "segments", "division", "line", "equipment", "device", "devices",
-    "component", "components", "part", "parts", "application", "applications",
-    "market", "markets", "industry", "industries", "sector", "sectors",
-    "mineral", "minerals", "ore", "ores", "metal", "metals",
-}
-
-# Activities, not outputs.
-PROCESS_TOKENS = {
-    "mining", "refining", "processing", "recycling", "smelting", "extraction",
-    "production", "manufacturing", "fabrication", "separation", "distribution",
-    "trading", "supply", "sales", "beneficiation",
-}
-
-# End markets / verticals, not products.
-END_MARKET_TOKENS = {
-    "semiconductor", "semiconductors", "electronics", "aerospace", "defense",
-    "defence", "automotive", "medical", "healthcare", "energy", "nuclear",
-    "mobility", "optics", "battery", "batteries",
-}
-
-# Residuals that survive token stripping but are still not a product.
-BARE_AMBIGUOUS_PHRASES = {"rare earth", "rare earths", "silicon"}
-
-VAGUE_ADV_RE = re.compile(
-    r"^(electronic|electronic\s+materials?|advanced\s+materials?(\s+portfolio)?|"
-    r"specialty\s+materials?|performance\s+chemicals?|engineered\s+materials?|"
-    r"industrial\s+materials?|semiconductor\s+materials?|battery\s+materials?|"
-    r"materials?|chemicals?|polymers?|resins?|plastics?|metals?|alloys?|mining|"
-    r"rare\s+earth(\s+mining)?|specialty\s+chemicals?|industrial\s+chemicals?|"
-    r"composite\s+materials?|advanced\s+polymers?|electronic\s+chemicals?|"
-    r"batteries|battery\s+cells?|devices?|parts?|components?|aerospace|"
-    r"aerospace\s+and\s+defense|fuel|fuels|life\s+sciences?|mobility|optics|nuclear)$",
+# Natural gas is valid ONLY when described as chemical/process feedstock, not general fuel/utilities
+NG_FEEDSTOCK_EVIDENCE_RE = re.compile(
+    r"\b(feedstock|reforming|steam\s+methane|hydrogen|syngas|ammonia|cracker|ethane|carbonization|graphitization|precursor|synthesis)\b",
     re.IGNORECASE,
 )
 
-# "Materials for X", "Chemicals used in X"
-_LEADING_DESCRIPTIVE_RE = re.compile(
-    r"^(materials?|chemicals?|products?|solutions?|technolog(y|ies)|components?|"
-    r"equipment|systems?|services?|supplies|consumables?)\s+"
-    r"(for|used\s+(in|for)|in|serving|supporting|enabling|to)\b",
-    re.IGNORECASE,
-)
-# "... Manufacturing", "... Industry"
-_TRAILING_DESCRIPTIVE_RE = re.compile(
-    r"\b(manufacturing|fabrication|industry|industries|sectors?|markets?|"
-    r"applications?|segments?|business|division|operations)$",
-    re.IGNORECASE,
-)
-
-# Unprocessed raw feedstocks: ores, concentrates, sand/quartz, base and precious
-# metals in elemental form, energy hydrocarbons, bulk commodity chemicals.
-# Engineered forms (fused quartz, fumed silica, epoxy resin, alumina powders)
-# are deliberately NOT here so legitimate producers are not blocked.
-_PURE_FEEDSTOCK_PHRASES = [
-    "copper", "aluminum", "aluminium", "nickel", "cobalt", "gold", "silver",
-    "platinum", "palladium", "rhodium", "iridium", "ruthenium", "tungsten",
-    "molybdenum", "steel", "iron", "iron and steel", "iron ore", "steel scrap",
-    "natural gas", "crude oil", "wti crude oil", "brent crude oil",
-    "ethane", "ethylene", "propylene", "naphtha", "benzene", "toluene",
-    "xylene", "methanol", "ammonia", "chlorine", "sodium hydroxide",
-    "caustic soda", "sulfuric acid", "phenol", "acetone",
-    "quartz", "quartz sand", "silica sand", "high purity quartz sand",
-    "bauxite", "ilmenite", "rutile", "magnesite", "colemanite",
-    "spodumene", "spodumene concentrate", "lithium",
-    "rare earth concentrate", "bastnaesite", "monazite",
-    "natural flake graphite", "petroleum needle coke",
-    "calcined petroleum coke", "coal tar pitch",
-    "metallurgical silicon", "silicon metal", "titanium sponge",
-]
-
-
-def _residual_tokens(phrase: str) -> List[str]:
-    return [
-        t for t in _tokens(phrase)
-        if t not in STOP_TOKENS
-        and t not in MODIFIER_TOKENS
-        and t not in GENERIC_HEAD_TOKENS
-        and t not in PROCESS_TOKENS
-        and t not in END_MARKET_TOKENS
-    ]
-
-
-PURE_FEEDSTOCK_KEYS = {_key(p) for p in _PURE_FEEDSTOCK_PHRASES} | {
-    " ".join(_residual_tokens(p)) for p in _PURE_FEEDSTOCK_PHRASES
-}
-PURE_FEEDSTOCK_KEYS.discard("")
-
-COHESIVE_AND_CLASSES = {
-    "cmp slurries and pads",
-    "specialty steel and alloys",
-    "stainless and high performance alloys",
-    "industrial and specialty gases",
-    "polyurethanes and isocyanates",
-    "polyolefins and engineered resins",
-    "rare earth oxides and metals",
-    "lithium hydroxide and carbonate",
-    "fluoropolymers and fluorochemicals",
-    "compound semiconductors and photonics",
-    "photoresists and semiconductor chemicals",
-    "biocompatible polymers and biomaterials",
-    "optical fiber and display glass",
-    "fused quartz and fused silica",
-}
-
-ADV_MATERIAL_ALIASES = {
-    "battery electrolyte": "Battery Electrolytes",
-    "battery electrolytes": "Battery Electrolytes",
-    "fluorochem": "Fluoropolymers and Fluorochemicals",
-    "fluorochemicals": "Fluoropolymers and Fluorochemicals",
-    "fluoropolymers": "Fluoropolymers and Fluorochemicals",
-    "fluoropolymers and titanium technologies": "Fluoropolymers and Fluorochemicals",
-    "carbon fiber": "Carbon Fiber Composites",
-    "carbon fibers": "Carbon Fiber Composites",
-    "carbon fiber composites": "Carbon Fiber Composites",
-    "aerospace carbon fiber composites": "Carbon Fiber Composites",
-    "advanced films": "Advanced Polymer Films",
-    "polymer films": "Advanced Polymer Films",
-    "tire cord": "Industrial Tire Cord Fabrics",
-    "tire cord fabrics": "Industrial Tire Cord Fabrics",
-    "lithium refining": "Lithium Hydroxide and Carbonate",
-    "lithium chemicals": "Lithium Hydroxide and Carbonate",
-    "lithium carbonate": "Lithium Hydroxide and Carbonate",
-    "lithium hydroxide": "Lithium Hydroxide and Carbonate",
-    "gases": "Industrial and Specialty Gases",
-    "industrial gases": "Industrial and Specialty Gases",
-    "specialty gases": "Industrial and Specialty Gases",
-    "rare earth mining and magnets": "Rare Earth Permanent Magnets",
-    "rare earth magnets": "Rare Earth Permanent Magnets",
-    "ndfeb permanent magnets": "Rare Earth Permanent Magnets",
-    "rare earth permanent magnets": "Rare Earth Permanent Magnets",
-    "rare earth oxides": "Rare Earth Oxides and Metals",
-    "rare earth metals": "Rare Earth Oxides and Metals",
-    "rare earth oxides and metals": "Rare Earth Oxides and Metals",
-    "polyurethane": "Polyurethanes and Isocyanates",
-    "polyurethanes": "Polyurethanes and Isocyanates",
-    "polyurethanes and isocyanates": "Polyurethanes and Isocyanates",
-    "specialty steel": "Specialty Steel and Alloys",
-    "specialty steel and alloys": "Specialty Steel and Alloys",
-    "stainless and specialty steel": "Specialty Steel and Alloys",
-    "stainless and high performance alloys": "Stainless and High-Performance Alloys",
-    "photoresists": "Photoresists and Semiconductor Chemicals",
-    "photoresists and semiconductor chemicals": "Photoresists and Semiconductor Chemicals",
-    "semiconductor packaging": "Semiconductor Packaging Materials",
-    "semiconductor packaging and chemicals": "Semiconductor Packaging Materials",
-    "compound semiconductors": "Compound Semiconductors and Photonics",
-    "compound semiconductors and photonics": "Compound Semiconductors and Photonics",
-    "natural graphite anode materials": "Natural Graphite Anode Materials",
-    "synthetic graphite anodes": "Synthetic Graphite Anode Materials",
-    "synthetic graphite anode materials": "Synthetic Graphite Anode Materials",
-    "copper clad laminates": "Copper Clad Laminates (CCL)",
-    "high speed copper clad laminates": "High-Speed Copper Clad Laminates (CCL)",
-    "high frequency copper clad laminates": "High-Speed Copper Clad Laminates (CCL)",
-    "silicon wafer": "Silicon Wafers",
-    "silicon wafers": "Silicon Wafers",
-    "silicon wafers and pvc": "Silicon Wafers",
-    "engineered soi wafers": "Engineered SOI Wafers",
-    "silicon carbide wafer": "Silicon Carbide (SiC) Wafers",
-    "silicon carbide wafers": "Silicon Carbide (SiC) Wafers",
-    "sic wafers": "Silicon Carbide (SiC) Wafers",
-    "cmp slurries": "CMP Slurries and Pads",
-    "cmp slurries and pads": "CMP Slurries and Pads",
-    "cmp slurries and wet chemicals": "CMP Slurries and Pads",
-    "cmp slurries and abrasives": "CMP Slurries and Pads",
-    "high nickel cathodes": "High-Nickel Cathode Materials",
-    "high nickel cathode materials": "High-Nickel Cathode Materials",
-    "cathodes and synthetic anodes": "High-Nickel Cathode Materials",
-    "cathode active materials": "High-Nickel Cathode Materials",
-    "olefins and polyolefins": "Polyolefins and Engineered Resins",
-    "packaging and specialty plastics": "Polyolefins and Engineered Resins",
-    "medical devices and biomaterials": "Biocompatible Polymers and Biomaterials",
-    "biomaterials": "Biocompatible Polymers and Biomaterials",
-    "ceram": "Ceramics",
-    "ceramic": "Ceramics",
-    "ceramics": "Ceramics",
-    "hydrogen cat": "Hydrogen Catalysts",
-    "hydrogen catalysts": "Hydrogen Catalysts",
-    "isotropic graphite": "Isotropic Graphite",
-    # Engineered quartz is a legitimate advanced product; bare quartz is a feedstock.
-    "fused quartz": "Fused Quartz and Fused Silica",
-    "fused silica": "Fused Quartz and Fused Silica",
-    "fused quartz and fused silica": "Fused Quartz and Fused Silica",
-    "quartz crucibles": "Fused Quartz and Fused Silica",
-}
-
-# Families of phrasings that exact-key aliases miss.
-FAMILY_ALIASES = [
-    (
-        re.compile(r"\bstainless\b.*\b(steels?|alloys?)\b|\bspecialty\s+steels?\b|\bspecialty\s+alloys?\b"),
-        "Specialty Steel and Alloys",
-    ),
-    (
-        re.compile(r"\brare earth\b.*\b(refin\w*|process\w*|separat\w*)\b"),
-        "Rare Earth Oxides and Metals",
-    ),
-]
-
-DANGLING_CONJUNCTION_RE = re.compile(r"^(and|or|&|,|-)\b|\b(and|or|&|,|-)$", re.IGNORECASE)
-_ACRONYM_RE = re.compile(r"\((CCL|SiC|SOI|ABF|HBM|OLED|EV|PTFE)\)", re.IGNORECASE)
-
-# (raw string, reason) -> count, reported at the end of a run.
-REJECT_STATS: Counter = Counter()
-
-
-def _match_family_alias(lookup_key: str) -> Optional[str]:
-    for pat, canonical in FAMILY_ALIASES:
-        if pat.search(lookup_key):
-            return canonical
-    return None
-
-
-def _is_informative_product(phrase: str) -> bool:
-    residual = _residual_tokens(phrase)
-    if not residual:
-        return False
-    return " ".join(residual) not in BARE_AMBIGUOUS_PHRASES
-
-
-def adv_rejection_reason(cleaned: str, lookup_key: str, is_name: bool = False) -> Optional[str]:
-    """Returns a rejection reason, or None if the phrase can name an advanced material.
-
-    Product names may legitimately read as descriptions ("Pads for CMP
-    Manufacturing"), so trailing-descriptive rejection applies to categories only.
-    """
-    if VAGUE_ADV_RE.match(cleaned.strip()):
-        return "vague-umbrella"
-    if _LEADING_DESCRIPTIVE_RE.search(cleaned):
-        return "descriptive-phrase"
-    if not is_name and _TRAILING_DESCRIPTIVE_RE.search(cleaned):
-        return "descriptive-phrase"
-    residual = _residual_tokens(cleaned)
-    if not residual:
-        return "no-product-noun"
-    residual_key = " ".join(residual)
-    if residual_key in BARE_AMBIGUOUS_PHRASES:
-        return "ambiguous-bare-term"
-    if lookup_key in PURE_FEEDSTOCK_KEYS or residual_key in PURE_FEEDSTOCK_KEYS:
-        return "raw-feedstock"
-    return None
-
-
-def _expand_abbrevs(s: str) -> str:
-    subs = [
-        (r"\bict\b", "Information and Communications Technology"),
-        (r"\bsemicon\b", "Semiconductor"),
-        (r"\bpkg\b", "Packaging"),
-        (r"\bind\b", "Industrial"),
-        (r"\bchem\b", "Chemicals"),
-        (r"\bfluorochem\b", "Fluorochemicals"),
-        (r"\bceram\b", "Ceramics"),
-        (r"\bcat\b", "Catalysts"),
-        (r"\bmat\b", "Materials"),
-        (r"\bhigh[- ]perf\b", "High-Performance"),
-        (r"\btech\b", "Technologies"),
-        (r"\bmfg\b", "Manufacturing"),
-    ]
-    for pat, rep in subs:
-        s = re.sub(pat, rep, s, flags=re.IGNORECASE)
-    return s
-
-
-def _clean_segment(segment: str) -> str:
-    s = _strip_parens(segment)
-    s = re.sub(r"^[^(\s]*\)", " ", s)  # orphan "Nuc)" style tails
-    s = s.replace(".", "")
-    s = _expand_abbrevs(s)
-    s = re.sub(r"\bmining\b", "", s, flags=re.IGNORECASE)
-    s = re.sub(r"\s+", " ", s).strip()
-    return s.strip(" -–—,:;()")
-
-
-def _reject(trace: Optional[list], segment: str, reason: str) -> None:
-    if trace is not None:
-        trace.append((segment, reason))
-    return None
-
-
-def _normalize_single_adv_segment(
-    segment: str,
-    acronym: Optional[str] = None,
-    trace: Optional[list] = None,
-    strict: bool = False,
-) -> Optional[str]:
-    cleaned = _clean_segment(segment)
-    if not cleaned or len(cleaned) < 3 or DANGLING_CONJUNCTION_RE.search(cleaned):
-        return _reject(trace, segment, "empty-or-fragment")
-
-    key = _key(cleaned)
-
-    # 1. Curated mappings win over every heuristic.
-    if key.startswith("polyurethane"):
-        return "Polyurethanes and Isocyanates"
-    if key in ADV_MATERIAL_ALIASES:
-        return ADV_MATERIAL_ALIASES[key]
-    family = _match_family_alias(key)
-    if family:
-        return family
-
-    # 2. Hard rejects.
-    reason = adv_rejection_reason(cleaned, key)
-    if reason:
-        return _reject(trace, segment, reason)
-
-    # 3. Strict mode never mints a class from free text.
-    if strict:
-        return _reject(trace, segment, "strict-unmapped")
-
-    # 4. Free-text fallback.
-    formatted = _to_canonical_title_case(cleaned)
-    if acronym and not re.search(rf"\b{re.escape(acronym)}\b", formatted, re.IGNORECASE):
-        formatted = f"{formatted} ({acronym})"
-    return formatted
-
-
-def resolve_adv_classes(
-    raw_name: str,
-    trace: Optional[list] = None,
-    strict: bool = False,
-) -> List[str]:
-    """Mirror of the atlas resolver: returns zero or more canonical classes."""
-    raw = _fix_spelling((raw_name or "").strip())
-    if not raw:
-        return []
-
-    m = _ACRONYM_RE.search(raw)
-    acronym = PRESERVE_ACRONYMS.get(m.group(1).lower(), m.group(1).upper()) if m else None
-
-    normalized = raw.replace(".", "")
-    normalized = re.sub(r"\s*&\s*", " and ", normalized)
-    normalized = re.sub(r"\s*/\s*", " and ", normalized)
-    normalized = re.sub(r"\s+", " ", normalized).strip()
-
-    full_key = _key(_strip_parens(normalized))
-
-    if full_key in ADV_MATERIAL_ALIASES:
-        return [ADV_MATERIAL_ALIASES[full_key]]
-    family = _match_family_alias(full_key)
-    if family:
-        return [family]
-
-    if full_key in COHESIVE_AND_CLASSES:
-        single = _normalize_single_adv_segment(normalized, acronym, trace, strict=False)
-        return [single] if single else []
-
-    if re.search(r"\band\b", normalized, re.IGNORECASE):
-        parts = re.split(r"\s+and\s+", normalized, flags=re.IGNORECASE)
-        # "Stainless and X": a modifier-only half means "and" joins adjectives.
-        has_fragment = any(not _is_informative_product(_strip_parens(p)) for p in parts)
-        if not has_fragment:
-            results: List[str] = []
-            seen = set()
-            for part in parts:
-                resolved = _normalize_single_adv_segment(part, acronym, trace, strict)
-                if resolved and resolved.lower() not in seen:
-                    seen.add(resolved.lower())
-                    results.append(resolved)
-            return results
-        # otherwise evaluate the whole string as one phrase
-
-    single = _normalize_single_adv_segment(normalized, acronym, trace, strict)
-    return [single] if single else []
-
-
-def resolve_adv_category(
-    raw_cat: str,
-    fallback_name: str = "",
-    trace: Optional[list] = None,
-) -> Tuple[Optional[str], bool]:
-    """Returns (canonical single class or None, used_name_fallback).
-
-    The category column holds exactly one class. If the model glued several
-    product lines together, the first resolved class is kept.
-    """
-    classes = resolve_adv_classes(raw_cat or "", trace)
-    if classes:
-        if len(classes) > 1 and trace is not None:
-            trace.append((raw_cat, "multi-class-truncated"))
-        return classes[0], False
-    classes = resolve_adv_classes(fallback_name or "", trace)
-    if classes:
-        return classes[0], True
-    return None, False
-
-
-def product_name_rejection_reason(name: str) -> Optional[str]:
-    cleaned = _strip_parens(_fix_spelling((name or "").strip())).strip()
-    if not cleaned:
-        return "empty-name"
-    key = _key(cleaned)
-    if key in ADV_MATERIAL_ALIASES:
-        return None
-    return adv_rejection_reason(cleaned, key, is_name=True)
-
-
-NON_ADV_MAT_RE = re.compile(
-    r"\b("
-    r"pharmaceuticals?|oncology|biologics?|vaccines?|therapeutics?|clinical\s+trials?|"
-    r"prescription\s+drugs?|fertility\s+drugs?|monoclonal\s+antibod(y|ies)|cdmo|cro|"
-    r"frozen\s+foods?|seasonings?|beverages?|snacks?|pet\s+food|animal\s+feed|"
-    r"post-?it|scotch\s+tape|consumer\s+retail|apparel|footwear|cosmetics?|"
-    r"enterprise\s+software|cloud\s+saas|avionics|building\s+automation|"
-    r"insurance|banking|residential\s+housing|turnkey\s+machinery|capital\s+equipment|metrology|"
-    r"recycling|"
-    r"battery\s+cells?|prismatic\s+cells?|cylindrical\s+cells?|pouch\s+cells?|"
-    r"battery\s+modules?|battery\s+packs?|ess\s+(racks?|systems?|batteries)|"
-    r"energy\s+storage\s+systems?|all-?solid-?state\s+batter(y|ies)|"
-    r"optical\s+transceivers?|wiring\s+harness(es)?|connectors?|cables?|"
-    r"sensors?|actuators?|housings?|display\s+panels?|sub-?assembl(y|ies)|finished\s+components?"
-    r")\b",
-    re.IGNORECASE,
-)
-
-NON_MAT_CUSTOMER_RE = re.compile(
-    r"\b(walmart|target|cvs|walgreens|kroger|costco|pfizer|novartis|roche|sanofi|astrazeneca|amgen|nestle|unilever)\b",
+# Explicit external revenue evidence required to keep 'sells' when a material also appears in 'consumes'
+EXTERNAL_SALES_EVIDENCE_RE = re.compile(
+    r"\b(sell|sells|sold|third[- ]party|external\s+customers?|merchant\s+market|revenue|shipments?|commercial\s+sales|supplied\s+to\s+customers)\b",
     re.IGNORECASE,
 )
 
@@ -709,137 +115,307 @@ def ensure_conn(conn):
     return connect_db()
 
 
-def fetch_live_taxonomy(conn) -> tuple[str, str]:
-    """Live canonical Advanced Material categories and Raw Material names from Neon.
+def normalize_alias_key(raw: str) -> str:
+    """Canonical alias lookup key: lowercase, punctuation-stripped, '&' -> 'and'."""
+    s = re.sub(r"\s*\([^)]*\)?", " ", (raw or "").strip())
+    s = s.replace(".", "").replace("&", " and ").replace("/", " and ")
+    s = re.sub(r"[^a-z0-9]+", " ", s.lower()).strip()
+    return s
 
-    Two properties matter here because this text is fed back to the model as
-    "reuse this EXACT spelling":
-      1. Only categories that pass the admission gate are exposed. Otherwise a
-         bad legacy category ("Stainless", "Rare Earth Refining") is
-         reinforced on every subsequent extraction.
-      2. Ranking is by usage frequency, not alphabetical. Alphabetical
-         truncation at 100 hid every category past roughly "M", which caused the
-         model to mint duplicates of them.
+
+def load_material_registry(conn) -> Tuple[Dict[str, Tuple[int, str, str]], Dict[int, Tuple[str, str, str]]]:
+    """
+    Loads:
+      alias_map: alias_normalized -> (material_id, canonical_name, tier)
+      by_id:     material_id -> (canonical_name, tier, material_group)
     """
     conn = ensure_conn(conn)
-    cat_counts: Counter = Counter()
-    raw_counts: Counter = Counter()
-    for name in CANONICAL_CODE_NAMES.values():
-        raw_counts[name] += 0
+    alias_map: Dict[str, Tuple[int, str, str]] = {}
+    by_id: Dict[int, Tuple[str, str, str]] = {}
 
     with conn.cursor() as cur:
-        cur.execute("""
-            SELECT category, COUNT(*)
-            FROM company_products
-            WHERE status = 'active' AND category IS NOT NULL
-            GROUP BY category;
-        """)
-        for cat, n in cur.fetchall():
-            clean_cat, _ = resolve_adv_category(cat)
-            if clean_cat:
-                cat_counts[clean_cat] += n
+        cur.execute("SELECT id, canonical_name, tier, material_group FROM materials;")
+        for mid, cname, tier, mgroup in cur.fetchall():
+            by_id[mid] = (cname, tier, mgroup)
+            alias_map[normalize_alias_key(cname)] = (mid, cname, tier)
 
         cur.execute("""
-            SELECT elem->>'name', COUNT(*)
-            FROM company_products, jsonb_array_elements(raw_materials) AS elem
-            WHERE status = 'active' AND elem->>'name' IS NOT NULL
-            GROUP BY 1;
+            SELECT a.alias_normalized, m.id, m.canonical_name, m.tier
+            FROM material_aliases a
+            JOIN materials m ON a.material_id = m.id;
         """)
-        for rname, n in cur.fetchall():
-            norm = normalize_raw_material_name(rname)
-            if norm:
-                raw_counts[norm] += n
+        for alias_norm, mid, cname, tier in cur.fetchall():
+            alias_map[alias_norm] = (mid, cname, tier)
 
-        try:
-            cur.execute("""
-                SELECT commodity_name, COUNT(*)
-                FROM equity_commodity_drivers
-                WHERE exposure_role = 'Cost Input' AND commodity_name IS NOT NULL
-                GROUP BY 1;
-            """)
-            for cname, n in cur.fetchall():
-                norm = normalize_raw_material_name(cname)
-                if norm:
-                    raw_counts[norm] += n
-        except Exception:
-            pass
-
-    cats = [c for c, _ in cat_counts.most_common(100)]
-    raws = [r for r, _ in raw_counts.most_common(120)]
-    return ", ".join(cats), ", ".join(raws)
+    return alias_map, by_id
 
 
-class RawMaterialSpec(BaseModel):
-    name: str = Field(
-        description="Specific physical chemical, metal, mineral, gas, or hydrocarbon feedstock (e.g., 'Copper', 'Natural Gas', 'Lithium Carbonate', 'Epoxy Resin', 'Quartz'). NEVER 'Labor', 'Utilities', 'Raw Materials', 'Industrial Feedstock', 'Specialty Chemical Intermediates', or 'Spot'/'Futures'/'European' prefixes."
+def resolve_material_candidate(
+    raw_label: str,
+    alias_map: Dict[str, Tuple[int, str, str]],
+) -> Optional[Tuple[int, str, str]]:
+    """Resolves a string to (material_id, canonical_name, tier) if registered."""
+    k = normalize_alias_key(raw_label)
+    if not k or REJECTED_NON_MATERIAL_RE.match(k):
+        return None
+    if k in alias_map:
+        return alias_map[k]
+    # Try stripping trailing plural 's'
+    if k.endswith("s") and k[:-1] in alias_map:
+        return alias_map[k[:-1]]
+    return None
+
+
+def _slugify(s: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", (s or "").lower()).strip("-")
+
+
+def mint_or_get_material(
+    conn,
+    alias_map: Dict[str, Tuple[int, str, str]],
+    by_id: Dict[int, Tuple[str, str, str]],
+    canonical_name: str,
+    tier: Literal["T0", "T1", "T2", "T3"],
+    material_group: str,
+    summary: Optional[str] = None,
+) -> Optional[Tuple[int, str, str]]:
+    """
+    Resolves against existing materials first; if genuinely novel and tier in ('T0','T1','T2'),
+    mints a new row in `materials` and `material_aliases` so future runs reuse it automatically.
+    """
+    existing = resolve_material_candidate(canonical_name, alias_map)
+    if existing:
+        return existing
+
+    clean_name = re.sub(r"\s+", " ", (canonical_name or "").strip())
+    k = normalize_alias_key(clean_name)
+    if not k or len(k) < 3 or REJECTED_NON_MATERIAL_RE.match(k):
+        return None
+
+    if tier == "T3":
+        return None
+
+    slug = f"{tier.lower()}-{_slugify(clean_name)}"[:90]
+    conn = ensure_conn(conn)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            INSERT INTO materials (slug, canonical_name, tier, material_group, summary)
+            VALUES (%s, %s, %s, %s, %s)
+            ON CONFLICT (canonical_name) DO UPDATE SET
+                tier = EXCLUDED.tier
+            RETURNING id, canonical_name, tier;
+            """,
+            (slug, clean_name, tier, material_group or "General", summary),
+        )
+        row = cur.fetchone()
+        if not row:
+            return None
+        mid, cname, saved_tier = row
+        cur.execute(
+            """
+            INSERT INTO material_aliases (alias_normalized, material_id)
+            VALUES (%s, %s)
+            ON CONFLICT (alias_normalized) DO NOTHING;
+            """,
+            (k, mid),
+        )
+    conn.commit()
+    alias_map[k] = (mid, cname, saved_tier)
+    by_id[mid] = (cname, saved_tier, material_group or "General")
+    return (mid, cname, saved_tier)
+
+
+# ---------------------------------------------------------------------------
+# SEC Section Extraction (Pass A: Item 1 + Segment Notes | Pass B: Inputs/Risk/COGS)
+# ---------------------------------------------------------------------------
+
+def _normalize_co_name(name: str) -> str:
+    cleaned = re.sub(
+        r"\b(inc|corp|corporation|co|ltd|limited|plc|ag|se|sa|nv|ab|asa|oyj|kgaa|holdings?|group|materials?|technologies|industries)\b",
+        "",
+        name.lower(),
     )
-    commodity_ref: Optional[str] = Field(
+    return re.sub(r"[^a-z0-9]", "", cleaned)
+
+
+def fetch_sec_ticker_map():
+    resp = requests.get("https://www.sec.gov/files/company_tickers.json", headers=SEC_HEADERS, timeout=20)
+    resp.raise_for_status()
+    raw = resp.json()
+    by_ticker = {}
+    by_name = {}
+    for entry in raw.values():
+        t = entry["ticker"].upper()
+        cik_padded = str(entry["cik_str"]).zfill(10)
+        pair = (cik_padded, str(entry["cik_str"]))
+        by_ticker[t] = pair
+        norm = _normalize_co_name(entry.get("title", ""))
+        if len(norm) >= 5 and norm not in by_name:
+            by_name[norm] = pair
+    return by_ticker, by_name
+
+
+def _lookup_sec_cik(ticker: str, company_name: str, sec_by_ticker: dict, sec_by_name: dict):
+    clean_ticker = ticker.upper().strip()
+    if clean_ticker in sec_by_ticker:
+        return sec_by_ticker[clean_ticker]
+    if "." in clean_ticker and NON_US_EXCHANGE_SUFFIX_RE.search(clean_ticker):
+        return None
+    return sec_by_name.get(_normalize_co_name(company_name))
+
+
+def _extract_keyword_windows(text: str, patterns: list[str], window: int = 1800, max_total: int = 11000) -> str:
+    chunks = []
+    used_ranges = []
+    for pat in patterns:
+        for m in re.finditer(pat, text, re.IGNORECASE):
+            start = max(0, m.start() - 300)
+            end = min(len(text), m.end() + window)
+            if any(not (end < s or start > e) for s, e in used_ranges):
+                continue
+            used_ranges.append((start, end))
+            chunks.append(text[start:end])
+            if sum(len(c) for c in chunks) >= max_total:
+                return " ... ".join(chunks)
+    return " ... ".join(chunks)
+
+
+def fetch_split_sec_sections(
+    ticker: str,
+    company_name: str,
+    sec_by_ticker: dict,
+    sec_by_name: dict,
+) -> Optional[Tuple[str, str, str]]:
+    """
+    Fetches the latest 10-K / 20-F / 40-F raw filing and splits it into:
+      (pass_a_products_text, pass_b_inputs_text, source_ref)
+    - Pass A sees ONLY Item 1 (Business) and Segment Footnotes.
+    - Pass B sees ONLY Raw Materials / Sources of Supply, Cost of Sales, and Commodity Risk.
+    """
+    cik_pair = _lookup_sec_cik(ticker, company_name, sec_by_ticker, sec_by_name)
+    if not cik_pair:
+        return None
+
+    cik_padded, cik_unpadded = cik_pair
+    sub_url = f"https://data.sec.gov/submissions/CIK{cik_padded}.json"
+    sub_resp = requests.get(sub_url, headers=SEC_HEADERS, timeout=15)
+    sub_resp.raise_for_status()
+    recent = sub_resp.json()["filings"]["recent"]
+
+    target_idx = next((i for i, f in enumerate(recent["form"]) if f in ("10-K", "20-F", "40-F")), None)
+    if target_idx is None:
+        return None
+
+    form = recent["form"][target_idx]
+    f_date = recent["filingDate"][target_idx]
+    acc_num = recent["accessionNumber"][target_idx]
+    doc_name = recent["primaryDocument"][target_idx]
+
+    url = f"https://www.sec.gov/Archives/edgar/data/{cik_unpadded}/{acc_num.replace('-', '')}/{doc_name}"
+    resp = requests.get(url, headers=SEC_HEADERS, timeout=30)
+    resp.raise_for_status()
+    soup = BeautifulSoup(resp.text, "html.parser")
+    text = re.sub(r"\s+", " ", soup.get_text(separator=" ", strip=True))
+
+    if len(text) < 2000:
+        return None
+
+    # Pass A: Item 1 Business + Segment Footnotes ONLY
+    item1_matches = list(re.finditer(r"Item\s+1\.\s+Business", text, re.IGNORECASE))
+    item1_slice = ""
+    if item1_matches:
+        start1 = item1_matches[-1].start()
+        item1_slice = text[start1 : start1 + 11000]
+    else:
+        item1_slice = text[2000:13000]
+
+    segment_windows = _extract_keyword_windows(
+        text,
+        [
+            r"(reportable\s+segments?|segment\s+information|note\s+\d+[\s\.\-–]+segments?)",
+            r"(principal\s+products|products\s+and\s+services|product\s+lines|net\s+sales\s+by\s+product)",
+        ],
+        window=2000,
+        max_total=7000,
+    )
+    pass_a_text = f"{item1_slice}\n\n--- SEGMENT & PRODUCT NOTES ---\n{segment_windows}"[:17000]
+
+    # Pass B: Raw Materials, Sources of Supply, Cost of Sales, and Commodity Market Risk ONLY
+    pass_b_text = _extract_keyword_windows(
+        text,
+        [
+            r"(raw\s+materials|sources\s+and\s+availability\s+of\s+raw\s+materials|principal\s+suppliers|feedstocks?)",
+            r"(cost\s+of\s+(sales|goods\s+sold|products\s+sold)|gross\s+margin|input\s+costs)",
+            r"(commodity\s+(price\s+)?risk|quantitative\s+and\s+qualitative\s+disclosures\s+about\s+market\s+risk|hedging)",
+        ],
+        window=2200,
+        max_total=15000,
+    )
+    if len(pass_b_text) < 600:
+        pass_b_text = item1_slice[:10000]
+
+    return pass_a_text, pass_b_text[:16000], f"{form} ({f_date})"
+
+
+# ---------------------------------------------------------------------------
+# Pydantic Schemas for Split-Pass Extraction
+# ---------------------------------------------------------------------------
+
+class SoldMaterialCandidate(BaseModel):
+    canonical_material: str = Field(
+        description="Canonical material name from the provided T0/T1/T2 list if matched, or a specific Title Case material name if novel. Never an end-market ('Aerospace'), process ('Mining', 'Refining'), or vague umbrella ('Electronic Materials')."
+    )
+    product_line_name: str = Field(
+        description="Company's specific commercial product line or material grade name (e.g., '300mm Epitaxial Silicon Wafers', 'Battery-Grade Lithium Hydroxide')."
+    )
+    classification: Literal["sold_T2_material", "sold_T0_T1_material", "sold_T3_non_material"] = Field(
+        description="Classify strictly: 'sold_T2_material' for customer-qualified engineered materials; 'sold_T0_T1_material' for traded ores, metals, or refined intermediates (polysilicon, lithium carbonate, NdPr oxide); 'sold_T3_non_material' for assembled cells, connectors, sensors, equipment, or non-materials."
+    )
+    material_group: str = Field(
+        description="Group name from the provided material list (e.g. 'Wafers and substrates', 'Battery', 'Aerospace and industrial', 'Refined intermediates')."
+    )
+    business_unit: str = Field(description="Disclosed reporting segment or business unit.")
+    performance_spec: Optional[str] = Field(
         default=None,
-        description="Exact input_code from the provided registry list ONLY if an exact match exists; otherwise null. NEVER invent codes.",
+        description="Measurable performance parameter if stated in text, else null.",
     )
-    role: str = Field(description="Functional role in the product (e.g., 'abrasive', 'precursor metal', 'resin base').")
-    basis: Literal["disclosed", "inferred"]
-
-
-class AdvancedSpec(BaseModel):
-    material_form: MaterialForm = Field(
-        description="Closest physical form of the product. Use 'not_a_material' if the item is a segment, component, device, service, or process rather than a material."
-    )
-    performance_spec: str = Field(description="Measurable performance parameters (purity, defectivity, thermal stability, dielectric loss, tensile modulus).")
-    qualification_months: Optional[int] = Field(default=None, description="Explicitly disclosed customer qualification timeline in months, else null.")
-    switching_barrier: str = Field(description="Why switching requires customer process requalification.")
-
-
-class DownstreamSpec(BaseModel):
-    process_step: str = Field(description="Customer manufacturing step where this material is consumed.")
-    end_product: str = Field(description="Intermediate component or device built by the customer.")
-    end_demand: str = Field(description="Secular end-market demand driver.")
-    demand_proxy_ref: Optional[str] = Field(
+    end_demand: Optional[str] = Field(
         default=None,
-        description="Exact input_code from the provided demand proxy registry list if applicable, else null.",
+        description="End-market application if stated in text, else null.",
     )
-    customers: Optional[List[str]] = Field(
-        default=None,
-        description="Explicitly disclosed customers/OEMs for this advanced material if stated in source text, else null.",
+    source_quote: str = Field(
+        description="Verbatim 10-30 word quote from the Item 1 / Segment text proving the company manufactures and sells this material."
     )
+    confidence: Literal["high", "med", "low"]
 
 
-class RevenueSpec(BaseModel):
-    basis: str = Field(description="'product' if disclosed at product level, else 'business_unit' or 'company'.")
-    share_pct: Optional[float] = Field(default=None, description="Disclosed % of company revenue if explicitly stated, else null.")
+class PassASoldBatch(BaseModel):
+    sold_candidates: List[SoldMaterialCandidate] = Field(default_factory=list)
 
 
-class SourceSpec(BaseModel):
-    type: Literal["annual_report", "filing", "product_page", "inferred"]
-    ref: Optional[str] = Field(default=None, description="Filing form/date or document reference, else null.")
+class ConsumedInputCandidate(BaseModel):
+    canonical_material: str = Field(
+        description="Canonical T0/T1 raw input name from the provided list (e.g., 'Copper', 'Natural Gas', 'Silica Sand', 'Lithium Carbonate', 'Polysilicon'), or specific physical feedstock if novel."
+    )
+    tier_guess: Literal["T0", "T1"] = Field(
+        description="'T0' for primary ore/metal/mineral/hydrocarbon/basic chemical; 'T1' for refined intermediate (polysilicon, lithium carbonate, nickel sulfate, PAN precursor)."
+    )
+    material_group: str = Field(
+        description="Group from the raw input list (e.g. 'Base and battery metals', 'Minor metals', 'Industrial minerals', 'Energy and hydrocarbons', 'Basic petrochemicals', 'Inorganic chemicals', 'Refined intermediates')."
+    )
+    is_feedstock_not_fuel: bool = Field(
+        default=True,
+        description="For Natural Gas or hydrocarbons, True ONLY if used as a chemical/reforming feedstock or direct thermal conversion input—False if merely general facility heating/electricity.",
+    )
+    source_quote: str = Field(
+        description="Verbatim 10-30 word quote from the Raw Materials / COGS / Risk section proving the company purchases or consumes this input."
+    )
+    confidence: Literal["high", "med", "low"]
 
 
-class ProductItem(BaseModel):
-    id: str = Field(description="Lowercase slug prefixed with ticker, e.g. 'entg-cmp-slurries'.")
-    name: str = Field(description="Specific engineered material product name. Never an umbrella division ('Electronic Materials'), a process ('Rare Earth Refining'), an end-market description ('Materials for Advanced Semiconductor Manufacturing'), a bare adjective ('Stainless', 'Specialty'), or an unprocessed raw feedstock ('Quartz', 'Copper').")
-    category: str = Field(description="ONE canonical physical material class naming what the company produces (noun phrase, e.g. 'CMP Slurries and Pads', 'Silicon Carbide (SiC) Wafers'). Reuse an existing category from the live taxonomy when applicable. Never a process, end market, sub-sector label, bare adjective, or raw feedstock.")
-    business_unit: str
-    status: Literal["active", "divested"]
-    as_of: str = Field(description="Reporting period, e.g. 'FY2025' or 'Q3 2026'.")
-    advanced: AdvancedSpec
-    raw_materials: List[RawMaterialSpec]
-    downstream: DownstreamSpec
-    pricing_structure: Optional[str] = Field(default=None, description="Override only if product contract type differs from company default, else null.")
-    revenue: RevenueSpec
-    peers: List[str] = Field(default_factory=list, description="Peer tickers from the provided universe list.")
-    src: SourceSpec
-    conf: Literal["high", "med", "low"]
-
-
-class ExcludedItem(BaseModel):
-    name: str
-    reason: str
-
-
-class CompanyProductsBatch(BaseModel):
-    note: Optional[str] = None
-    products: List[ProductItem]
-    excluded: List[ExcludedItem] = Field(default_factory=list)
+class PassBConsumedBatch(BaseModel):
+    consumed_inputs: List[ConsumedInputCandidate] = Field(default_factory=list)
 
 
 def _call_ai(prompt: str, schema) -> Optional[dict]:
@@ -984,474 +560,355 @@ def _call_ai(prompt: str, schema) -> Optional[dict]:
     return None
 
 
-def get_registry_and_universe(conn):
+def _format_taxonomy_prompt_lists(by_id: Dict[int, Tuple[str, str, str]]) -> Tuple[str, str]:
+    t2_list = sorted([cname for cname, tier, _ in by_id.values() if tier == "T2"])
+    t0_t1_list = sorted([f"{cname} ({tier})" for cname, tier, _ in by_id.values() if tier in ("T0", "T1")])
+    return ", ".join(t2_list), ", ".join(t0_t1_list)
+
+
+def run_split_extraction(conn, force_tickers: Optional[List[str]] = None):
     conn = ensure_conn(conn)
-    with conn.cursor() as cur:
-        cur.execute("""
-            SELECT DISTINCT ON (input_code) input_code, input_name, category
-            FROM raw_inputs
-            ORDER BY input_code, observation_date DESC;
-        """)
-        registry = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
-
-        cur.execute("SELECT ticker, company_name, sub_sector FROM equities_universe;")
-        universe = {r[0]: (r[1], r[2]) for r in cur.fetchall()}
-
-    return conn, registry, universe
-
-
-def _normalize_product_slug(raw_id: str, ticker: str, prod_name: str) -> str:
-    prefix = re.sub(r"[^a-z0-9]+", "-", ticker.lower()).strip("-")
-    base = re.sub(r"[^a-z0-9]+", "-", (raw_id or prod_name).lower()).strip("-")
-    if not base:
-        base = re.sub(r"[^a-z0-9]+", "-", prod_name.lower()).strip("-") or "product"
-    if not base.startswith(f"{prefix}-"):
-        base = f"{prefix}-{base}"
-    return base[:80]
-
-
-def _reasons_text(trace: list) -> str:
-    return ", ".join(sorted({r for _, r in trace})) or "unresolved"
-
-
-def run_product_extraction(conn):
-    conn, registry, universe = get_registry_and_universe(conn)
-    registry_guide = "\n".join([f"- {code}: {name} ({cat})" for code, (name, cat) in sorted(registry.items())])
-    universe_tickers_str = ", ".join(sorted(universe.keys()))
+    alias_map, by_id = load_material_registry(conn)
+    t2_vocab, t0_t1_vocab = _format_taxonomy_prompt_lists(by_id)
+    sec_by_ticker, sec_by_name = fetch_sec_ticker_map()
 
     with conn.cursor() as cur:
-        cur.execute("""
-            SELECT e.ticker, e.company_name, e.sub_sector, e.adv_mat_rev_pct, e.market_cap_usd
-            FROM equities_universe e
-            WHERE NOT EXISTS (SELECT 1 FROM company_products p WHERE p.ticker = e.ticker)
-              AND NOT EXISTS (SELECT 1 FROM company_product_profiles pr WHERE pr.ticker = e.ticker)
-            ORDER BY e.market_cap_usd DESC NULLS LAST, e.ticker ASC
-            LIMIT %s;
-        """, (BATCH_LIMIT,))
+        if force_tickers:
+            cur.execute(
+                """
+                SELECT ticker, company_name, sub_sector, adv_mat_rev_pct
+                FROM equities_universe
+                WHERE ticker = ANY(%s)
+                ORDER BY ticker ASC;
+                """,
+                (force_tickers,),
+            )
+        else:
+            cur.execute(
+                """
+                SELECT e.ticker, e.company_name, e.sub_sector, e.adv_mat_rev_pct
+                FROM equities_universe e
+                WHERE NOT EXISTS (SELECT 1 FROM company_material_links l WHERE l.ticker = e.ticker)
+                ORDER BY e.market_cap_usd DESC NULLS LAST, e.ticker ASC
+                LIMIT %s;
+                """,
+                (BATCH_LIMIT,),
+            )
         targets = cur.fetchall()
 
-    print(f"Starting product extraction for {len(targets)} companies (BATCH_LIMIT={BATCH_LIMIT})...", flush=True)
+    print(f"Starting split-pass material link extraction for {len(targets)} companies...", flush=True)
+    stats = Counter()
 
-    for idx, (ticker, company_name, sub_sector, adv_mat_rev_pct, _) in enumerate(targets, start=1):
+    for idx, (ticker, company_name, sub_sector, adv_mat_rev_pct) in enumerate(targets, start=1):
         print(f"[{idx}/{len(targets)}] Extracting {ticker} ({company_name})...", flush=True)
         conn = ensure_conn(conn)
-        existing_categories, existing_raw_materials = fetch_live_taxonomy(conn)
 
-        with conn.cursor() as cur:
-            cur.execute("""
-                SELECT filing_type, filing_date::text, headline, executive_summary, pricing_and_margins, capex_and_backlog
-                FROM company_filings_ai
-                WHERE ticker = %s
-                ORDER BY
-                    CASE
-                        WHEN filing_type IN ('10-K', '20-F', '40-F', 'Annual Report') THEN 1
-                        WHEN filing_type IN ('10-Q', '6-K', 'Quarterly Report', 'Half-Year Report') THEN 2
-                        ELSE 3
-                    END,
-                    filing_date DESC
-                LIMIT 2;
-            """, (ticker,))
-            filings = cur.fetchall()
+        split_sec = None
+        try:
+            split_sec = fetch_split_sec_sections(ticker, company_name, sec_by_ticker, sec_by_name)
+        except Exception as e:
+            print(f"  SEC fetch warning for {ticker}: {e}", flush=True)
 
-        context_lines = [
-            f"[{f[0]} {f[1]}] {f[2]} | Summary: {f[3]} | Margins: {f[4] or 'N/A'} | Capex: {f[5] or 'N/A'}"
-            for f in filings
-        ]
-        if not context_lines:
+        if split_sec:
+            pass_a_text, pass_b_text, src_ref = split_sec
+        else:
+            # Fallback for non-SEC international equities: use filing summaries + Yahoo profile
+            with conn.cursor() as cur:
+                cur.execute(
+                    """
+                    SELECT filing_type, filing_date::text, headline, executive_summary, pricing_and_margins
+                    FROM company_filings_ai
+                    WHERE ticker = %s
+                    ORDER BY filing_date DESC
+                    LIMIT 2;
+                    """,
+                    (ticker,),
+                )
+                f_rows = cur.fetchall()
+            biz_summary = ""
             try:
-                biz = (yf.Ticker(ticker).info or {}).get("longBusinessSummary", "")[:3000]
-                context_lines.append(f"Business Summary: {biz}")
-            except Exception as e:
-                print(f"  Warning fetching Yahoo summary for {ticker}: {e}", flush=True)
+                biz_summary = (yf.Ticker(ticker).info or {}).get("longBusinessSummary", "")[:3500]
+            except Exception:
+                pass
+            pass_a_text = (
+                f"Business Profile: {biz_summary}\n"
+                + "\n".join([f"[{r[0]} {r[1]}] {r[2]}: {r[3]}" for r in f_rows])
+            )[:14000]
+            pass_b_text = (
+                "\n".join([f"[{r[0]} {r[1]}] Margins/Inputs: {r[4] or ''} | {r[3]}" for r in f_rows])
+                + f"\nProfile: {biz_summary}"
+            )[:14000]
+            src_ref = f"{f_rows[0][0]} ({f_rows[0][1]})" if f_rows else "Profile"
 
-        src_type = "filing" if filings and filings[0][0] in ("10-K", "10-Q", "20-F", "40-F", "6-K") else "inferred"
-        src_ref = f"{filings[0][0]} ({filings[0][1]})" if filings and src_type == "filing" else None
-        rev_share_note = f"{adv_mat_rev_pct}% of company revenue" if adv_mat_rev_pct is not None else "specialist segment"
+        if len(pass_a_text.strip()) < 100:
+            print(f"  Skipping {ticker}: insufficient source text.", flush=True)
+            continue
 
-        prompt = f"""
-        Decompose {company_name} ({ticker}) | Assigned Advanced-Materials Sub-sector: {sub_sector} ({rev_share_note}) into specific engineered advanced-materials products.
+        rev_note = f"{adv_mat_rev_pct}% of revenue" if adv_mat_rev_pct is not None else "specialist segment"
 
-        CONGLOMERATE & MATERIALS-VS-COMPONENTS BOUNDARY (CRITICAL):
-        - Extract ONLY true engineered materials, formulated chemicals, resins, epoxy molding compounds (EMC), CMP slurries, spin-on dielectrics (SOD), OLED host/dopant materials, photoresists, specialty gases, wafers, films, fibers, powders, precursors, or specialty alloys belonging to "{sub_sector}".
-        - STRICTLY EXCLUDE assembled components, discrete devices, and finished battery cells/modules/packs (e.g., prismatic/cylindrical/pouch EV battery cells, ESS racks, optical transceivers, connectors, sensors, housings, display panels, machinery/equipment) as well as pharma, food, consumer goods, and software. Put all excluded components/divisions in excluded[] instead.
+        # -------------------------------------------------------------------
+        # PASS A: SOLD MATERIALS ONLY (Item 1 + Segment Notes)
+        # -------------------------------------------------------------------
+        prompt_a = f"""
+        You are an institutional advanced materials analyst.
+        Analyze ONLY the Item 1 Business & Segment text below for {company_name} ({ticker}) | Sub-sector: {sub_sector} ({rev_note}).
+        Extract every physical material that {company_name} MANUFACTURES AND SELLS to customers.
 
-        CATEGORY AND NAME ADMISSION RULES (ENFORCED IN CODE — NON-CONFORMING ITEMS ARE DISCARDED):
-        - `category` names the PHYSICAL MATERIAL CLASS the company produces, as a noun phrase for what is made. Good: 'CMP Slurries and Pads', 'Silicon Carbide (SiC) Wafers', 'Fluoropolymers and Fluorochemicals', 'Rare Earth Permanent Magnets', 'Specialty Steel and Alloys', 'Fused Quartz and Fused Silica'.
-        - The assigned sub-sector "{sub_sector}" is a company-level classification label. NEVER copy it into `category` or `name` unless it is itself a specific physical material class.
-        - `category` and `name` must NOT be any of the following:
-          (a) a process or activity (mining, refining, processing, recycling, smelting, manufacturing). 'Rare Earth Refining' is wrong; the product is 'Rare Earth Oxides and Metals'.
-          (b) an end market or application description. 'Materials for Advanced Semiconductor Manufacturing' is wrong; name the actual material (e.g., 'CMP Slurries and Pads').
-          (c) a bare adjective or fragment: 'Stainless', 'Specialty', 'Speciality', 'Advanced', 'Engineered', 'Performance'. Name the noun ('Stainless Steel Flat Products' under 'Specialty Steel and Alloys').
-          (d) an unprocessed raw feedstock: ores, concentrates, sand, quartz, elemental base or precious metals, bulk commodity chemicals. Those belong in raw_materials[]. Engineered forms are valid products (e.g., 'Fused Quartz and Fused Silica', 'Specialty Steel and Alloys').
-        - Use the spelling 'Specialty'.
-        - For each product's `category`, FIRST check whether it fits one of the existing canonical categories below and reuse that EXACT spelling:
-          [{existing_categories}]
-        - ONLY if the product is a genuinely distinct engineered material class not covered above, mint a new specific Title Case class name that satisfies (a)-(d).
-        - Each `category` names ONE class. Never glue two separate product lines together with 'and' unless it is a standard single class like 'CMP Slurries and Pads' or 'Specialty Steel and Alloys'.
-        - Set advanced.material_form to the closest physical form. If an item cannot be given a material form (it is a segment, component, device, service, or process), set 'not_a_material' or put it in excluded[].
-        - Never use vague umbrella names like 'Electronic Materials', 'Advanced Materials', 'Specialty Materials', or 'Performance Chemicals' as a product name or category.
+        TIER & CLASSIFICATION RULES:
+        - Classify each candidate into one of three buckets:
+          1. 'sold_T2_material': Engineered material specified and qualified in the customer's manufacturing process. Canonical T2 list:
+             [{t2_vocab}]
+          2. 'sold_T0_T1_material': Primary ore/metal/mineral (T0) or refined/traded intermediate not customer-process-qualified (T1, e.g., Polysilicon, Lithium Carbonate and Hydroxide, NdPr Oxide). Canonical T0/T1 list:
+             [{t0_t1_vocab}]
+          3. 'sold_T3_non_material': Assembled battery cells/modules/packs, connectors, sensors, optical transceivers, displays, machinery, pharma, food, or software (EXCLUDE from products).
+        - Match to an EXACT canonical name from the lists above whenever applicable; only mint a new specific material name if genuinely distinct.
+        - NEVER list end-markets ('Aerospace', 'Mobility', 'Life Science', 'Optics') or processes ('Mining', 'Refining') as materials.
+        - Every item MUST include a verbatim `source_quote` from the text below proving the company produces/sells it.
 
-        RAW MATERIALS RESOLUTION (OPEN-ENDED CANONICAL):
-        - List ONLY specific physical chemicals, metals, minerals, gases, or hydrocarbons (never 'Labor', 'Utilities', 'Raw Materials', 'Industrial Feedstock', 'Specialty Chemical Intermediates', or 'Spot'/'Futures'/'European' prefixes). Quartz, ores and concentrates are valid here.
-        - Reuse an EXACT existing canonical raw material name when applicable:
-          [{existing_raw_materials}]
-        - Otherwise mint a new specific Title Case physical feedstock name.
-
-        STRICT INCLUSION GATE (ALL 4 MUST HOLD, OTHERWISE PUT IN excluded[]):
-        1. Material-form product (chemical formulation, resin, slurry, wafer, film, fiber, powder, or alloy—NOT an assembled component, cell, module, or device).
-        2. Performance-specified and qualified inside a customer's manufacturing process.
-        3. Switching requires customer process requalification.
-        4. Never a generic segment label (e.g., "electronic materials division", "battery business", "recycling operations").
-
-        RULES:
-        - Never invent facts, customer names, qualification months, or product revenue shares. Unknown = null.
-        - commodity_ref and demand_proxy_ref MUST be an exact input_code from this registry list, or null if not listed:
-        {registry_guide}
-        - peers MUST only contain valid tickers from: {universe_tickers_str}
-        - Set src={{type: "{src_type}", ref: {json.dumps(src_ref)}}}.
-
-        SOURCE CONTEXT:
-        {chr(10).join(context_lines)}
+        ITEM 1 & SEGMENT TEXT ({src_ref}):
+        {pass_a_text}
         """
 
-        parsed = _call_ai(prompt, CompanyProductsBatch)
-        if not parsed:
+        parsed_a = _call_ai(prompt_a, PassASoldBatch)
+        if not parsed_a:
             print("All AI providers exhausted — stopping cleanly.", flush=True)
             break
 
-        excluded_items = list(parsed.get("excluded") or [])
-        saved_products = 0
-        seen_product_names = set()
+        # -------------------------------------------------------------------
+        # PASS B: CONSUMED RAW INPUTS ONLY (Raw Materials / COGS / Risk)
+        # -------------------------------------------------------------------
+        prompt_b = f"""
+        You are an institutional supply-chain & commodity risk analyst.
+        Analyze ONLY the Raw Materials, Cost of Sales, and Commodity Risk text below for {company_name} ({ticker}).
+        Extract every physical T0 or T1 raw material/feedstock that {company_name} PURCHASES OR CONSUMES as a manufacturing input.
+
+        STRICT RULES:
+        - Match each consumed input to an EXACT canonical name from our T0/T1 registry list when applicable:
+          [{t0_t1_vocab}]
+        - STRICTLY FORBIDDEN: 'Labor', 'Electricity', 'Fuel', 'Energy', 'Freight', 'Packaging', 'Utilities', 'Raw Materials', 'Feedstock'.
+        - NATURAL GAS RULE: Include 'Natural Gas' ONLY if the text describes it as a chemical/reforming feedstock or direct thermal conversion input (set `is_feedstock_not_fuel=true`). If it is merely facility heating/fuel, set `is_feedstock_not_fuel=false` or omit it.
+        - Every item MUST include a verbatim `source_quote` proving purchase, supply, or input cost exposure.
+
+        RAW MATERIALS, COGS & RISK TEXT ({src_ref}):
+        {pass_b_text}
+        """
+
+        parsed_b = _call_ai(prompt_b, PassBConsumedBatch)
+        if not parsed_b:
+            print("All AI providers exhausted — stopping cleanly.", flush=True)
+            break
+
+        # -------------------------------------------------------------------
+        # RESOLVE TIERS, DETECT CAPTIVE OVERLAP & SAVE LINKS
+        # -------------------------------------------------------------------
+        # sold_items: material_id -> list of dict metadata
+        sold_items: Dict[int, List[dict]] = {}
+        for cand in parsed_a.get("sold_candidates", []):
+            if cand.get("classification") == "sold_T3_non_material":
+                stats["excluded_T3"] += 1
+                continue
+
+            raw_mat_label = (cand.get("canonical_material") or "").strip()
+            quote = (cand.get("source_quote") or "").strip()
+            if not raw_mat_label or len(quote) < 8:
+                continue
+
+            resolved = resolve_material_candidate(raw_mat_label, alias_map)
+            if not resolved:
+                inferred_tier = "T2" if cand.get("classification") == "sold_T2_material" else "T1"
+                resolved = mint_or_get_material(
+                    conn,
+                    alias_map,
+                    by_id,
+                    raw_mat_label,
+                    inferred_tier,
+                    cand.get("material_group") or "Engineered Materials",
+                )
+            if not resolved:
+                continue
+
+            mid, cname, db_tier = resolved
+            if db_tier == "T3":
+                stats["excluded_T3"] += 1
+                continue
+
+            # Rule 5: Resolve ambiguous items by registry tier (T0/T1 never becomes T2)
+            sold_items.setdefault(mid, []).append({
+                "canonical_name": cname,
+                "tier": db_tier,
+                "product_name": (cand.get("product_line_name") or cname).strip()[:160],
+                "business_unit": (cand.get("business_unit") or sub_sector or "Core Materials")[:120],
+                "performance_spec": cand.get("performance_spec"),
+                "end_demand": cand.get("end_demand"),
+                "source_quote": quote[:400],
+                "confidence": cand.get("confidence") if cand.get("confidence") in ("high", "med", "low") else "med",
+            })
+
+        # consumed_items: material_id -> dict metadata
+        consumed_items: Dict[int, dict] = {}
+        for inp in parsed_b.get("consumed_inputs", []):
+            raw_inp_label = (inp.get("canonical_material") or "").strip()
+            quote = (inp.get("source_quote") or "").strip()
+            if not raw_inp_label or len(quote) < 8:
+                continue
+
+            resolved = resolve_material_candidate(raw_inp_label, alias_map)
+            if not resolved:
+                tier_guess = inp.get("tier_guess") if inp.get("tier_guess") in ("T0", "T1") else "T0"
+                resolved = mint_or_get_material(
+                    conn,
+                    alias_map,
+                    by_id,
+                    raw_inp_label,
+                    tier_guess,
+                    inp.get("material_group") or "Raw Inputs",
+                )
+            if not resolved:
+                continue
+
+            mid, cname, db_tier = resolved
+            if db_tier not in ("T0", "T1"):
+                # Consumed inputs should only be T0/T1 feedstocks
+                continue
+
+            # Enforce Natural Gas feedstock-only rule
+            if cname.lower() == "natural gas":
+                if not inp.get("is_feedstock_not_fuel", False) and not NG_FEEDSTOCK_EVIDENCE_RE.search(quote):
+                    stats["rejected_ng_fuel"] += 1
+                    continue
+
+            consumed_items[mid] = {
+                "canonical_name": cname,
+                "tier": db_tier,
+                "source_quote": quote[:400],
+                "confidence": inp.get("confidence") if inp.get("confidence") in ("high", "med", "low") else "med",
+            }
+
+        # Rule 4: Flag captive overlap (`makes_captive`) when same material is both sold and consumed
+        link_rows = []
+        all_mids = set(sold_items.keys()) | set(consumed_items.keys())
+        for mid in all_mids:
+            in_sold = mid in sold_items
+            in_cons = mid in consumed_items
+
+            if in_sold and in_cons:
+                # Check if Pass A quote proves third-party merchant sales; otherwise mark captive
+                s_entries = sold_items[mid]
+                has_external_sales = any(
+                    EXTERNAL_SALES_EVIDENCE_RE.search(e["source_quote"]) for e in s_entries
+                )
+                if has_external_sales:
+                    for e in s_entries:
+                        link_rows.append((
+                            ticker, mid, "sells", e["product_name"], e["business_unit"],
+                            e["performance_spec"], e["end_demand"], f"Item 1 / Segment ({src_ref})",
+                            e["source_quote"], e["confidence"]
+                        ))
+                    c_entry = consumed_items[mid]
+                    link_rows.append((
+                        ticker, mid, "consumes", None, None, None, None,
+                        f"Raw Materials / Risk ({src_ref})", c_entry["source_quote"], c_entry["confidence"]
+                    ))
+                else:
+                    e = s_entries[0]
+                    stats["captive_flagged"] += 1
+                    link_rows.append((
+                        ticker, mid, "makes_captive", e["product_name"], e["business_unit"],
+                        e["performance_spec"], e["end_demand"], f"Captive Overlap ({src_ref})",
+                        e["source_quote"], e["confidence"]
+                    ))
+            elif in_sold:
+                for e in sold_items[mid]:
+                    link_rows.append((
+                        ticker, mid, "sells", e["product_name"], e["business_unit"],
+                        e["performance_spec"], e["end_demand"], f"Item 1 / Segment ({src_ref})",
+                        e["source_quote"], e["confidence"]
+                    ))
+            elif in_cons:
+                c_entry = consumed_items[mid]
+                link_rows.append((
+                    ticker, mid, "consumes", None, None, None, None,
+                    f"Raw Materials / Risk ({src_ref})", c_entry["source_quote"], c_entry["confidence"]
+                ))
 
         conn = ensure_conn(conn)
         with conn.cursor() as cur:
-            cur.execute(
+            if force_tickers:
+                cur.execute("DELETE FROM company_material_links WHERE ticker = %s;", (ticker,))
+
+            cur.executemany(
                 """
-                INSERT INTO company_product_profiles (ticker, note)
-                VALUES (%s, %s)
-                ON CONFLICT (ticker) DO UPDATE SET note = EXCLUDED.note, updated_at = NOW();
+                INSERT INTO company_material_links (
+                    ticker, material_id, role, product_name, business_unit,
+                    performance_spec, end_demand, source_section, source_quote, confidence
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                ON CONFLICT (ticker, material_id, role, COALESCE(product_name, '')) DO UPDATE SET
+                    business_unit = COALESCE(EXCLUDED.business_unit, company_material_links.business_unit),
+                    performance_spec = COALESCE(EXCLUDED.performance_spec, company_material_links.performance_spec),
+                    end_demand = COALESCE(EXCLUDED.end_demand, company_material_links.end_demand),
+                    source_section = EXCLUDED.source_section,
+                    source_quote = EXCLUDED.source_quote,
+                    confidence = EXCLUDED.confidence,
+                    updated_at = NOW();
                 """,
-                (ticker, parsed.get("note")),
+                link_rows,
             )
-
-            for prod in parsed.get("products", []):
-                prod_name = (prod.get("name") or "").strip()
-                if not prod_name:
-                    continue
-
-                ds_raw = prod.get("downstream") or {}
-                check_blob = " ".join([
-                    prod_name,
-                    prod.get("category") or "",
-                    prod.get("business_unit") or "",
-                    ds_raw.get("end_product") or "",
-                    ds_raw.get("end_demand") or "",
-                ])
-
-                if (
-                    GENERIC_SEGMENT_RE.search(prod_name)
-                    or GENERIC_ADV_CATEGORY_RE.match(prod_name)
-                    or NON_ADV_MAT_RE.search(check_blob)
-                ):
-                    excluded_items.append({
-                        "name": prod_name,
-                        "reason": "Excluded non-advanced-materials division, finished good, or generic segment.",
-                    })
-                    continue
-
-                # --- admission gate: product name ---
-                name_reason = product_name_rejection_reason(prod_name)
-                if name_reason:
-                    REJECT_STATS[(prod_name, f"name:{name_reason}")] += 1
-                    excluded_items.append({
-                        "name": prod_name,
-                        "reason": f"Rejected product name ({name_reason}): not a specific engineered material.",
-                    })
-                    continue
-
-                # --- admission gate: material form ---
-                adv = dict(prod.get("advanced") or {
-                    "performance_spec": "customer-qualified specification",
-                    "qualification_months": None,
-                    "switching_barrier": "process requalification",
-                })
-                material_form = adv.get("material_form")
-                if material_form == "not_a_material":
-                    REJECT_STATS[(prod_name, "form:not_a_material")] += 1
-                    excluded_items.append({
-                        "name": prod_name,
-                        "reason": "Model classified item as not a material (segment, component, device, or process).",
-                    })
-                    continue
-                form_unspecified = material_form not in MATERIAL_FORMS
-                if form_unspecified:
-                    adv["material_form"] = "unspecified"
-
-                # --- admission gate: category ---
-                raw_category = prod.get("category") or ""
-                category_trace: list = []
-                clean_category, used_fallback = resolve_adv_category(raw_category, prod_name, category_trace)
-                if not clean_category:
-                    reasons = _reasons_text(category_trace)
-                    REJECT_STATS[(raw_category or "<empty>", f"category:{reasons}")] += 1
-                    excluded_items.append({
-                        "name": prod_name,
-                        "reason": f"Rejected category '{raw_category}' ({reasons}) and name gave no valid fallback class.",
-                    })
-                    continue
-                if used_fallback:
-                    REJECT_STATS[(raw_category or "<empty>", "category:fell-back-to-name")] += 1
-
-                norm_prod = re.sub(r"[^a-z0-9]", "", prod_name.lower())
-                if norm_prod in seen_product_names:
-                    continue
-                seen_product_names.add(norm_prod)
-
-                cleaned_rms = []
-                seen_rm_names = set()
-                for rm in prod.get("raw_materials", []):
-                    cref = rm.get("commodity_ref")
-                    if cref not in registry:
-                        cref = None
-                    clean_rm_name = normalize_raw_material_name(rm.get("name") or "", cref)
-                    if not clean_rm_name:
-                        continue
-                    if clean_rm_name.lower() in seen_rm_names:
-                        continue
-                    seen_rm_names.add(clean_rm_name.lower())
-                    cleaned_rms.append({
-                        "name": clean_rm_name,
-                        "commodity_ref": cref,
-                        "role": rm.get("role", "input"),
-                        "basis": rm.get("basis") if rm.get("basis") in ("disclosed", "inferred") else "inferred",
-                    })
-
-                ds = dict(ds_raw)
-                dref = ds.get("demand_proxy_ref")
-                if dref not in registry:
-                    dref = None
-                ds["demand_proxy_ref"] = dref
-                ds.setdefault("process_step", "downstream processing")
-                ds.setdefault("end_product", "manufactured component")
-                ds.setdefault("end_demand", "industrial end-demand")
-
-                raw_customers = ds.get("customers")
-                if isinstance(raw_customers, list):
-                    filtered_custs = [
-                        c.strip()
-                        for c in raw_customers
-                        if isinstance(c, str) and c.strip() and not NON_MAT_CUSTOMER_RE.search(c)
-                    ]
-                    ds["customers"] = filtered_custs or None
-                else:
-                    ds["customers"] = None
-
-                rev = prod.get("revenue") or {"basis": "business_unit", "share_pct": None}
-                src = prod.get("src") or {"type": src_type, "ref": src_ref}
-                if src.get("type") not in ("annual_report", "filing", "product_page", "inferred"):
-                    src["type"] = src_type
-
-                status = prod.get("status") if prod.get("status") in ("active", "divested") else "active"
-                conf = prod.get("conf") if prod.get("conf") in ("high", "med", "low") else "med"
-                if used_fallback or form_unspecified:
-                    conf = "low"
-                valid_peers = list(dict.fromkeys(p for p in prod.get("peers", []) if p in universe and p != ticker))
-                prod_id = _normalize_product_slug(prod.get("id", ""), ticker, prod_name)
-
-                cur.execute(
-                    """
-                    INSERT INTO company_products (
-                        id, ticker, name, category, business_unit, status, as_of,
-                        advanced, raw_materials, downstream, pricing_structure,
-                        revenue, peers, src, conf
-                    ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s::jsonb, %s::jsonb, %s::jsonb, %s, %s::jsonb, %s, %s::jsonb, %s)
-                    ON CONFLICT (id) DO UPDATE SET
-                        name = EXCLUDED.name,
-                        category = EXCLUDED.category,
-                        business_unit = EXCLUDED.business_unit,
-                        status = EXCLUDED.status,
-                        as_of = EXCLUDED.as_of,
-                        advanced = EXCLUDED.advanced,
-                        raw_materials = EXCLUDED.raw_materials,
-                        downstream = EXCLUDED.downstream,
-                        pricing_structure = EXCLUDED.pricing_structure,
-                        revenue = EXCLUDED.revenue,
-                        peers = EXCLUDED.peers,
-                        src = EXCLUDED.src,
-                        conf = EXCLUDED.conf,
-                        updated_at = NOW();
-                    """,
-                    (
-                        prod_id,
-                        ticker,
-                        prod_name,
-                        clean_category,
-                        prod.get("business_unit", sub_sector or "Core Materials"),
-                        status,
-                        prod.get("as_of", "FY2025"),
-                        json.dumps(adv),
-                        json.dumps(cleaned_rms),
-                        json.dumps(ds),
-                        prod.get("pricing_structure"),
-                        json.dumps(rev),
-                        valid_peers,
-                        json.dumps(src),
-                        conf,
-                    ),
-                )
-                saved_products += 1
-
-            seen_excluded = set()
-            for ex in excluded_items:
-                ex_name = (ex.get("name") or "").strip()
-                ex_reason = (ex.get("reason") or "").strip()
-                if not ex_name or not ex_reason:
-                    continue
-                ex_key = ex_name.lower()
-                if ex_key in seen_excluded:
-                    continue
-                seen_excluded.add(ex_key)
-                cur.execute(
-                    """
-                    INSERT INTO company_excluded_products (ticker, name, reason)
-                    VALUES (%s, %s, %s)
-                    ON CONFLICT (ticker, name) DO UPDATE SET reason = EXCLUDED.reason, updated_at = NOW();
-                    """,
-                    (ticker, ex_name, ex_reason),
-                )
         conn.commit()
+        stats["links_saved"] += len(link_rows)
         print(
-            f"[{ticker}] Saved {saved_products} products & {len(seen_excluded)} excluded items.",
+            f"[{ticker}] Saved {len(link_rows)} links (sells={sum(1 for r in link_rows if r[2]=='sells')}, "
+            f"consumes={sum(1 for r in link_rows if r[2]=='consumes')}, "
+            f"captive={sum(1 for r in link_rows if r[2]=='makes_captive')}).",
             flush=True,
         )
 
     print(
-        f"Product extraction finished ({gemini_calls_used} Gemini calls, {groq_calls_used} Groq calls used).",
+        f"Split-pass extraction complete ({gemini_calls_used} Gemini calls, {groq_calls_used} Groq calls). "
+        f"Stats: {dict(stats)}",
         flush=True,
     )
-    if REJECT_STATS:
-        print("Admission-gate rejections this run (most frequent first):", flush=True)
-        for (raw, reason), n in REJECT_STATS.most_common(25):
-            print(f"  {n:>3}x  {reason:<40} {raw[:70]}", flush=True)
     return conn
 
 
-def run_repair(conn, apply: bool = False):
-    """Re-applies the admission gate to existing active rows.
-
-    Dry-run by default. With apply=True:
-      - rows whose name or category cannot be resolved are moved to
-        company_excluded_products and deleted from company_products
-        (insert + delete in one transaction);
-      - rows with a non-canonical category are updated in place
-        (conf set to 'low' when the class had to be derived from the name);
-      - raw_materials lists are re-normalized and deduplicated.
+def run_eval_check(conn):
+    """
+    Rule 6: Evaluates role & tier assignments across known benchmark companies
+    (e.g., ENTG, ALB, WCH.DE, MP, LYC.AX, SUMCO, HXL, CRS, LIN) to verify precision.
     """
     conn = ensure_conn(conn)
+    eval_tickers = ["ENTG", "ALB", "SQM", "MP", "HXL", "CRS", "LIN", "DD", "APD", "ECL"]
     with conn.cursor() as cur:
-        cur.execute("""
-            SELECT id, ticker, name, category, raw_materials, conf
-            FROM company_products
-            WHERE status = 'active';
-        """)
+        cur.execute(
+            """
+            SELECT l.ticker, m.tier, m.canonical_name, l.role, l.product_name, l.source_quote
+            FROM company_material_links l
+            JOIN materials m ON l.material_id = m.id
+            WHERE l.ticker = ANY(%s)
+            ORDER BY l.ticker, l.role, m.tier, m.canonical_name;
+            """,
+            (eval_tickers,),
+        )
         rows = cur.fetchall()
 
-    moved = Counter()
-    recat = Counter()
-    raw_fixed = 0
-    samples: list = []
-
-    for pid, ticker, name, category, raw_mats, conf in rows:
-        name = name or ""
-        trace: list = []
-        name_reason = product_name_rejection_reason(name)
-        new_cat, used_fallback = resolve_adv_category(category or "", name, trace)
-
-        if name_reason or not new_cat:
-            reason = (
-                f"Repair: rejected product name ({name_reason})"
-                if name_reason
-                else f"Repair: rejected category '{category}' ({_reasons_text(trace)}) with no valid fallback"
-            )
-            moved[name_reason or _reasons_text(trace)] += 1
-            samples.append(f"MOVE   {ticker:<8} {name[:45]:<45} cat={category!r}  [{reason}]")
-            if apply:
-                with conn.transaction():
-                    with conn.cursor() as cur:
-                        cur.execute(
-                            """
-                            INSERT INTO company_excluded_products (ticker, name, reason)
-                            VALUES (%s, %s, %s)
-                            ON CONFLICT (ticker, name) DO UPDATE SET reason = EXCLUDED.reason, updated_at = NOW();
-                            """,
-                            (ticker, name, reason),
-                        )
-                        cur.execute("DELETE FROM company_products WHERE id = %s;", (pid,))
-            continue
-
-        if isinstance(raw_mats, str):
-            try:
-                raw_mats = json.loads(raw_mats)
-            except Exception:
-                raw_mats = []
-        cleaned_rms = []
-        seen = set()
-        for rm in raw_mats or []:
-            cref = rm.get("commodity_ref")
-            clean_name = normalize_raw_material_name(rm.get("name") or "", cref)
-            if not clean_name or clean_name.lower() in seen:
-                continue
-            seen.add(clean_name.lower())
-            cleaned_rms.append({**rm, "name": clean_name})
-        raw_changed = cleaned_rms != (raw_mats or [])
-
-        cat_changed = new_cat != category
-        if cat_changed:
-            recat[f"{category!r} -> {new_cat!r}"] += 1
-            samples.append(f"RECAT  {ticker:<8} {name[:45]:<45} {category!r} -> {new_cat!r}")
-        if raw_changed:
-            raw_fixed += 1
-
-        if apply and (cat_changed or raw_changed):
-            new_conf = "low" if (used_fallback and cat_changed) else conf
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE company_products
-                    SET category = %s, raw_materials = %s::jsonb, conf = %s, updated_at = NOW()
-                    WHERE id = %s;
-                    """,
-                    (new_cat, json.dumps(cleaned_rms), new_conf, pid),
-                )
-
-    mode = "APPLIED" if apply else "DRY RUN (pass --apply to write)"
-    print(f"Repair {mode}: scanned {len(rows)} active products.", flush=True)
-    print(f"  moved to excluded : {sum(moved.values())}", flush=True)
-    print(f"  recategorized     : {sum(recat.values())}", flush=True)
-    print(f"  raw lists cleaned : {raw_fixed}", flush=True)
-    if moved:
-        print("  move reasons:", flush=True)
-        for reason, n in moved.most_common():
-            print(f"    {n:>4}x {reason}", flush=True)
-    for line in samples[:60]:
-        print("  " + line, flush=True)
-    if len(samples) > 60:
-        print(f"  ... {len(samples) - 60} more", flush=True)
+    print(f"=== EVAL CHECK ({len(rows)} links across benchmark tickers) ===", flush=True)
+    for tk, tier, cname, role, pname, quote in rows:
+        print(f"  {tk:<8} | {tier} | {role:<13} | {cname:<34} | prod={pname or '-':<28} | {quote[:65]}...", flush=True)
     return conn
 
 
 if __name__ == "__main__":
-    parser = argparse.ArgumentParser(description="Advanced-materials product extraction and repair.")
-    parser.add_argument("--repair", action="store_true", help="Re-apply admission gate to existing rows (dry-run unless --apply).")
-    parser.add_argument("--apply", action="store_true", help="With --repair, write changes.")
+    parser = argparse.ArgumentParser(description="Split-pass T0-T3 material link extraction.")
+    parser.add_argument("--tickers", type=str, default="", help="Comma-separated tickers to force re-extract (e.g. ENTG,ALB,MP).")
+    parser.add_argument("--eval", action="store_true", help="Print role/tier assignments for benchmark eval companies.")
     args = parser.parse_args()
 
     conn = connect_db()
     try:
-        if args.repair:
-            conn = run_repair(conn, apply=args.apply)
+        if args.eval:
+            conn = run_eval_check(conn)
         else:
-            conn = run_product_extraction(conn)
+            forced = [t.strip().upper() for t in args.tickers.split(",") if t.strip()] or None
+            conn = run_split_extraction(conn, force_tickers=forced)
     finally:
         if conn and not conn.closed:
             conn.close()
