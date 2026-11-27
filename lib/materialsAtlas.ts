@@ -69,11 +69,10 @@ const INVALID_RAW_TOKENS_RE =
 
 const DANGLING_CONJUNCTION_RE = /^(and|or|&|,|-)\b|\b(and|or|&|,|-)$/i;
 
-// Vague umbrellas or non-material assemblies/processes that should never form a standalone card
+// Reject verticals, end markets, fuels, fragments, and vague umbrellas as products
 const VAGUE_OR_NON_MATERIAL_ADV_RE =
-  /^(electronic|electronic\s+materials?|advanced\s+materials?(\s+portfolio)?|specialty\s+materials?|performance\s+chemicals?|engineered\s+materials?|industrial\s+materials?|semiconductor\s+materials?|battery\s+materials?|materials?|chemicals?|polymers?|resins?|plastics?|metals?|alloys?|mining|rare\s+earth\s+mining|specialty\s+chemicals?|industrial\s+chemicals?|composite\s+materials?|advanced\s+polymers?|electronic\s+chemicals?|batteries|battery\s+cells?|devices?|parts?|components?)$/i;
+  /^(electronic|electronic\s+materials?|advanced\s+materials?(\s+portfolio)?|specialty\s+materials?|performance\s+chemicals?|engineered\s+materials?|industrial\s+materials?|semiconductor\s+materials?|battery\s+materials?|materials?|chemicals?|polymers?|resins?|plastics?|metals?|alloys?|mining|rare\s+earth(\s+mining)?|specialty\s+chemicals?|industrial\s+chemicals?|composite\s+materials?|advanced\s+polymers?|electronic\s+chemicals?|batteries|battery\s+cells?|devices?|parts?|components?|aerospace|aerospace\s+and\s+defense|fuel|fuels|life\s+science|life\s+sciences|mobility|optics|nuclear|nuc\)?)$/i;
 
-// Cohesive phrases where "and" belongs inside a single material class (do NOT split on "and")
 const COHESIVE_AND_CLASSES = new Set([
   "cmp slurries and pads",
   "specialty steel and alloys",
@@ -253,17 +252,13 @@ const RAW_MATERIAL_ALIASES: Record<string, string> = {
   "iron and steel": "Iron and Steel",
 };
 
-// Canonical mappings for individual Advanced Material classes (post-split)
 const ADV_MATERIAL_ALIASES: Record<string, string> = {
-  // Case Study 1: Battery Electrolytes & Fluorochem
   "battery electrolyte": "Battery Electrolytes",
   "battery electrolytes": "Battery Electrolytes",
   fluorochem: "Fluoropolymers and Fluorochemicals",
   fluorochemicals: "Fluoropolymers and Fluorochemicals",
   fluoropolymers: "Fluoropolymers and Fluorochemicals",
   "fluoropolymers and titanium technologies": "Fluoropolymers and Fluorochemicals",
-
-  // Case Study 2: Carbon Fiber, Advanced Films, Tire Cord
   "carbon fiber": "Carbon Fiber Composites",
   "carbon fibers": "Carbon Fiber Composites",
   "carbon fiber composites": "Carbon Fiber Composites",
@@ -272,14 +267,10 @@ const ADV_MATERIAL_ALIASES: Record<string, string> = {
   "polymer films": "Advanced Polymer Films",
   "tire cord": "Industrial Tire Cord Fabrics",
   "tire cord fabrics": "Industrial Tire Cord Fabrics",
-
-  // Case Study 4: Lithium Refining -> Lithium Hydroxide & Carbonate
   "lithium refining": "Lithium Hydroxide and Carbonate",
   "lithium chemicals": "Lithium Hydroxide and Carbonate",
   "lithium carbonate": "Lithium Hydroxide and Carbonate",
   "lithium hydroxide": "Lithium Hydroxide and Carbonate",
-
-  // Gases, Rare Earths, Polyurethanes, Steels, Semis
   gases: "Industrial and Specialty Gases",
   "industrial gases": "Industrial and Specialty Gases",
   "specialty gases": "Industrial and Specialty Gases",
@@ -328,6 +319,12 @@ const ADV_MATERIAL_ALIASES: Record<string, string> = {
   "packaging and specialty plastics": "Polyolefins and Engineered Resins",
   "medical devices and biomaterials": "Biocompatible Polymers and Biomaterials",
   biomaterials: "Biocompatible Polymers and Biomaterials",
+  ceram: "Ceramics",
+  ceramic: "Ceramics",
+  ceramics: "Ceramics",
+  "hydrogen cat": "Hydrogen Catalysts",
+  "hydrogen catalysts": "Hydrogen Catalysts",
+  "isotropic graphite": "Isotropic Graphite",
 };
 
 const PRESERVE_UPPER_TOKENS = new Set([
@@ -459,21 +456,23 @@ function canonicalizeRawMaterial(
   return toCanonicalTitleCase(cleaned);
 }
 
-/**
- * Normalizes a single atomic Advanced Material segment (after splitting compound "and" labels).
- */
 function normalizeSingleAdvSegment(
   segment: string,
   originalAcronym: RegExpMatchArray | null
 ): string | null {
+  // Strip both closed (...) and broken unclosed (...) tags like "(semiconductor" or "Nuc)"
   const cleaned = segment
-    .replace(/\s*\([^)]*\)/g, " ")
+    .replace(/\s*\([^)]*\)?/g, " ")
+    .replace(/^[^(\s]*\)/g, " ")
     .replace(/\./g, "")
+    .replace(/\bict\b/gi, "Information and Communications Technology")
     .replace(/\bsemicon\b/gi, "Semiconductor")
     .replace(/\bpkg\b/gi, "Packaging")
     .replace(/\bind\b/gi, "Industrial")
     .replace(/\bchem\b/gi, "Chemicals")
     .replace(/\bfluorochem\b/gi, "Fluorochemicals")
+    .replace(/\bceram\b/gi, "Ceramics")
+    .replace(/\bcat\b/gi, "Catalysts")
     .replace(/\bmat\b/gi, "Materials")
     .replace(/\bhigh[- ]perf\b/gi, "High-Performance")
     .replace(/\btech\b/gi, "Technologies")
@@ -481,9 +480,14 @@ function normalizeSingleAdvSegment(
     .replace(/\bmining\b/gi, "")
     .replace(/\s+/g, " ")
     .trim()
-    .replace(/^[-–—,:;]+|[-–—,:;]+$/g, "");
+    .replace(/^[-–—,:;()]+|[-–—,:;()]+$/g, "");
 
-  if (!cleaned || cleaned.length < 3 || VAGUE_OR_NON_MATERIAL_ADV_RE.test(cleaned)) {
+  if (
+    !cleaned ||
+    cleaned.length < 3 ||
+    DANGLING_CONJUNCTION_RE.test(cleaned) ||
+    VAGUE_OR_NON_MATERIAL_ADV_RE.test(cleaned)
+  ) {
     return null;
   }
 
@@ -507,12 +511,6 @@ function normalizeSingleAdvSegment(
   return formatted;
 }
 
-/**
- * Resolves an Advanced Material label into 1 or more canonical material classes:
- * - Preserves cohesive "and" classes (e.g., "CMP Slurries and Pads", "Specialty Steel and Alloys").
- * - Splits multi-product "and" labels (e.g., "Battery Electrolytes and Fluorochem" -> ["Battery Electrolytes", "Fluoropolymers and Fluorochemicals"]).
- * - Drops generic/non-material halves (e.g., "Carbon Fiber and Advanced Materials" -> ["Carbon Fiber Composites"], "Lithium Refining and Batteries" -> ["Lithium Hydroxide and Carbonate"]).
- */
 function resolveAdvancedMaterialClasses(rawName: string): string[] {
   const raw = (rawName || "").trim();
   if (!raw) return [];
@@ -527,12 +525,11 @@ function resolveAdvancedMaterialClasses(rawName: string): string[] {
     .trim();
 
   const fullLookupKey = normalizedConnectors
-    .replace(/\s*\([^)]*\)/g, " ")
+    .replace(/\s*\([^)]*\)?/g, " ")
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
 
-  // 1. Direct alias or cohesive single-class match
   if (ADV_MATERIAL_ALIASES[fullLookupKey]) {
     return [ADV_MATERIAL_ALIASES[fullLookupKey]];
   }
@@ -541,7 +538,6 @@ function resolveAdvancedMaterialClasses(rawName: string): string[] {
     return single ? [single] : [];
   }
 
-  // 2. Split compound "X and Y" strings into separate material classes and filter out vague/non-material halves
   if (/\band\b/i.test(normalizedConnectors)) {
     const parts = normalizedConnectors.split(/\s+\band\b\s+/i);
     const results: string[] = [];
@@ -556,7 +552,6 @@ function resolveAdvancedMaterialClasses(rawName: string): string[] {
     return results;
   }
 
-  // 3. Single standalone segment
   const single = normalizeSingleAdvSegment(normalizedConnectors, originalAcronym);
   return single ? [single] : [];
 }
@@ -647,9 +642,6 @@ export function buildMaterialsAtlas({
     inputInfoMap.set(inp.input_code, inp);
   }
 
-  // =========================================================================
-  // 1. ALL RAW MATERIALS
-  // =========================================================================
   interface RawBucket {
     name: string;
     categoryLabel: string;
@@ -852,9 +844,6 @@ export function buildMaterialsAtlas({
         b.companies.length - a.companies.length || a.name.localeCompare(b.name)
     );
 
-  // =========================================================================
-  // 2. ALL ADVANCED MATERIALS (Compound "and" Split + Canonical Class Merge)
-  // =========================================================================
   interface AdvBucket {
     name: string;
     categoryLabel: string;
