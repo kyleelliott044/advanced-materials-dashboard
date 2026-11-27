@@ -7,8 +7,7 @@ export interface AtlasCompanyLink {
   country: string | null;
   marketCapUsd: number | null;
   contractType: string | null;
-  /** Specific product(s) that either consume this raw material or represent this advanced material */
-linkedProducts: {
+  linkedProducts: {
     id?: string | number;
     name: string;
     category?: string;
@@ -16,6 +15,8 @@ linkedProducts: {
     detail?: string;
     endDemand?: string;
   }[];
+  sourceOrigin: "product" | "filing_driver" | "sector_rule";
+}
 
 export interface MaterialAtlasEntry {
   slug: string;
@@ -63,7 +64,6 @@ interface MinimalSensitivity {
   mechanism_note: string;
 }
 
-// Curated technical summaries for canonical registry feedstocks & advanced material classes
 const CURATED_SUMMARIES: Record<string, string> = {
   "HG=F":
     "High-conductivity refined copper used for ultra-thin electrodeposited battery foil (4–6 µm), copper-clad PCB laminates, and high-voltage power interconnects.",
@@ -158,9 +158,6 @@ export function buildMaterialsAtlas({
     inputInfoMap.set(inp.input_code, inp);
   }
 
-  // =========================================================================
-  // 1. ALL RAW MATERIALS (Feedstocks, Metals, Gases & Chemicals Consumed)
-  // =========================================================================
   interface RawBucket {
     name: string;
     categoryLabel: string;
@@ -201,7 +198,7 @@ export function buildMaterialsAtlas({
     bucket: RawBucket,
     ticker: string,
     origin: AtlasCompanyLink["sourceOrigin"],
-  prodInfo?: {
+    prodInfo?: {
       id?: string | number;
       name: string;
       category?: string;
@@ -239,7 +236,6 @@ export function buildMaterialsAtlas({
     }
   };
 
-  // A. From active decomposed products' raw_materials
   for (const prod of products) {
     if (prod.status !== "active") continue;
     for (const rm of prod.raw_materials || []) {
@@ -262,7 +258,6 @@ export function buildMaterialsAtlas({
     }
   }
 
-  // B. From AI-extracted filing commodity drivers (Cost Inputs / physical raw materials)
   for (const drv of commodityDrivers) {
     const code = drv.matched_input_code || null;
     if (code && macroCodeSet.has(code)) continue;
@@ -287,7 +282,6 @@ export function buildMaterialsAtlas({
     });
   }
 
-  // C. Ensure all tracked commodity feeds in raw_inputs appear even if linked via sub-sector rules
   for (const inp of inputs) {
     if (macroCodeSet.has(inp.input_code)) continue;
     const bucket = getOrCreateRawBucket(
@@ -360,9 +354,6 @@ export function buildMaterialsAtlas({
         b.companies.length - a.companies.length || a.name.localeCompare(b.name)
     );
 
-  // =========================================================================
-  // 2. ALL ADVANCED MATERIALS (Engineered Products & Categories Sold)
-  // =========================================================================
   interface AdvBucket {
     name: string;
     categoryLabel: string;
@@ -392,7 +383,6 @@ export function buildMaterialsAtlas({
     return bucket;
   };
 
-  // Group decomposed active products by their canonical product category
   for (const prod of products) {
     if (prod.status !== "active") continue;
     const catName = prod.category || prod.name;
@@ -430,7 +420,6 @@ export function buildMaterialsAtlas({
     });
   }
 
-  // Also include sub-sectors from equities_universe that don't yet have decomposed product cards
   for (const eq of equities) {
     if (!eq.sub_sector) continue;
     const bucket = getOrCreateAdvBucket(eq.sub_sector, "Universe Vertical");
