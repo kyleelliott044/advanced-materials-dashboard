@@ -159,11 +159,28 @@ def normalize_raw_material_name(raw_name: str, matched_code: Optional[str] = Non
 
 
 def normalize_adv_category(raw_cat: str, fallback_name: str = "") -> str:
-    cat = re.sub(r"\s+", " ", (raw_cat or "").strip())
+    cat = (raw_cat or "").strip()
     if not cat or GENERIC_ADV_CATEGORY_RE.match(cat):
-        alt = re.sub(r"\s+", " ", (fallback_name or "").strip())
+        alt = (fallback_name or "").strip()
         if alt and not GENERIC_ADV_CATEGORY_RE.match(alt):
             cat = alt
+    cat = (
+        cat.replace(".", "")
+        .replace("&", " and ")
+        .replace("/", " and ")
+    )
+    cat = re.sub(r"\bsemicon\b", "Semiconductor", cat, flags=re.IGNORECASE)
+    cat = re.sub(r"\bpkg\b", "Packaging", cat, flags=re.IGNORECASE)
+    cat = re.sub(r"\bind\b", "Industrial", cat, flags=re.IGNORECASE)
+    cat = re.sub(r"\bchem\b", "Chemicals", cat, flags=re.IGNORECASE)
+    cat = re.sub(r"\bmat\b", "Materials", cat, flags=re.IGNORECASE)
+    cat = re.sub(r"\btech\b", "Technologies", cat, flags=re.IGNORECASE)
+    cat = re.sub(r"\bmining\b", "", cat, flags=re.IGNORECASE)
+    cat = re.sub(r"\s+", " ", cat).strip(" -–—,:;")
+    if cat.lower().startswith("polyurethane"):
+        return "Polyurethanes and Isocyanates"
+    if cat.lower() in ("gases", "industrial gases", "specialty gases"):
+        return "Industrial and Specialty Gases"
     return _to_canonical_title_case(cat) if cat else "Specialty Engineered Materials"
 
 
