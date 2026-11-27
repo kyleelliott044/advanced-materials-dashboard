@@ -17,6 +17,7 @@ import {
   MaterialRecord,
   CompanyMaterialLinkRow,
   AtlasCompanyLink,
+  resolveCanonicalEndMarket,
 } from "../lib/materialsAtlas";
 
 export interface FilingMetricsRow {
@@ -630,9 +631,9 @@ export default function DashboardClient({
   const [activeTab, setActiveTab] = useState<"screener" | "feed" | "materials">(
     "screener"
   );
-  const [materialsSubTab, setMaterialsSubTab] = useState<"raw" | "advanced">(
-    "raw"
-  );
+  const [materialsSubTab, setMaterialsSubTab] = useState<
+    "raw" | "advanced" | "end_market"
+  >("raw");
   const [selectedMaterialSlug, setSelectedMaterialSlug] = useState<
     string | null
   >(null);
@@ -943,10 +944,11 @@ export default function DashboardClient({
     return map;
   }, [supplyChain]);
 
-  // Materials Atlas: Tier-based T0/T1 (Inputs & Intermediates) & T2 (Products)
+  // Materials Atlas: Tier-based T0/T1 (Inputs & Intermediates), T2 (Products), and End-Markets
   const {
     rawMaterials: atlasRawMaterials,
     advancedMaterials: atlasAdvancedMaterials,
+    endMarkets: atlasEndMarkets,
   } = useMemo(
     () =>
       buildMaterialsAtlas({
@@ -978,9 +980,15 @@ export default function DashboardClient({
     return (
       atlasRawMaterials.find((m) => m.slug === selectedMaterialSlug) ||
       atlasAdvancedMaterials.find((m) => m.slug === selectedMaterialSlug) ||
+      atlasEndMarkets.find((m) => m.slug === selectedMaterialSlug) ||
       null
     );
-  }, [selectedMaterialSlug, atlasRawMaterials, atlasAdvancedMaterials]);
+  }, [
+    selectedMaterialSlug,
+    atlasRawMaterials,
+    atlasAdvancedMaterials,
+    atlasEndMarkets,
+  ]);
 
   // Unified company-level cost_inputs & demand_proxies (clean short labels without "ETF"/"Index")
   const companyDriversByRole = useMemo(() => {
@@ -1276,6 +1284,9 @@ export default function DashboardClient({
 
       return soldOrCaptive.map((l, idx): CompanyProduct => {
         const mat = materialById.get(l.material_id)!;
+        const canonicalEm = resolveCanonicalEndMarket(
+          l.end_demand || mat.material_group
+        );
         return {
           id: `link-${selectedTicker}-${l.material_id}-${idx}`,
           ticker: selectedTicker,
@@ -1296,9 +1307,9 @@ export default function DashboardClient({
           raw_materials: consumedInputs,
           downstream: {
             process_step: "Customer manufacturing process",
-            end_product: l.end_demand || "Engineered end-product",
-            end_demand: l.end_demand || mat.material_group,
-            demand_proxy_ref: null,
+            end_product: l.end_demand || canonicalEm.name,
+            end_demand: canonicalEm.name,
+            demand_proxy_ref: canonicalEm.registryCode,
             customers: null,
           },
           pricing_structure: null,
@@ -1485,9 +1496,25 @@ export default function DashboardClient({
 
   const handleOpenMaterialInAtlas = (
     materialNameOrSlug: string,
-    preferKind?: "raw" | "advanced",
+    preferKind?: "raw" | "advanced" | "end_market",
     fallbackCategory?: string
   ) => {
+    if (preferKind === "end_market") {
+      const canonicalEm = resolveCanonicalEndMarket(materialNameOrSlug);
+      const emMatch = atlasEndMarkets.find(
+        (m) =>
+          m.slug === materialNameOrSlug.toLowerCase() ||
+          m.name.toLowerCase() === canonicalEm.name.toLowerCase()
+      );
+      if (emMatch) {
+        setMaterialsSubTab("end_market");
+        setSelectedMaterialSlug(emMatch.slug);
+        setActiveTab("materials");
+        setSelectedTicker(null);
+        return;
+      }
+    }
+
     const candidates = [materialNameOrSlug, fallbackCategory]
       .filter((s): s is string => Boolean(s && s.trim()))
       .map((s) => s.toLowerCase().trim());
@@ -1685,7 +1712,9 @@ export default function DashboardClient({
             >
               <span>Materials Atlas</span>
               <span className="px-1.5 py-0.2 rounded bg-slate-900/60 text-[10px] font-mono">
-                {atlasRawMaterials.length + atlasAdvancedMaterials.length}
+                {atlasRawMaterials.length +
+                  atlasAdvancedMaterials.length +
+                  atlasEndMarkets.length}
               </span>
             </button>
             <button
@@ -2374,12 +2403,12 @@ export default function DashboardClient({
           </section>
         )}
 
-        {/* TAB 3: MATERIALS ATLAS (T0/T1 Raw Inputs & Intermediates vs. T2 Engineered Products) */}
+        {/* TAB 3: MATERIALS ATLAS (T0/T1 Raw Inputs, T2 Engineered Products & Downstream End-Markets) */}
         {activeTab === "materials" && (
           <section className="space-y-6">
-            {/* Sub-Navigation Switcher: Raw Materials (T0/T1) vs. Advanced Materials (T2) */}
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-[#111827]/90 border border-slate-800 rounded-2xl p-4">
-              <div className="inline-flex rounded-xl bg-[#090d16] border border-slate-800 p-1 self-start">
+            {/* Sub-Navigation Switcher: Raw Materials (T0/T1) vs. Advanced Materials (T2) vs. Downstream End-Markets */}
+            <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 bg-[#111827]/90 border border-slate-800 rounded-2xl p-4">
+              <div className="inline-flex flex-wrap rounded-xl bg-[#090d16] border border-slate-800 p-1 self-start gap-1">
                 <button
                   type="button"
                   onClick={() => {
@@ -2427,15 +2456,41 @@ export default function DashboardClient({
                     {atlasAdvancedMaterials.length}
                   </span>
                 </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMaterialsSubTab("end_market");
+                    setSelectedMaterialSlug(null);
+                  }}
+                  className={`px-4 py-2 rounded-lg text-xs font-semibold transition flex items-center gap-2 ${
+                    materialsSubTab === "end_market"
+                      ? "bg-emerald-500 text-slate-950 shadow-sm"
+                      : "text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  <span>Downstream End-Markets</span>
+                  <span
+                    className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
+                      materialsSubTab === "end_market"
+                        ? "bg-emerald-950/30 text-slate-950"
+                        : "bg-slate-800 text-slate-400"
+                    }`}
+                  >
+                    {atlasEndMarkets.length}
+                  </span>
+                </button>
               </div>
 
-              <div className="w-full sm:w-80">
+              <div className="w-full lg:w-80">
                 <input
                   type="text"
                   placeholder={
                     materialsSubTab === "raw"
                       ? "Search T0/T1 inputs (e.g. Copper, Polysilicon, Lithium)..."
-                      : "Search T2 products (e.g. CMP Slurries, Aramid, SiC)..."
+                      : materialsSubTab === "advanced"
+                      ? "Search T2 products (e.g. CMP Slurries, Aramid, SiC)..."
+                      : "Search end-markets (e.g. Semiconductors, AI, Aerospace)..."
                   }
                   value={materialSearch}
                   onChange={(e) => setMaterialSearch(e.target.value)}
@@ -2448,7 +2503,9 @@ export default function DashboardClient({
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
               {(materialsSubTab === "raw"
                 ? atlasRawMaterials
-                : atlasAdvancedMaterials
+                : materialsSubTab === "advanced"
+                ? atlasAdvancedMaterials
+                : atlasEndMarkets
               )
                 .filter((m) => {
                   if (!materialSearch.trim()) return true;
@@ -2458,6 +2515,9 @@ export default function DashboardClient({
                     m.categoryLabel.toLowerCase().includes(q) ||
                     m.tier.toLowerCase().includes(q) ||
                     m.summary.toLowerCase().includes(q) ||
+                    (m.linkedMaterialClasses || []).some((mc) =>
+                      mc.toLowerCase().includes(q)
+                    ) ||
                     m.companies.some(
                       (c) =>
                         c.ticker.toLowerCase().includes(q) ||
@@ -2481,10 +2541,12 @@ export default function DashboardClient({
                                 ? "bg-amber-500/15 text-amber-300 border-amber-500/35"
                                 : mat.tier === "T1"
                                 ? "bg-purple-500/15 text-purple-300 border-purple-500/35"
+                                : mat.tier === "EM"
+                                ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/35"
                                 : "bg-sky-500/15 text-sky-300 border-sky-500/35"
                             }`}
                           >
-                            {mat.tier}
+                            {mat.tier === "EM" ? "END-MARKET" : mat.tier}
                           </span>
                           <span className="text-[10px] font-mono uppercase text-slate-400 truncate">
                             {mat.categoryLabel}
@@ -2525,6 +2587,26 @@ export default function DashboardClient({
                             )}
                           </div>
                         )}
+
+                      {mat.kind === "end_market" &&
+                        mat.linkedMaterialClasses &&
+                        mat.linkedMaterialClasses.length > 0 && (
+                          <div className="flex flex-wrap gap-1 pt-0.5">
+                            {mat.linkedMaterialClasses.slice(0, 3).map((mc) => (
+                              <span
+                                key={mc}
+                                className="px-1.5 py-0.2 rounded bg-sky-500/10 text-sky-300 border border-sky-500/25 text-[10px]"
+                              >
+                                {mc}
+                              </span>
+                            ))}
+                            {mat.linkedMaterialClasses.length > 3 && (
+                              <span className="px-1.5 py-0.2 rounded bg-slate-800 text-slate-400 text-[10px] font-mono">
+                                +{mat.linkedMaterialClasses.length - 3}
+                              </span>
+                            )}
+                          </div>
+                        )}
                     </div>
 
                     <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between gap-2">
@@ -2554,7 +2636,7 @@ export default function DashboardClient({
         )}
       </main>
 
-      {/* Slide-Over Material Dossier Drawer (Producers, Consumers & Captive Roles) */}
+      {/* Slide-Over Material & End-Market Dossier Drawer */}
       {selectedAtlasMaterial && !selectedEquity && (
         <div
           onClick={() => setSelectedMaterialSlug(null)}
@@ -2575,22 +2657,25 @@ export default function DashboardClient({
                           ? "bg-amber-500/15 text-amber-300 border-amber-500/35"
                           : selectedAtlasMaterial.tier === "T1"
                           ? "bg-purple-500/15 text-purple-300 border-purple-500/35"
+                          : selectedAtlasMaterial.tier === "EM"
+                          ? "bg-emerald-500/15 text-emerald-300 border-emerald-500/35"
                           : "bg-sky-500/15 text-sky-300 border-sky-500/35"
                       }`}
                     >
-                      {selectedAtlasMaterial.tier} •{" "}
                       {selectedAtlasMaterial.tier === "T0"
-                        ? "Primary Commodity"
+                        ? "T0 • Primary Commodity"
                         : selectedAtlasMaterial.tier === "T1"
-                        ? "Refined Intermediate"
-                        : "Engineered T2 Product"}
+                        ? "T1 • Refined Intermediate"
+                        : selectedAtlasMaterial.tier === "EM"
+                        ? "Downstream End-Market"
+                        : "T2 • Engineered Product"}
                     </span>
                     <span className="text-xs font-mono text-slate-400">
                       {selectedAtlasMaterial.categoryLabel}
                     </span>
                     {selectedAtlasMaterial.spotPriceLabel && (
                       <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 text-[11px] font-mono">
-                        Spot: {selectedAtlasMaterial.spotPriceLabel}
+                        Proxy / Spot: {selectedAtlasMaterial.spotPriceLabel}
                       </span>
                     )}
                   </div>
@@ -2632,18 +2717,44 @@ export default function DashboardClient({
                 {selectedAtlasMaterial.endMarkets.length > 0 && (
                   <div className="flex items-center gap-1.5 flex-wrap pt-1 border-t border-slate-800/70">
                     <span className="text-[10px] font-mono uppercase text-slate-500">
-                      End-Markets:
+                      Downstream End-Markets:
                     </span>
                     {selectedAtlasMaterial.endMarkets.map((em) => (
-                      <span
+                      <button
                         key={em}
-                        className="px-2 py-0.5 rounded-full bg-slate-800/90 text-slate-300 border border-slate-700 text-[11px]"
+                        type="button"
+                        onClick={() =>
+                          handleOpenMaterialInAtlas(em, "end_market")
+                        }
+                        className="px-2 py-0.5 rounded-full bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border border-emerald-500/35 text-[11px] transition cursor-pointer"
                       >
-                        {em}
-                      </span>
+                        {em} ↗
+                      </button>
                     ))}
                   </div>
                 )}
+
+                {selectedAtlasMaterial.kind === "end_market" &&
+                  selectedAtlasMaterial.linkedMaterialClasses &&
+                  selectedAtlasMaterial.linkedMaterialClasses.length > 0 && (
+                    <div className="flex items-center gap-1.5 flex-wrap pt-1 border-t border-slate-800/70">
+                      <span className="text-[10px] font-mono uppercase text-slate-500">
+                        T2 Materials Feeding This Vertical:
+                      </span>
+                      {selectedAtlasMaterial.linkedMaterialClasses.map((mc) => (
+                        <button
+                          key={mc}
+                          type="button"
+                          onClick={() =>
+                            handleOpenMaterialInAtlas(mc, "advanced")
+                          }
+                          className="px-2 py-0.5 rounded-full bg-sky-500/15 hover:bg-sky-500/25 text-sky-300 border border-sky-500/35 text-[11px] transition cursor-pointer"
+                        >
+                          {mc} ↗
+                        </button>
+                      ))}
+                    </div>
+                  )}
               </div>
             </div>
 
@@ -2660,8 +2771,9 @@ export default function DashboardClient({
                 <div className="space-y-3">
                   <div className="flex items-center justify-between">
                     <h3 className="text-xs font-mono uppercase tracking-wider text-emerald-400 font-semibold">
-                      Producers &amp; Suppliers Selling {selectedAtlasMaterial.name} (
-                      {selectedAtlasMaterial.producers.length})
+                      {selectedAtlasMaterial.kind === "end_market"
+                        ? `Suppliers Feeding ${selectedAtlasMaterial.name} (${selectedAtlasMaterial.producers.length})`
+                        : `Producers & Suppliers Selling ${selectedAtlasMaterial.name} (${selectedAtlasMaterial.producers.length})`}
                     </h3>
                   </div>
                   <div className="grid grid-cols-1 gap-3">
@@ -2905,16 +3017,12 @@ export default function DashboardClient({
                           <strong className="text-sky-400">Downstream End-Demand</strong>
                         </span>
                         <span className="font-mono text-[10px]">
-                          Click chips to inspect in Materials Atlas
+                          Click any node in chain to inspect in Materials Atlas
                         </span>
                       </div>
 
                       <div className="space-y-3">
                         {selectedEquityProducts.map((prod) => {
-                          const proxyCode = prod.downstream?.demand_proxy_ref;
-                          const isProxyValid = Boolean(
-                            proxyCode && validRegistryCodes.has(proxyCode)
-                          );
                           const isHighlighted = Boolean(
                             highlightedProductName &&
                               prod.name.toLowerCase() ===
@@ -2977,7 +3085,7 @@ export default function DashboardClient({
                                 </div>
                               </div>
 
-                              {/* Visual Flow Pipeline: [Raw Material] -> [Product] -> [Downstream] */}
+                              {/* Visual Flow Pipeline: [Raw Material] -> [Product] -> [Downstream End-Demand] */}
                               <div className="rounded-lg bg-[#090d16] border border-slate-800/80 p-3 flex flex-wrap items-center gap-2 text-xs">
                                 <div className="flex flex-wrap items-center gap-1.5">
                                   {(prod.raw_materials || []).map(
@@ -3039,29 +3147,19 @@ export default function DashboardClient({
                                   &rarr;
                                 </span>
 
-                                {isProxyValid && proxyCode ? (
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      handleSelectCommodityFromDossier(proxyCode)
-                                    }
-                                    title={`Downstream demand proxy: ${getCommodityDisplayName(
-                                      proxyCode
-                                    )} (${prod.downstream.process_step} -> ${
-                                      prod.downstream.end_product
-                                    }). Click to filter companies.`}
-                                    className="px-3 py-1 rounded-md bg-sky-500 text-slate-950 font-semibold shadow-sm shadow-sky-500/25 hover:bg-sky-400 transition cursor-pointer"
-                                  >
-                                    {prod.downstream.end_demand}
-                                  </button>
-                                ) : (
-                                  <span
-                                    title={`${prod.downstream.process_step} -> ${prod.downstream.end_product}`}
-                                    className="px-3 py-1 rounded-md bg-sky-500 text-slate-950 font-semibold shadow-sm shadow-sky-500/25"
-                                  >
-                                    {prod.downstream.end_demand}
-                                  </span>
-                                )}
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleOpenMaterialInAtlas(
+                                      prod.downstream.end_demand,
+                                      "end_market"
+                                    )
+                                  }
+                                  title={`Inspect ${prod.downstream.end_demand} vertical in Materials Atlas`}
+                                  className="px-3 py-1 rounded-md bg-sky-500 text-slate-950 font-semibold shadow-sm shadow-sky-500/25 hover:bg-sky-400 transition cursor-pointer"
+                                >
+                                  {prod.downstream.end_demand} ↗
+                                </button>
                               </div>
 
                               {/* Clean 2-Column Technical Specs & Peers */}
