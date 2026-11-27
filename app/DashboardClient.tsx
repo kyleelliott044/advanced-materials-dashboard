@@ -776,8 +776,8 @@ export default function DashboardClient({
     }
     return map;
   }, [productProfiles]);
-
-  // Product rollup per company: unified across `company_material_links` (primary) and `company_products` (fallback)
+  
+// Product rollup per company: strictly verified `company_material_links` (no legacy fallback)
   const tickerRollupMap = useMemo(() => {
     const matMap = new Map<number, MaterialRecord>();
     for (const m of materials) matMap.set(m.id, m);
@@ -798,46 +798,31 @@ export default function DashboardClient({
         return Boolean(m && m.tier === "T2");
       });
 
-      if (soldT2.length > 0) {
-        const costCodes: string[] = [];
-        const unlogged: string[] = [];
-        for (const l of tLinks) {
-          if (l.role !== "consumes") continue;
-          const m = matMap.get(l.material_id);
-          if (!m) continue;
-          if (m.registry_code && validRegistryCodes.has(m.registry_code)) {
-            if (!costCodes.includes(m.registry_code)) {
-              costCodes.push(m.registry_code);
-            }
-          } else if (!unlogged.includes(m.canonical_name)) {
-            unlogged.push(m.canonical_name);
+      const costCodes: string[] = [];
+      const unlogged: string[] = [];
+      for (const l of tLinks) {
+        if (l.role !== "consumes") continue;
+        const m = matMap.get(l.material_id);
+        if (!m) continue;
+        if (m.registry_code && validRegistryCodes.has(m.registry_code)) {
+          if (!costCodes.includes(m.registry_code)) {
+            costCodes.push(m.registry_code);
           }
+        } else if (!unlogged.includes(m.canonical_name)) {
+          unlogged.push(m.canonical_name);
         }
-        map[eq.ticker] = {
-          activeProductCount: soldT2.length,
-          costInputCodes: costCodes,
-          demandProxyCodes: [],
-          unloggedMaterials: unlogged,
-          isProductDerived: true,
-        };
-      } else {
-        const cleanedLegacy = (tickerProductsMap[eq.ticker] || []).filter(
-          (p) => p.name.trim().length > 4 && p.category.trim().length > 4
-        );
-        map[eq.ticker] = rollupCompanyProducts(
-          cleanedLegacy,
-          validRegistryCodes
-        );
       }
+
+      map[eq.ticker] = {
+        activeProductCount: soldT2.length,
+        costInputCodes: costCodes,
+        demandProxyCodes: [],
+        unloggedMaterials: unlogged,
+        isProductDerived: soldT2.length > 0 || costCodes.length > 0,
+      };
     }
     return map;
-  }, [
-    equities,
-    materials,
-    materialLinks,
-    tickerProductsMap,
-    validRegistryCodes,
-  ]);
+  }, [equities, materials, materialLinks, validRegistryCodes]);
 
   // Reverse indexes: commodity_ref -> products -> companies & category -> peers
   const commodityReverseIndex = useMemo(
