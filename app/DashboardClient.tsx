@@ -1,11 +1,3 @@
-Two syntax errors were introduced during the previous paste:
-
-1. The sticky header wrapper `<div className="px-6 pt-5 pb-4 ...">` lost its closing `</div>` right after the segmented navigation tab bar.
-2. The old `selectedEquityFilings.map(...)` block was left dangling right below `dossierTab === "metrics"`.
-
-Replace **`app/DashboardClient.tsx`** with this complete, cleanly balanced file:
-
-```tsx
 "use client";
 
 import { useState, useMemo, useEffect, useRef } from "react";
@@ -3360,5 +3352,3 @@ export default function DashboardClient({
     </div>
   );
 }
-
-```
