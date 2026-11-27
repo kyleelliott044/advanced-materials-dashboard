@@ -1286,12 +1286,12 @@ export default function DashboardClient({
             : null;
         })
         .filter((x): x is NonNullable<typeof x> => Boolean(x));
-
       return soldOrCaptive.map((l, idx): CompanyProduct => {
         const mat = materialById.get(l.material_id)!;
-        const canonicalEm = resolveCanonicalEndMarket(
-          l.end_demand || mat.material_group
-        );
+        const rawEndDemand = (l.end_demand || "").trim();
+        const canonicalEm = rawEndDemand
+          ? resolveCanonicalEndMarket(rawEndDemand)
+          : null;
         return {
           id: `link-${selectedTicker}-${l.material_id}-${idx}`,
           ticker: selectedTicker,
@@ -1312,9 +1312,9 @@ export default function DashboardClient({
           raw_materials: consumedInputs,
           downstream: {
             process_step: "Customer manufacturing process",
-            end_product: l.end_demand || canonicalEm.name,
-            end_demand: canonicalEm.name,
-            demand_proxy_ref: canonicalEm.registryCode,
+            end_product: rawEndDemand || "Engineered end-product",
+            end_demand: canonicalEm ? canonicalEm.name : "",
+            demand_proxy_ref: canonicalEm ? canonicalEm.registryCode : null,
             customers: null,
           },
           pricing_structure: null,
@@ -3151,20 +3151,27 @@ export default function DashboardClient({
                                 <span className="text-slate-500 font-mono">
                                   &rarr;
                                 </span>
+                                {prod.downstream.end_demand && (
+                                  <>
+                                    <span className="text-slate-500 font-mono">
+                                      &rarr;
+                                    </span>
 
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    handleOpenMaterialInAtlas(
-                                      prod.downstream.end_demand,
-                                      "end_market"
-                                    )
-                                  }
-                                  title={`Inspect ${prod.downstream.end_demand} vertical in Materials Atlas`}
-                                  className="px-3 py-1 rounded-md bg-sky-500 text-slate-950 font-semibold shadow-sm shadow-sky-500/25 hover:bg-sky-400 transition cursor-pointer"
-                                >
-                                  {prod.downstream.end_demand} ↗
-                                </button>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        handleOpenMaterialInAtlas(
+                                          prod.downstream.end_demand,
+                                          "end_market"
+                                        )
+                                      }
+                                      title={`Inspect ${prod.downstream.end_demand} vertical in Materials Atlas`}
+                                      className="px-3 py-1 rounded-md bg-sky-500 text-slate-950 font-semibold shadow-sm shadow-sky-500/25 hover:bg-sky-400 transition cursor-pointer"
+                                    >
+                                      {prod.downstream.end_demand} ↗
+                                    </button>
+                                  </>
+                                )}
                               </div>
 
                               {/* Clean 2-Column Technical Specs & Peers */}
