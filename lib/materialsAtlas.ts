@@ -48,14 +48,15 @@ export interface AtlasCompanyLink {
 
 export interface MaterialAtlasEntry {
   slug: string;
-  kind: "raw" | "advanced";
-  tier: MaterialTier;
+  kind: "raw" | "advanced" | "end_market";
+  tier: MaterialTier | "EM";
   name: string;
   categoryLabel: string;
   registryCode: string | null;
   spotPriceLabel: string | null;
   summary: string;
   endMarkets: string[];
+  linkedMaterialClasses?: string[];
   companies: AtlasCompanyLink[];
   producers: AtlasCompanyLink[];
   consumers: AtlasCompanyLink[];
@@ -79,6 +80,128 @@ interface MinimalInput {
   value: string | number;
 }
 
+interface CanonicalEndMarketSpec {
+  name: string;
+  categoryLabel: string;
+  registryCode: string | null;
+  summary: string;
+  patterns: RegExp[];
+}
+
+const CANONICAL_END_MARKETS: CanonicalEndMarketSpec[] = [
+  {
+    name: "Semiconductors and Wafer Fabrication",
+    categoryLabel: "Microelectronics & Fabs",
+    registryCode: "SMH",
+    summary:
+      "Front-end logic, DRAM/NAND memory, and compound semiconductor wafer fabrication requiring ultra-pure substrates, photoresists, CMP slurries, and specialty process gases.",
+    patterns: [
+      /\b(semiconductor|wafer|foundry|fab|logic|memory|dram|nand|lithography|euv|ic\b|integrated\s+circuit|microelectronics|chipmaking)\b/i,
+    ],
+  },
+  {
+    name: "AI Data Center and High-Speed Networking",
+    categoryLabel: "Compute & Optical Interconnects",
+    registryCode: "SMH",
+    summary:
+      "Hyperscale AI server accelerators, HBM packaging, 800G/1.6T optical transceivers, and ultra-low-loss PCB laminates.",
+    patterns: [
+      /\b(ai\b|artificial\s+intelligence|data\s*center|hyperscale|server|hbm|high[- ]bandwidth|800g|1\.6t|optical\s+(fiber|network|transceiver)|telecom|5g|rf\b|mmwave)\b/i,
+    ],
+  },
+  {
+    name: "Consumer and Industrial Electronics",
+    categoryLabel: "Displays, PCBs & Devices",
+    registryCode: null,
+    summary:
+      "OLED/LCD display panels, multilayer ceramic capacitors (MLCCs), flexible printed circuits, and thermal management assemblies across consumer and industrial hardware.",
+    patterns: [
+      /\b(electronics?|display|oled|lcd|smartphone|handset|pc\b|pcb|printed\s+circuit|mlcc|capacitor|consumer\s+device)\b/i,
+    ],
+  },
+  {
+    name: "EV and Energy Storage Batteries",
+    categoryLabel: "Electrified Mobility & Storage",
+    registryCode: "LIT",
+    summary:
+      "Lithium-ion traction batteries and stationary grid storage systems requiring high-nickel/LFP cathodes, synthetic/natural graphite anodes, electrolytes, separators, and ultra-thin copper foil.",
+    patterns: [
+      /\b(ev\b|electric\s+vehicle|battery|batteries|lithium[- ]ion|cathode|anode|electrolyte|energy\s+storage|ess\b|gigafactory)\b/i,
+    ],
+  },
+  {
+    name: "Aerospace and Defense",
+    categoryLabel: "Airframes, Propulsion & Radar",
+    registryCode: "ITA",
+    summary:
+      "Commercial aircraft structures, jet-engine hot sections, hypersonics, satellite solar arrays, and defense RF/sensor systems requiring carbon fiber prepregs, superalloys, and titanium.",
+    patterns: [
+      /\b(aerospace|defense|defence|aircraft|aviation|airframe|jet\s+engine|turbine|space|satellite|missile|radar|military)\b/i,
+    ],
+  },
+  {
+    name: "Electrification, Grid and Clean Energy",
+    categoryLabel: "Power Transmission, Solar & Hydrogen",
+    registryCode: "URA",
+    summary:
+      "High-voltage grid transformers, wind turbine permanent magnets, photovoltaic solar modules, nuclear reactors, and green hydrogen PEM electrolyzers.",
+    patterns: [
+      /\b(grid|electrification|power\s+(generation|transmission|conversion)|solar|photovoltaic|pv\b|wind|hydrogen|electrolyzer|fuel\s+cell|nuclear|renewable)\b/i,
+    ],
+  },
+  {
+    name: "Automotive and Mobility",
+    categoryLabel: "Powertrain, Thermal & Lightweighting",
+    registryCode: null,
+    summary:
+      "Internal combustion emissions catalysts, 800V SiC power inverters, lightweight structural alloys, and high-heat under-hood polymers.",
+    patterns: [
+      /\b(automotive|mobility|vehicle|auto\b|transportation|emissions|catalytic|powertrain)\b/i,
+    ],
+  },
+  {
+    name: "Medical Devices and Healthcare",
+    categoryLabel: "Implantables & Biocompatibles",
+    registryCode: "IHI",
+    summary:
+      "USP Class VI implantable polymers, bioresorbable orthopedic fixation, cardiovascular catheters, and medical titanium/nitinol components.",
+    patterns: [
+      /\b(medical|healthcare|biomedical|implant|surgical|catheter|orthopedic|life\s+science|pharma)\b/i,
+    ],
+  },
+  {
+    name: "Industrial and Chemical Processing",
+    categoryLabel: "Refining, Tooling & Infrastructure",
+    registryCode: "INDPRO",
+    summary:
+      "Petrochemical refining catalysts, corrosion-resistant fluoropolymer linings, specialty steel tooling, and industrial gas applications.",
+    patterns: [
+      /\b(industrial|chemical|refining|petrochemical|manufacturing|construction|infrastructure|tooling|oil\s+and\s+gas|energy)\b/i,
+    ],
+  },
+];
+
+function slugify(str: string): string {
+  return str
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+export function resolveCanonicalEndMarket(
+  rawEndDemand: string | null | undefined
+): CanonicalEndMarketSpec {
+  const text = (rawEndDemand || "").trim();
+  if (text) {
+    for (const spec of CANONICAL_END_MARKETS) {
+      if (spec.patterns.some((re) => re.test(text))) {
+        return spec;
+      }
+    }
+  }
+  return CANONICAL_END_MARKETS[CANONICAL_END_MARKETS.length - 1];
+}
+
 export function buildMaterialsAtlas({
   equities,
   inputs,
@@ -97,6 +220,7 @@ export function buildMaterialsAtlas({
 }): {
   rawMaterials: MaterialAtlasEntry[];
   advancedMaterials: MaterialAtlasEntry[];
+  endMarkets: MaterialAtlasEntry[];
 } {
   const equityMap = new Map<string, MinimalEquity>();
   for (const eq of equities) {
@@ -122,7 +246,18 @@ export function buildMaterialsAtlas({
     captiveUsers: Map<string, AtlasCompanyLink>;
   }
 
+  interface EndMarketBucket {
+    slug: string;
+    name: string;
+    categoryLabel: string;
+    registryCode: string | null;
+    summary: string;
+    materialClasses: Set<string>;
+    producers: Map<string, AtlasCompanyLink>;
+  }
+
   const bucketsByMaterialId = new Map<number, UnifiedBucket>();
+  const endMarketBuckets = new Map<string, EndMarketBucket>();
   const materialById = new Map<number, MaterialRecord>();
   for (const m of materials) {
     materialById.set(m.id, m);
@@ -153,11 +288,15 @@ export function buildMaterialsAtlas({
       bucketsByMaterialId.set(mat.id, bucket);
     }
 
+    const canonicalEm = link.end_demand
+      ? resolveCanonicalEndMarket(link.end_demand)
+      : null;
+
     if (link.performance_spec && bucket.specs.length < 3) {
       bucket.specs.push(link.performance_spec);
     }
-    if (link.end_demand) {
-      bucket.endMarkets.add(link.end_demand);
+    if (canonicalEm) {
+      bucket.endMarkets.add(canonicalEm.name);
     }
 
     const targetMap =
@@ -190,12 +329,66 @@ export function buildMaterialsAtlas({
     if (!exists) {
       compLink.linkedProducts.push({
         name: prodLabel,
-        category: mat.material_group,
+        category: mat.canonical_name,
         businessUnit: link.business_unit || undefined,
         detail: link.performance_spec || link.source_section || undefined,
-        endDemand: link.end_demand || undefined,
+        endDemand: canonicalEm?.name || link.end_demand || undefined,
         sourceQuote: link.source_quote,
       });
+    }
+
+    // Populate End-Market directory from sold/captive T2 material links
+    if (
+      mat.tier === "T2" &&
+      (link.role === "sells" || link.role === "makes_captive")
+    ) {
+      const emSpec = canonicalEm || resolveCanonicalEndMarket(mat.material_group);
+      const emSlug = `em-${slugify(emSpec.name)}`;
+      let emBucket = endMarketBuckets.get(emSlug);
+      if (!emBucket) {
+        emBucket = {
+          slug: emSlug,
+          name: emSpec.name,
+          categoryLabel: emSpec.categoryLabel,
+          registryCode: emSpec.registryCode,
+          summary: emSpec.summary,
+          materialClasses: new Set<string>(),
+          producers: new Map<string, AtlasCompanyLink>(),
+        };
+        endMarketBuckets.set(emSlug, emBucket);
+      }
+
+      emBucket.materialClasses.add(mat.canonical_name);
+
+      let emComp = emBucket.producers.get(link.ticker);
+      if (!emComp) {
+        emComp = {
+          ticker: eq.ticker,
+          companyName: eq.company_name,
+          subSector: eq.sub_sector,
+          country: eq.country,
+          marketCapUsd: eq.market_cap_usd,
+          contractType: eq.contract_type,
+          role: link.role,
+          linkedProducts: [],
+          sourceOrigin: "material_link",
+        };
+        emBucket.producers.set(link.ticker, emComp);
+      }
+
+      const emProdExists = emComp.linkedProducts.some(
+        (p) => p.name.toLowerCase() === prodLabel.toLowerCase()
+      );
+      if (!emProdExists) {
+        emComp.linkedProducts.push({
+          name: prodLabel,
+          category: mat.canonical_name,
+          businessUnit: link.business_unit || undefined,
+          detail: mat.canonical_name,
+          endDemand: emSpec.name,
+          sourceQuote: link.source_quote,
+        });
+      }
     }
   }
 
@@ -227,7 +420,7 @@ export function buildMaterialsAtlas({
         })} ${inp.unit || ""}`.trim()
       : null;
 
-    const endMarketsArr = Array.from(b.endMarkets).slice(0, 5);
+    const endMarketsArr = Array.from(b.endMarkets).slice(0, 6);
 
     if (b.tier === "T2") {
       if (producers.length === 0) continue;
@@ -282,6 +475,40 @@ export function buildMaterialsAtlas({
     }
   }
 
+  const endMarkets: MaterialAtlasEntry[] = Array.from(endMarketBuckets.values())
+    .filter((em) => em.producers.size > 0)
+    .map((em) => {
+      const producers = Array.from(em.producers.values()).sort(sortByMcap);
+      const inp = em.registryCode ? inputInfoMap.get(em.registryCode) : undefined;
+      const spotPriceLabel = inp
+        ? `${Number(inp.value).toLocaleString(undefined, {
+            minimumFractionDigits: 2,
+            maximumFractionDigits: 2,
+          })} ${inp.unit || ""}`.trim()
+        : null;
+
+      return {
+        slug: em.slug,
+        kind: "end_market" as const,
+        tier: "EM" as const,
+        name: em.name,
+        categoryLabel: em.categoryLabel,
+        registryCode: em.registryCode,
+        spotPriceLabel,
+        summary: em.summary,
+        endMarkets: [],
+        linkedMaterialClasses: Array.from(em.materialClasses).sort(),
+        companies: producers,
+        producers,
+        consumers: [],
+        captiveUsers: [],
+      };
+    })
+    .sort(
+      (a, b) =>
+        b.companies.length - a.companies.length || a.name.localeCompare(b.name)
+    );
+
   rawMaterials.sort(
     (a, b) =>
       b.companies.length - a.companies.length || a.name.localeCompare(b.name)
@@ -291,5 +518,5 @@ export function buildMaterialsAtlas({
       b.companies.length - a.companies.length || a.name.localeCompare(b.name)
   );
 
-  return { rawMaterials, advancedMaterials };
+  return { rawMaterials, advancedMaterials, endMarkets };
 }
