@@ -10,6 +10,13 @@ on:
         required: true
         default: "150"
         type: string
+  workflow_call:
+    inputs:
+      batch_limit:
+        description: "Number of companies to process in this run"
+        required: false
+        default: "40"
+        type: string
 
 jobs:
   extract-quant-filing-metrics:
@@ -34,5 +41,5 @@ jobs:
       - name: Extract Quantitative Filing Metrics
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
-          METRICS_BATCH_LIMIT: ${{ github.event.inputs.batch_limit || '40' }}
+          METRICS_BATCH_LIMIT: ${{ inputs.batch_limit || '40' }}
         run: python pipeline/extract_filing_metrics.py
