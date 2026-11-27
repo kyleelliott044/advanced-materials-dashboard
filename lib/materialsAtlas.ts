@@ -64,6 +64,349 @@ interface MinimalSensitivity {
   mechanism_note: string;
 }
 
+const INVALID_RAW_MATERIAL_RE = new RegExp(
+  "^(" +
+    [
+      "labor",
+      "direct labor",
+      "manufacturing labor",
+      "raw materials?",
+      "direct materials?",
+      "other raw materials?",
+      "various raw materials?",
+      "feedstocks?",
+      "industrial feedstocks?",
+      "chemical feedstocks?",
+      "petrochemical feedstocks?",
+      "specialty chemical intermediates?",
+      "chemical intermediates?",
+      "intermediates?",
+      "specialty chemicals?",
+      "industrial chemicals?",
+      "base chemicals?",
+      "commodities",
+      "metals?",
+      "precious metals?",
+      "rare earths?",
+      "minerals?",
+      "polymers?",
+      "resins?",
+      "plastic resins?",
+      "solvents?",
+      "acids?",
+      "gases?",
+      "industrial gases?",
+      "energy",
+      "electricity",
+      "power",
+      "utilities",
+      "water",
+      "freight",
+      "logistics",
+      "transportation",
+      "packaging",
+      "consumables?",
+      "components?",
+      "parts?",
+      "equipment",
+      "tooling",
+      "scrap",
+      "general",
+      "other",
+      "n/?a",
+    ].join("|") +
+    ")$",
+  "i"
+);
+
+const VAGUE_PHRASE_RE =
+  /\b(labor|raw\s+materials?|industrial\s+feedstocks?|specialty\s+chemical\s+intermediates?|general\s+chemicals?|various\s+|miscellaneous|other\s+inputs?)\b/i;
+
+const GENERIC_ADV_BUCKET_RE =
+  /^(electronic\s+materials?|advanced\s+materials?(\s+portfolio)?|specialty\s+materials?|performance\s+chemicals?|engineered\s+materials?|industrial\s+materials?)$/i;
+
+const CANONICAL_CODE_NAMES: Record<string, string> = {
+  "HG=F": "Copper",
+  "NG=F": "Natural Gas",
+  "CL=F": "WTI Crude Oil",
+  "BZ=F": "Brent Crude Oil",
+  "ALI=F": "Aluminum",
+  "PL=F": "Platinum",
+  "SI=F": "Silver",
+  "PA=F": "Palladium",
+  "GC=F": "Gold",
+  PNICKUSDM: "Nickel",
+  PCOBAUSDM: "Cobalt",
+  PNGASEUUSDM: "Natural Gas",
+  WPU101: "Iron & Steel",
+  NDPR_CN: "Neodymium-Praseodymium (NdPr) Oxide",
+  LICARB_CN: "Lithium Carbonate",
+  GALLIUM_9999: "Gallium",
+  GERMANIUM_INGOT: "Germanium",
+  POLYSILICON_N: "Polysilicon",
+  SPHERICAL_GRAPHITE: "Spherical Graphite",
+  COBALT_SULFATE: "Cobalt Sulfate",
+  CARBON_FIBER_T700: "Polyacrylonitrile (PAN) Precursor",
+};
+
+const RAW_MATERIAL_ALIASES: Record<string, string> = {
+  copper: "Copper",
+  "refined copper": "Copper",
+  "copper cathode": "Copper",
+  "copper cathodes": "Copper",
+  "copper foil": "Copper",
+  "natural gas": "Natural Gas",
+  "european natural gas": "Natural Gas",
+  "ttf natural gas": "Natural Gas",
+  "liquefied natural gas": "Natural Gas",
+  lng: "Natural Gas",
+  "crude oil": "WTI Crude Oil",
+  "wti crude": "WTI Crude Oil",
+  "wti crude oil": "WTI Crude Oil",
+  "brent crude": "Brent Crude Oil",
+  "brent crude oil": "Brent Crude Oil",
+  aluminum: "Aluminum",
+  aluminium: "Aluminum",
+  "primary aluminum": "Aluminum",
+  nickel: "Nickel",
+  "class 1 nickel": "Nickel",
+  "nickel sulfate": "Nickel Sulfate",
+  "nickel sulphate": "Nickel Sulfate",
+  cobalt: "Cobalt",
+  "cobalt sulfate": "Cobalt Sulfate",
+  "cobalt sulphate": "Cobalt Sulfate",
+  "cobalt hydroxide": "Cobalt Hydroxide",
+  lithium: "Lithium Carbonate",
+  "lithium carbonate": "Lithium Carbonate",
+  "lithium hydroxide": "Lithium Hydroxide",
+  spodumene: "Spodumene Concentrate",
+  "spodumene concentrate": "Spodumene Concentrate",
+  graphite: "Natural Flake Graphite",
+  "natural graphite": "Natural Flake Graphite",
+  "natural flake graphite": "Natural Flake Graphite",
+  "spherical graphite": "Spherical Graphite",
+  "needle coke": "Petroleum Needle Coke",
+  "petroleum needle coke": "Petroleum Needle Coke",
+  "calcined petroleum coke": "Calcined Petroleum Coke",
+  "coal tar pitch": "Coal Tar Pitch",
+  polysilicon: "Polysilicon",
+  "polycrystalline silicon": "Polysilicon",
+  "silicon metal": "Metallurgical Silicon",
+  "metallurgical silicon": "Metallurgical Silicon",
+  "metallurgical grade silicon": "Metallurgical Silicon",
+  gallium: "Gallium",
+  germanium: "Germanium",
+  "germanium tetrachloride": "Germanium Tetrachloride",
+  indium: "Indium",
+  tantalum: "Tantalum",
+  tungsten: "Tungsten",
+  "tungsten concentrate": "Tungsten",
+  molybdenum: "Molybdenum",
+  titanium: "Titanium Sponge",
+  "titanium sponge": "Titanium Sponge",
+  "titanium scrap": "Titanium Scrap",
+  ilmenite: "Ilmenite Ore",
+  rutile: "Rutile Ore",
+  "titanium tetrachloride": "Titanium Tetrachloride",
+  beryllium: "Beryllium",
+  "beryllium ore": "Beryllium",
+  bertrandite: "Bertrandite Ore",
+  zirconium: "Zirconium",
+  hafnium: "Hafnium",
+  platinum: "Platinum",
+  palladium: "Palladium",
+  rhodium: "Rhodium",
+  iridium: "Iridium",
+  ruthenium: "Ruthenium",
+  silver: "Silver",
+  gold: "Gold",
+  ndpr: "Neodymium-Praseodymium (NdPr) Oxide",
+  "ndpr oxide": "Neodymium-Praseodymium (NdPr) Oxide",
+  "neodymium praseodymium": "Neodymium-Praseodymium (NdPr) Oxide",
+  "neodymium praseodymium oxide": "Neodymium-Praseodymium (NdPr) Oxide",
+  neodymium: "Neodymium",
+  praseodymium: "Praseodymium",
+  dysprosium: "Dysprosium",
+  terbium: "Terbium",
+  "rare earth concentrate": "Rare Earth Concentrate",
+  bastnaesite: "Bastnaesite Concentrate",
+  monazite: "Monazite Concentrate",
+  ethane: "Ethane",
+  ethylene: "Ethylene",
+  propylene: "Propylene",
+  naphtha: "Naphtha",
+  benzene: "Benzene",
+  toluene: "Toluene",
+  xylene: "Xylene",
+  phenol: "Phenol",
+  acetone: "Acetone",
+  methanol: "Methanol",
+  ammonia: "Ammonia",
+  "anhydrous ammonia": "Ammonia",
+  chlorine: "Chlorine",
+  "caustic soda": "Sodium Hydroxide (Caustic Soda)",
+  "sodium hydroxide": "Sodium Hydroxide (Caustic Soda)",
+  "hydrofluoric acid": "Hydrofluoric Acid",
+  "anhydrous hydrogen fluoride": "Hydrogen Fluoride",
+  "hydrogen fluoride": "Hydrogen Fluoride",
+  fluorspar: "Fluorspar (Calcium Fluoride)",
+  "sulfuric acid": "Sulfuric Acid",
+  "sulphuric acid": "Sulfuric Acid",
+  "phosphoric acid": "Phosphoric Acid",
+  "nitric acid": "Nitric Acid",
+  "hydrochloric acid": "Hydrochloric Acid",
+  "colloidal silica": "Colloidal Silica",
+  "fumed silica": "Fumed Silica",
+  "quartz sand": "High-Purity Quartz Sand",
+  "silica sand": "Silica Sand",
+  alumina: "Alumina (Aluminum Oxide)",
+  "aluminum oxide": "Alumina (Aluminum Oxide)",
+  bauxite: "Bauxite Ore",
+  magnesia: "Magnesia (Magnesium Oxide)",
+  "magnesium oxide": "Magnesia (Magnesium Oxide)",
+  magnesite: "Magnesite Ore",
+  boron: "Boron",
+  colemanite: "Colemanite Ore",
+  "boric acid": "Boric Acid",
+  "epoxy resin": "Epoxy Resin",
+  "epoxy resins": "Epoxy Resin",
+  bisphenol: "Bisphenol-A (BPA)",
+  "bisphenol a": "Bisphenol-A (BPA)",
+  epichlorohydrin: "Epichlorohydrin",
+  acrylonitrile: "Acrylonitrile",
+  polyacrylonitrile: "Polyacrylonitrile (PAN) Precursor",
+  "pan precursor": "Polyacrylonitrile (PAN) Precursor",
+  "wood pulp": "Dissolving Wood Pulp",
+  "dissolving wood pulp": "Dissolving Wood Pulp",
+  cellulose: "Dissolving Wood Pulp",
+  "lactic acid": "Lactic Acid",
+  "iron ore": "Iron Ore",
+  "steel scrap": "Ferrous & Alloy Steel Scrap",
+  "stainless steel scrap": "Stainless Steel Scrap",
+  "nickel scrap": "Nickel Superalloy Scrap",
+  "iron & steel": "Iron & Steel",
+  "iron and steel": "Iron & Steel",
+};
+
+const PRESERVE_UPPER_TOKENS = new Set([
+  "wti",
+  "pan",
+  "bpa",
+  "lng",
+  "pvc",
+  "ptfe",
+  "pfa",
+  "peek",
+  "pps",
+  "mdi",
+  "tdi",
+  "hcl",
+  "hf",
+  "h2so4",
+  "lipf6",
+  "sic",
+  "gan",
+  "gaas",
+  "inp",
+  "sio2",
+  "al2o3",
+  "tio2",
+  "ticl4",
+  "gecl4",
+  "ccl",
+  "abf",
+  "cmp",
+  "euv",
+  "arf",
+  "oled",
+  "mlcc",
+  "soi",
+  "hbm",
+  "ic",
+  "rf",
+  "ev",
+  "pgm",
+  "pvoh",
+  "ncma",
+  "nmc",
+  "lfp",
+  "ndfeb",
+]);
+
+const MIXED_CASE_TOKENS: Record<string, string> = {
+  ndpr: "NdPr",
+  "(ndpr)": "(NdPr)",
+  "(bpa)": "(BPA)",
+  "(pan)": "(PAN)",
+  "(ccl)": "(CCL)",
+};
+
+const LOWER_CONNECTORS = new Set(["and", "or", "of", "in", "for", "to", "with"]);
+
+function toCanonicalTitleCase(raw: string): string {
+  return raw
+    .split(/\s+/)
+    .map((word, idx) => {
+      const lower = word.toLowerCase();
+      if (MIXED_CASE_TOKENS[lower]) return MIXED_CASE_TOKENS[lower];
+      if (PRESERVE_UPPER_TOKENS.has(lower)) return word.toUpperCase();
+      if (idx > 0 && LOWER_CONNECTORS.has(lower)) return lower;
+      if (word.includes("-")) {
+        return word
+          .split("-")
+          .map((part) => {
+            const pLow = part.toLowerCase();
+            if (MIXED_CASE_TOKENS[pLow]) return MIXED_CASE_TOKENS[pLow];
+            if (PRESERVE_UPPER_TOKENS.has(pLow)) return part.toUpperCase();
+            return part.charAt(0).toUpperCase() + part.slice(1).toLowerCase();
+          })
+          .join("-");
+      }
+      return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+    })
+    .join(" ");
+}
+
+function canonicalizeRawMaterial(
+  rawName: string,
+  registryCode?: string | null
+): string | null {
+  if (registryCode && CANONICAL_CODE_NAMES[registryCode]) {
+    return CANONICAL_CODE_NAMES[registryCode];
+  }
+
+  let cleaned = (rawName || "").trim();
+  if (!cleaned) return null;
+
+  cleaned = cleaned.replace(/\s*\([^)]*\)/g, " ");
+  cleaned = cleaned.replace(
+    /\b(futures?|spot|benchmarks?|ind(ex|ices)|prices?|pricing|contracts?|quotes?|feedstocks?|raw\s+materials?)\b/gi,
+    " "
+  );
+  cleaned = cleaned.replace(
+    /^(european|global|us|u\.s\.|north\s+american|asian|chinese|domestic|imported|refined|raw|crude|primary|virgin|pure|ultra[- ]?pure|high[- ]?purity|electronic[- ]?grade|battery[- ]?grade|semiconductor[- ]?grade|industrial[- ]?grade|technical[- ]?grade|n[- ]?type)\s+/i,
+    ""
+  );
+
+  cleaned = cleaned.replace(/\s+/g, " ").trim().replace(/^[-–—,:;]+|[-–—,:;]+$/g, "");
+  if (!cleaned || cleaned.length < 3) return null;
+
+  if (INVALID_RAW_MATERIAL_RE.test(cleaned) || VAGUE_PHRASE_RE.test(cleaned)) {
+    return null;
+  }
+
+  const lookupKey = cleaned.toLowerCase().replace(/[^a-z0-9&]+/g, " ").trim();
+  if (INVALID_RAW_MATERIAL_RE.test(lookupKey)) {
+    return null;
+  }
+
+  if (RAW_MATERIAL_ALIASES[lookupKey]) {
+    return RAW_MATERIAL_ALIASES[lookupKey];
+  }
+
+  return toCanonicalTitleCase(cleaned);
+}
+
 const CURATED_SUMMARIES: Record<string, string> = {
   "HG=F":
     "High-conductivity refined copper used for ultra-thin electrodeposited battery foil (4–6 µm), copper-clad PCB laminates, and high-voltage power interconnects.",
@@ -84,17 +427,13 @@ const CURATED_SUMMARIES: Record<string, string> = {
   PCOBAUSDM:
     "Strategic transition metal stabilizing layered oxide EV cathodes (NMC/NCA) and providing high-temperature creep resistance in aerospace turbine superalloys.",
   PNGASEUUSDM:
-    "European TTF natural gas benchmark dictating European chemical plant competitiveness, energy surcharges, and regional ammonia/polymer margins.",
+    "Natural gas feedstock and thermal energy input governing hydrogen/syngas synthesis, ammonia, and chemical plant conversion margins.",
   WPU101:
     "Benchmark ferrous and alloy steel input for clean specialty bar, seamless mechanical tubing, and bearing-grade aerospace/industrial steels.",
-  WPU061:
-    "Base industrial chemical feedstocks (chlor-alkali, acids, solvents) converted into high-purity semiconductor wet etchants and specialty formulations.",
-  WPU066:
-    "Base thermoplastic and thermoset polymer resins compounded into high-temperature engineering plastics, fluoropolymers, and dielectric films.",
   NDPR_CN:
     "Neodymium-praseodymium rare earth oxide refined into NdFeB permanent magnets for EV traction motors, wind turbines, and defense precision actuators.",
   LICARB_CN:
-    "Battery-grade lithium carbonate and lithium hydroxide monohydrate serving as the primary lithium source for EV cathodes and LiPF6 electrolyte salts.",
+    "Battery-grade lithium carbonate serving as the primary lithium source for EV cathodes and LiPF6 electrolyte salts.",
   GALLIUM_9999:
     "High-purity refined gallium (4N–7N) required to synthesize gallium arsenide (GaAs) and gallium nitride (GaN) compound semiconductor wafers for RF and power electronics.",
   GERMANIUM_INGOT:
@@ -120,10 +459,6 @@ function normalizeMaterialKey(name: string): string {
   return name
     .toLowerCase()
     .replace(/\s*\([^)]*\)/g, "")
-    .replace(
-      /\b(high[- ]purity|electronic[- ]grade|battery[- ]grade|refined|raw|feedstock|ingot|spot|futures)\b/g,
-      ""
-    )
     .replace(/[^a-z0-9]+/g, " ")
     .trim();
 }
@@ -135,7 +470,6 @@ export function buildMaterialsAtlas({
   commodityDrivers,
   sensitivities,
   macroCodeSet,
-  inputNameMap,
 }: {
   equities: MinimalEquity[];
   products: CompanyProduct[];
@@ -143,7 +477,7 @@ export function buildMaterialsAtlas({
   commodityDrivers: MinimalDriver[];
   sensitivities: MinimalSensitivity[];
   macroCodeSet: Set<string>;
-  inputNameMap: Record<string, string>;
+  inputNameMap?: Record<string, string>;
 }): {
   rawMaterials: MaterialAtlasEntry[];
   advancedMaterials: MaterialAtlasEntry[];
@@ -173,14 +507,13 @@ export function buildMaterialsAtlas({
     rawName: string,
     registryCode: string | null,
     categoryLabel: string
-  ): RawBucket => {
-    const key = registryCode
-      ? `code:${registryCode}`
-      : `name:${normalizeMaterialKey(rawName) || rawName.toLowerCase()}`;
+  ): RawBucket | null => {
+    const canonicalName = canonicalizeRawMaterial(rawName, registryCode);
+    if (!canonicalName) return null;
+
+    const key = `raw:${normalizeMaterialKey(canonicalName)}`;
     let bucket = rawBuckets.get(key);
     if (!bucket) {
-      const canonicalName =
-        (registryCode && inputNameMap[registryCode]) || rawName.trim();
       bucket = {
         name: canonicalName,
         categoryLabel,
@@ -190,6 +523,8 @@ export function buildMaterialsAtlas({
         companies: new Map<string, AtlasCompanyLink>(),
       };
       rawBuckets.set(key, bucket);
+    } else if (!bucket.registryCode && registryCode) {
+      bucket.registryCode = registryCode;
     }
     return bucket;
   };
@@ -245,8 +580,9 @@ export function buildMaterialsAtlas({
       const bucket = getOrCreateRawBucket(
         rm.name,
         code,
-        inp?.category || "Feedstock / Raw Material"
+        inp?.category || "Raw Material Feedstock"
       );
+      if (!bucket) continue;
       attachRawCompany(bucket, prod.ticker, "product", {
         id: prod.id,
         name: prod.name,
@@ -271,24 +607,28 @@ export function buildMaterialsAtlas({
     const bucket = getOrCreateRawBucket(
       drv.commodity_name,
       code,
-      inp?.category || "Filing Commodity Input"
+      inp?.category || "Raw Material Feedstock"
     );
+    if (!bucket) continue;
     if (drv.mechanism_detail && bucket.mechanismNotes.length < 3) {
       bucket.mechanismNotes.push(drv.mechanism_detail);
     }
     attachRawCompany(bucket, drv.ticker, "filing_driver", {
-      name: `${drv.commodity_name} (${drv.exposure_role})`,
+      name: `${bucket.name} (${drv.exposure_role})`,
       detail: drv.impact_direction,
     });
   }
 
   for (const inp of inputs) {
     if (macroCodeSet.has(inp.input_code)) continue;
+    if (inp.input_code === "WPU061" || inp.input_code === "WPU066") continue;
+
     const bucket = getOrCreateRawBucket(
       inp.input_name,
       inp.input_code,
       inp.category || "Tracked Commodity"
     );
+    if (!bucket) continue;
     const matchingRules = sensitivities.filter(
       (s) =>
         s.input_code === inp.input_code && s.relationship_type === "Cost Input"
@@ -327,7 +667,7 @@ export function buildMaterialsAtlas({
       const summary =
         (b.registryCode && CURATED_SUMMARIES[b.registryCode]) ||
         b.mechanismNotes[0] ||
-        `Industrial raw material / chemical feedstock consumed across ${
+        `Physical raw material feedstock consumed across ${
           sortedCompanies.length
         } tracked advanced materials producer${
           sortedCompanies.length === 1 ? "" : "s"
@@ -338,7 +678,7 @@ export function buildMaterialsAtlas({
         }.`;
 
       return {
-        slug: `raw-${slugify(b.registryCode || b.name)}`,
+        slug: `raw-${slugify(b.name)}`,
         kind: "raw" as const,
         name: b.name,
         categoryLabel: b.categoryLabel,
@@ -354,6 +694,9 @@ export function buildMaterialsAtlas({
         b.companies.length - a.companies.length || a.name.localeCompare(b.name)
     );
 
+  // =========================================================================
+  // 2. ALL ADVANCED MATERIALS (Engineered Material Classes & Verticals)
+  // =========================================================================
   interface AdvBucket {
     name: string;
     categoryLabel: string;
@@ -368,11 +711,12 @@ export function buildMaterialsAtlas({
     matName: string,
     categoryLabel: string
   ): AdvBucket => {
-    const key = normalizeMaterialKey(matName) || matName.toLowerCase();
+    const formattedName = toCanonicalTitleCase(matName.trim());
+    const key = normalizeMaterialKey(formattedName) || formattedName.toLowerCase();
     let bucket = advBuckets.get(key);
     if (!bucket) {
       bucket = {
-        name: matName.trim(),
+        name: formattedName,
         categoryLabel,
         specs: [],
         endMarkets: new Set<string>(),
@@ -385,7 +729,13 @@ export function buildMaterialsAtlas({
 
   for (const prod of products) {
     if (prod.status !== "active") continue;
-    const catName = prod.category || prod.name;
+    const rawCat = (prod.category || prod.name || "").trim();
+    const catName =
+      GENERIC_ADV_BUCKET_RE.test(rawCat) && prod.name && !GENERIC_ADV_BUCKET_RE.test(prod.name)
+        ? prod.name
+        : rawCat;
+    if (!catName || GENERIC_ADV_BUCKET_RE.test(catName)) continue;
+
     const bucket = getOrCreateAdvBucket(catName, "Advanced Material Class");
     if (prod.advanced?.performance_spec && bucket.specs.length < 3) {
       bucket.specs.push(prod.advanced.performance_spec);
@@ -421,7 +771,7 @@ export function buildMaterialsAtlas({
   }
 
   for (const eq of equities) {
-    if (!eq.sub_sector) continue;
+    if (!eq.sub_sector || GENERIC_ADV_BUCKET_RE.test(eq.sub_sector)) continue;
     const bucket = getOrCreateAdvBucket(eq.sub_sector, "Universe Vertical");
     if (!bucket.companies.has(eq.ticker)) {
       bucket.companies.set(eq.ticker, {
