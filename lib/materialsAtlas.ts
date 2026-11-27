@@ -337,12 +337,18 @@ export function buildMaterialsAtlas({
       });
     }
 
-    // Populate End-Market directory from sold/captive T2 material links
+   // Populate End-Market directory strictly with products tied to that specific end-market
     if (
       mat.tier === "T2" &&
       (link.role === "sells" || link.role === "makes_captive")
     ) {
-      const emSpec = canonicalEm || resolveCanonicalEndMarket(mat.material_group);
+      // Only group under an End-Market if this specific link declares an end_demand
+      // (or fallback to mat.material_group if link.end_demand is null/empty)
+      const rawTargetDemand = (link.end_demand || "").trim();
+      const emSpec = rawTargetDemand
+        ? resolveCanonicalEndMarket(rawTargetDemand)
+        : resolveCanonicalEndMarket(mat.material_group);
+
       const emSlug = `em-${slugify(emSpec.name)}`;
       let emBucket = endMarketBuckets.get(emSlug);
       if (!emBucket) {
@@ -377,7 +383,9 @@ export function buildMaterialsAtlas({
       }
 
       const emProdExists = emComp.linkedProducts.some(
-        (p) => p.name.toLowerCase() === prodLabel.toLowerCase()
+        (p) =>
+          p.name.toLowerCase() === prodLabel.toLowerCase() &&
+          (p.category || "").toLowerCase() === mat.canonical_name.toLowerCase()
       );
       if (!emProdExists) {
         emComp.linkedProducts.push({
