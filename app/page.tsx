@@ -330,3 +330,40 @@ export default function HomePage() {
     </div>
   );
 }
+
+let filingMetrics: any[] = [];
+try {
+  filingMetrics = await sql`
+    SELECT
+      ticker,
+      source_type,
+      filing_type,
+      fiscal_period,
+      filing_date::text AS filing_date,
+      period_end_date::text AS period_end_date,
+      currency,
+      revenue,
+      revenue_yoy_pct,
+      gross_profit,
+      gross_margin_pct,
+      gross_margin_yoy_bps,
+      operating_income,
+      operating_margin_pct,
+      net_income,
+      operating_cash_flow,
+      capex,
+      capex_pct_rev,
+      free_cash_flow,
+      rd_expense,
+      rd_pct_rev,
+      inventory,
+      inventory_days,
+      cash_and_equivalents,
+      total_debt,
+      net_debt,
+      source_url
+    FROM equity_filing_metrics;
+  `;
+} catch {
+  filingMetrics = [];
+}
