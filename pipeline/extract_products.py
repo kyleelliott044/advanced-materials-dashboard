@@ -614,6 +614,7 @@ def run_product_extraction(conn):
         - For each product's `category`, FIRST check if it fits one of our existing canonical categories in Neon and reuse that EXACT spelling:
           [{existing_categories}]
         - ONLY if the product represents a genuinely distinct engineered material class not covered above, mint a new specific Title Case category name.
+        - Each product's `category` must name ONE specific engineered material class (e.g., 'Battery Electrolytes' OR 'Fluoropolymers and Fluorochemicals'—never glue two separate product lines together with 'and' unless it is a standard single class like 'CMP Slurries and Pads' or 'Specialty Steel and Alloys').
 
         RAW MATERIALS RESOLUTION (OPEN-ENDED CANONICAL):
         - List ONLY specific physical chemicals, metals, minerals, gases, or hydrocarbons (never 'Labor', 'Utilities', 'Raw Materials', 'Industrial Feedstock', 'Specialty Chemical Intermediates', or 'Spot'/'Futures'/'European' prefixes).
