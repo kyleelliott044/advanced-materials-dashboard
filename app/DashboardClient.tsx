@@ -658,6 +658,7 @@ export default function DashboardClient({
     string | null
   >(null);
   const [selectedTicker, setSelectedTicker] = useState<string | null>(null);
+  const [highlightedProductName, setHighlightedProductName] = useState<string | null>(null);
   const [feedThemeFilter, setFeedThemeFilter] = useState("ALL");
   const [isLight, setIsLight] = useState(false);
 
@@ -674,6 +675,7 @@ export default function DashboardClient({
     const handleSelectTicker = (e: Event) => {
       const customEvent = e as CustomEvent<string>;
       if (customEvent.detail) {
+        setHighlightedProductName(null);
         setSelectedTicker(customEvent.detail);
       }
     };
@@ -689,6 +691,7 @@ export default function DashboardClient({
       if (e.key === "Escape") {
         if (selectedTicker) {
           setSelectedTicker(null);
+          setHighlightedProductName(null);
         } else if (selectedMaterialSlug) {
           setSelectedMaterialSlug(null);
         }
@@ -776,8 +779,8 @@ export default function DashboardClient({
     }
     return map;
   }, [productProfiles]);
-  
-// Product rollup per company: strictly verified `company_material_links` (no legacy fallback)
+
+  // Product rollup per company: strictly verified `company_material_links` (no legacy fallback)
   const tickerRollupMap = useMemo(() => {
     const matMap = new Map<number, MaterialRecord>();
     for (const m of materials) matMap.set(m.id, m);
@@ -1482,31 +1485,43 @@ export default function DashboardClient({
 
   const handleOpenMaterialInAtlas = (
     materialNameOrSlug: string,
-    preferKind?: "raw" | "advanced"
+    preferKind?: "raw" | "advanced",
+    fallbackCategory?: string
   ) => {
-    const q = materialNameOrSlug.toLowerCase().trim();
-    const advMatch = atlasAdvancedMaterials.find(
-      (m) => m.slug === q || m.name.toLowerCase() === q
-    );
-    const rawMatch = atlasRawMaterials.find(
-      (m) => m.slug === q || m.name.toLowerCase() === q
-    );
-    const hit =
-      preferKind === "advanced"
-        ? advMatch || rawMatch
-        : preferKind === "raw"
-        ? rawMatch || advMatch
-        : advMatch || rawMatch;
+    const candidates = [materialNameOrSlug, fallbackCategory]
+      .filter((s): s is string => Boolean(s && s.trim()))
+      .map((s) => s.toLowerCase().trim());
 
-    if (hit) {
-      setMaterialsSubTab(hit.kind);
-      setSelectedMaterialSlug(hit.slug);
-      setActiveTab("materials");
-      setSelectedTicker(null);
-      return;
+    for (const q of candidates) {
+      const advMatch = atlasAdvancedMaterials.find(
+        (m) => m.slug === q || m.name.toLowerCase() === q
+      );
+      const rawMatch = atlasRawMaterials.find(
+        (m) => m.slug === q || m.name.toLowerCase() === q
+      );
+      const hit =
+        preferKind === "advanced"
+          ? advMatch || rawMatch
+          : preferKind === "raw"
+          ? rawMatch || advMatch
+          : advMatch || rawMatch;
+
+      if (hit) {
+        setMaterialsSubTab(hit.kind);
+        setSelectedMaterialSlug(hit.slug);
+        setActiveTab("materials");
+        setSelectedTicker(null);
+        return;
+      }
     }
 
-    handleSelectCategoryFromDossier(materialNameOrSlug);
+    handleSelectCategoryFromDossier(fallbackCategory || materialNameOrSlug);
+  };
+
+  const handleInspectSpecificProduct = (ticker: string, productName?: string) => {
+    setSelectedTicker(ticker);
+    setDossierTab("products");
+    setHighlightedProductName(productName || null);
   };
 
   const activeProductsCount = selectedEquityProducts.filter(
@@ -1536,7 +1551,10 @@ export default function DashboardClient({
       <button
         key={`${comp.role}-${comp.ticker}`}
         type="button"
-        onClick={() => setSelectedTicker(comp.ticker)}
+        onClick={() => {
+          setHighlightedProductName(null);
+          setSelectedTicker(comp.ticker);
+        }}
         className="text-left rounded-xl bg-[#111827]/90 hover:bg-[#151f33] border border-slate-800 hover:border-sky-500/50 p-4 transition space-y-2.5 group"
       >
         <div className="flex items-start justify-between gap-2">
@@ -1581,14 +1599,21 @@ export default function DashboardClient({
             <div className="text-[10px] font-mono uppercase text-slate-500">
               {sectionLabel}
             </div>
-            {comp.linkedProducts.slice(0, 4).map((lp, i) => (
-              <div key={`${lp.name}-${i}`} className="space-y-0.5">
+            {comp.linkedProducts.slice(0, 6).map((lp, i) => (
+              <div
+                key={`${lp.name}-${i}`}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  handleInspectSpecificProduct(comp.ticker, lp.name);
+                }}
+                className="rounded-lg bg-[#090d16]/80 hover:bg-sky-950/40 border border-slate-800/80 hover:border-sky-500/40 px-2.5 py-1.5 space-y-0.5 transition cursor-pointer"
+              >
                 <div className="text-xs text-slate-300 flex items-center justify-between gap-2">
-                  <span className="font-medium text-white truncate">
-                    • {lp.name}
+                  <span className="font-medium text-sky-300 hover:underline truncate">
+                    • {lp.name} ↗
                   </span>
                   {lp.detail && (
-                    <span className="text-[10px] font-mono text-slate-400 truncate max-w-[240px]">
+                    <span className="text-[10px] font-mono text-slate-400 truncate max-w-[220px]">
                       {lp.detail}
                     </span>
                   )}
@@ -2076,7 +2101,10 @@ export default function DashboardClient({
                       return (
                         <tr
                           key={eq.ticker}
-                          onClick={() => setSelectedTicker(eq.ticker)}
+                          onClick={() => {
+                            setHighlightedProductName(null);
+                            setSelectedTicker(eq.ticker);
+                          }}
                           className="hover:bg-slate-800/60 cursor-pointer transition-colors"
                         >
                           <td className="py-3.5 px-4 font-mono font-semibold text-sky-400">
@@ -2123,6 +2151,7 @@ export default function DashboardClient({
                                 type="button"
                                 onClick={(e) => {
                                   e.stopPropagation();
+                                  setHighlightedProductName(null);
                                   setSelectedTicker(eq.ticker);
                                   setDossierTab("products");
                                 }}
@@ -2296,7 +2325,10 @@ export default function DashboardClient({
                 {filteredFilings.map((f) => (
                   <div
                     key={f.id}
-                    onClick={() => setSelectedTicker(f.ticker)}
+                    onClick={() => {
+                      setHighlightedProductName(null);
+                      setSelectedTicker(f.ticker);
+                    }}
                     className="rounded-xl border border-slate-800 bg-[#111827]/90 p-5 hover:border-sky-500/40 cursor-pointer transition space-y-3"
                   >
                     <div className="flex items-center justify-between gap-2">
@@ -2619,7 +2651,7 @@ export default function DashboardClient({
             <div className="flex-1 overflow-y-auto p-6 space-y-6">
               <div className="flex items-center justify-between gap-2 flex-wrap">
                 <span className="text-[11px] font-mono text-slate-400">
-                  Role-separated value-chain links • Click any company to open full stock dossier
+                  Role-separated value-chain links • Click any specific product line or company to open stock dossier
                 </span>
               </div>
 
@@ -2688,7 +2720,10 @@ export default function DashboardClient({
       {/* Clean Tabbed Slide-Over Company Dossier Drawer */}
       {selectedEquity && (
         <div
-          onClick={() => setSelectedTicker(null)}
+          onClick={() => {
+            setSelectedTicker(null);
+            setHighlightedProductName(null);
+          }}
           className="fixed inset-0 z-50 flex justify-end bg-black/75 backdrop-blur-sm"
         >
           <div
@@ -2720,7 +2755,10 @@ export default function DashboardClient({
                 </div>
 
                 <button
-                  onClick={() => setSelectedTicker(null)}
+                  onClick={() => {
+                    setSelectedTicker(null);
+                    setHighlightedProductName(null);
+                  }}
                   className="px-3 py-1.5 rounded-lg bg-slate-800/90 hover:bg-slate-700 text-xs font-medium text-slate-200 border border-slate-700/80 transition shrink-0"
                 >
                   Close ✕
@@ -2877,6 +2915,11 @@ export default function DashboardClient({
                           const isProxyValid = Boolean(
                             proxyCode && validRegistryCodes.has(proxyCode)
                           );
+                          const isHighlighted = Boolean(
+                            highlightedProductName &&
+                              prod.name.toLowerCase() ===
+                                highlightedProductName.toLowerCase()
+                          );
 
                           return (
                             <div
@@ -2884,6 +2927,8 @@ export default function DashboardClient({
                               className={`rounded-xl border p-4 space-y-3 transition ${
                                 prod.status === "divested"
                                   ? "bg-slate-950/60 border-slate-800/60 opacity-60"
+                                  : isHighlighted
+                                  ? "bg-[#142038] border-sky-400/80 ring-2 ring-sky-400/50"
                                   : "bg-[#111827]/90 border-slate-800 hover:border-slate-700"
                               }`}
                             >
@@ -2975,9 +3020,20 @@ export default function DashboardClient({
                                   &rarr;
                                 </span>
 
-                                <span className="px-2.5 py-1 rounded-md bg-slate-800 text-white border border-slate-600 font-semibold">
-                                  {prod.name}
-                                </span>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    handleOpenMaterialInAtlas(
+                                      prod.name,
+                                      "advanced",
+                                      prod.category
+                                    )
+                                  }
+                                  title={`Open ${prod.category} in Materials Atlas`}
+                                  className="px-2.5 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-white border border-slate-600 hover:border-sky-400 font-semibold transition cursor-pointer"
+                                >
+                                  {prod.name} ↗
+                                </button>
 
                                 <span className="text-slate-500 font-mono">
                                   &rarr;
@@ -3046,7 +3102,10 @@ export default function DashboardClient({
                                     <button
                                       key={peerTk}
                                       type="button"
-                                      onClick={() => setSelectedTicker(peerTk)}
+                                      onClick={() => {
+                                        setHighlightedProductName(null);
+                                        setSelectedTicker(peerTk);
+                                      }}
                                       className="px-2 py-0.5 rounded bg-[#090d16] hover:bg-slate-800 text-sky-400 border border-slate-700/80 font-mono text-[10px] transition"
                                     >
                                       {peerTk}
@@ -3220,7 +3279,10 @@ export default function DashboardClient({
                             {universePeers.map((peer) => (
                               <button
                                 key={peer.ticker}
-                                onClick={() => setSelectedTicker(peer.ticker)}
+                                onClick={() => {
+                                  setHighlightedProductName(null);
+                                  setSelectedTicker(peer.ticker);
+                                }}
                                 className="px-2.5 py-1 rounded-lg bg-[#090d16] hover:bg-slate-800 border border-slate-700/80 text-xs text-left transition flex items-center gap-1.5"
                               >
                                 <span className="font-mono font-semibold text-sky-400">
