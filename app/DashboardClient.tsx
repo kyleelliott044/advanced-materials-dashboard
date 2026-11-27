@@ -11,6 +11,10 @@ import {
   buildCategoryPeerIndex,
   RolledUpDrivers,
 } from "../lib/productRollup";
+import {
+  buildMaterialsAtlas,
+  MaterialAtlasEntry,
+} from "../lib/materialsAtlas";
 
 export interface FilingMetricsRow {
   ticker: string;
@@ -616,7 +620,16 @@ export default function DashboardClient({
     });
   }, [rawFilings]);
 
-  const [activeTab, setActiveTab] = useState<"screener" | "feed">("screener");
+  const [activeTab, setActiveTab] = useState<"screener" | "feed" | "materials">(
+    "screener"
+  );
+  const [materialsSubTab, setMaterialsSubTab] = useState<"raw" | "advanced">(
+    "raw"
+  );
+  const [selectedMaterialSlug, setSelectedMaterialSlug] = useState<
+    string | null
+  >(null);
+  const [materialSearch, setMaterialSearch] = useState("");
   const [narrativeTab, setNarrativeTab] = useState<
     "executive" | "ai" | "aero" | "commodities" | "ev"
   >("executive");
@@ -876,6 +889,41 @@ export default function DashboardClient({
     }
     return map;
   }, [supplyChain]);
+
+  // Materials Atlas: All Raw Materials & All Advanced Materials
+  const {
+    rawMaterials: atlasRawMaterials,
+    advancedMaterials: atlasAdvancedMaterials,
+  } = useMemo(
+    () =>
+      buildMaterialsAtlas({
+        equities,
+        products,
+        inputs,
+        commodityDrivers,
+        sensitivities,
+        macroCodeSet,
+        inputNameMap,
+      }),
+    [
+      equities,
+      products,
+      inputs,
+      commodityDrivers,
+      sensitivities,
+      macroCodeSet,
+      inputNameMap,
+    ]
+  );
+
+  const selectedAtlasMaterial: MaterialAtlasEntry | null = useMemo(() => {
+    if (!selectedMaterialSlug) return null;
+    return (
+      atlasRawMaterials.find((m) => m.slug === selectedMaterialSlug) ||
+      atlasAdvancedMaterials.find((m) => m.slug === selectedMaterialSlug) ||
+      null
+    );
+  }, [selectedMaterialSlug, atlasRawMaterials, atlasAdvancedMaterials]);
 
   // Unified company-level cost_inputs & demand_proxies (clean short labels without "ETF"/"Index")
   const companyDriversByRole = useMemo(() => {
@@ -1325,7 +1373,7 @@ export default function DashboardClient({
             </p>
           </div>
 
-          <div className="flex items-center gap-2">
+          <div className="flex items-center gap-2 flex-wrap">
             <button
               onClick={() => setActiveTab("screener")}
               className={`px-3.5 py-1.5 rounded-lg text-xs font-medium transition ${
@@ -1350,6 +1398,22 @@ export default function DashboardClient({
               </span>
             </button>
             <button
+              onClick={() => {
+                setActiveTab("materials");
+                setSelectedMaterialSlug(null);
+              }}
+              className={`px-3.5 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1.5 ${
+                activeTab === "materials"
+                  ? "bg-sky-500 text-white"
+                  : "bg-slate-800/80 text-slate-300 hover:bg-slate-800"
+              }`}
+            >
+              <span>Materials Atlas</span>
+              <span className="px-1.5 py-0.2 rounded bg-slate-900/60 text-[10px] font-mono">
+                {atlasRawMaterials.length + atlasAdvancedMaterials.length}
+              </span>
+            </button>
+            <button
               onClick={toggleTheme}
               className="px-3 py-1.5 rounded-lg text-xs font-medium bg-slate-800/80 text-slate-300 hover:bg-slate-800 border border-slate-700/80 transition"
               title="Toggle Light / Dark Mode"
@@ -1361,199 +1425,203 @@ export default function DashboardClient({
       </header>
 
       <main className="max-w-7xl mx-auto px-6 py-8 space-y-8">
-        {/* AI Macro & Thematic Narrative Synthesis */}
-        <section className="rounded-2xl bg-gradient-to-br from-[#11192c] via-[#0f172a] to-[#0b1120] border border-sky-500/25 p-6 shadow-xl">
-          <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 pb-4 border-b border-slate-800/80">
-            <div>
-              <div className="flex items-center gap-2">
-                <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider bg-sky-500/15 text-sky-400 border border-sky-500/30">
-                  AI Cross-Filing Synthesis
-                </span>
-                {narrative && (
-                  <span className="text-xs font-mono text-emerald-400">
-                    Regime: {narrative.overall_regime}
-                  </span>
+        {activeTab !== "materials" && (
+          <>
+            {/* AI Macro & Thematic Narrative Synthesis */}
+            <section className="rounded-2xl bg-gradient-to-br from-[#11192c] via-[#0f172a] to-[#0b1120] border border-sky-500/25 p-6 shadow-xl">
+              <div className="flex flex-col md:flex-row md:items-center justify-between gap-3 pb-4 border-b border-slate-800/80">
+                <div>
+                  <div className="flex items-center gap-2">
+                    <span className="px-2 py-0.5 rounded text-[10px] font-mono uppercase tracking-wider bg-sky-500/15 text-sky-400 border border-sky-500/30">
+                      AI Cross-Filing Synthesis
+                    </span>
+                    {narrative && (
+                      <span className="text-xs font-mono text-emerald-400">
+                        Regime: {narrative.overall_regime}
+                      </span>
+                    )}
+                  </div>
+                  <h2 className="text-base font-semibold text-white mt-1.5">
+                    Cross-Market Narrative: Filings, Commodities &amp; Secular Capex
+                  </h2>
+                </div>
+
+                <div className="flex flex-wrap gap-1.5">
+                  {[
+                    { id: "executive", label: "Overall Market" },
+                    { id: "ai", label: "AI & Semis" },
+                    { id: "aero", label: "Aerospace & Defense" },
+                    { id: "commodities", label: "Commodities & Margins" },
+                    { id: "ev", label: "Electrification & EVs" },
+                  ].map((tab) => (
+                    <button
+                      key={tab.id}
+                      onClick={() => setNarrativeTab(tab.id as typeof narrativeTab)}
+                      className={`px-3 py-1 rounded-md text-xs font-medium transition ${
+                        narrativeTab === tab.id
+                          ? "bg-sky-500/20 text-sky-300 border border-sky-500/40"
+                          : "bg-slate-900/60 text-slate-400 border border-slate-800 hover:text-slate-200"
+                      }`}
+                    >
+                      {tab.label}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div className="pt-4 text-sm leading-relaxed text-slate-200">
+                {!narrative ? (
+                  <p className="text-slate-400 italic">
+                    Run the GitHub Actions workflow (`filings_ai.py`) to generate the cross-filing macro narrative.
+                  </p>
+                ) : (
+                  <>
+                    {narrativeTab === "executive" && <p>{narrative.executive_brief}</p>}
+                    {narrativeTab === "ai" && <p>{narrative.ai_theme_summary}</p>}
+                    {narrativeTab === "aero" && <p>{narrative.aerospace_theme_summary}</p>}
+                    {narrativeTab === "commodities" && <p>{narrative.commodities_theme_summary}</p>}
+                    {narrativeTab === "ev" && <p>{narrative.electrification_battery_summary}</p>}
+                    <div className="mt-3 text-[11px] font-mono text-slate-500">
+                      Synthesized across {coveredCompanyCount} covered companies ({filings.length} filings) &amp; {inputs.length} commodity feeds • Updated {narrative.generated_date}
+                    </div>
+                  </>
                 )}
               </div>
-              <h2 className="text-base font-semibold text-white mt-1.5">
-                Cross-Market Narrative: Filings, Commodities &amp; Secular Capex
-              </h2>
-            </div>
+            </section>
 
-            <div className="flex flex-wrap gap-1.5">
-              {[
-                { id: "executive", label: "Overall Market" },
-                { id: "ai", label: "AI & Semis" },
-                { id: "aero", label: "Aerospace & Defense" },
-                { id: "commodities", label: "Commodities & Margins" },
-                { id: "ev", label: "Electrification & EVs" },
-              ].map((tab) => (
-                <button
-                  key={tab.id}
-                  onClick={() => setNarrativeTab(tab.id as typeof narrativeTab)}
-                  className={`px-3 py-1 rounded-md text-xs font-medium transition ${
-                    narrativeTab === tab.id
-                      ? "bg-sky-500/20 text-sky-300 border border-sky-500/40"
-                      : "bg-slate-900/60 text-slate-400 border border-slate-800 hover:text-slate-200"
-                  }`}
-                >
-                  {tab.label}
-                </button>
-              ))}
-            </div>
-          </div>
+            {/* Interactive Commodities & Macro Drivers Filter Tabs */}
+            <section>
+              <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3">
+                <div className="flex items-center gap-3 flex-wrap">
+                  <div className="inline-flex rounded-xl bg-[#111827] border border-slate-800 p-1">
+                    <button
+                      type="button"
+                      onClick={() => setDriverFilterTab("commodities")}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1.5 ${
+                        driverFilterTab === "commodities"
+                          ? "bg-sky-500 text-white shadow-sm"
+                          : "text-slate-400 hover:text-slate-200"
+                      }`}
+                    >
+                      <span>Commodities</span>
+                      <span
+                        className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
+                          driverFilterTab === "commodities"
+                            ? "bg-sky-950/50 text-white"
+                            : "bg-slate-800 text-slate-400"
+                        }`}
+                      >
+                        {commodityInputs.length}
+                      </span>
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setDriverFilterTab("macro")}
+                      className={`px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1.5 ${
+                        driverFilterTab === "macro"
+                          ? "bg-sky-500 text-white shadow-sm"
+                          : "text-slate-400 hover:text-slate-200"
+                      }`}
+                    >
+                      <span>Macro Drivers</span>
+                      <span
+                        className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
+                          driverFilterTab === "macro"
+                            ? "bg-sky-950/50 text-white"
+                            : "bg-slate-800 text-slate-400"
+                        }`}
+                      >
+                        {macroDriverInputs.length}
+                      </span>
+                    </button>
+                  </div>
 
-          <div className="pt-4 text-sm leading-relaxed text-slate-200">
-            {!narrative ? (
-              <p className="text-slate-400 italic">
-                Run the GitHub Actions workflow (`filings_ai.py`) to generate the cross-filing macro narrative.
-              </p>
-            ) : (
-              <>
-                {narrativeTab === "executive" && <p>{narrative.executive_brief}</p>}
-                {narrativeTab === "ai" && <p>{narrative.ai_theme_summary}</p>}
-                {narrativeTab === "aero" && <p>{narrative.aerospace_theme_summary}</p>}
-                {narrativeTab === "commodities" && <p>{narrative.commodities_theme_summary}</p>}
-                {narrativeTab === "ev" && <p>{narrative.electrification_battery_summary}</p>}
-                <div className="mt-3 text-[11px] font-mono text-slate-500">
-                  Synthesized across {coveredCompanyCount} covered companies ({filings.length} filings) &amp; {inputs.length} commodity feeds • Updated {narrative.generated_date}
+                  <span className="text-xs text-slate-400">
+                    {driverFilterTab === "commodities"
+                      ? "Click a raw material or feedstock to filter exposed products & companies"
+                      : "Click a macro indicator or end-market proxy to filter exposed companies"}
+                  </span>
+
+                  {selectedCommodity && (
+                    <button
+                      onClick={() => setSelectedCommodity(null)}
+                      className="text-xs font-mono text-sky-400 hover:text-sky-300 underline"
+                    >
+                      Clear Filter ({getCommodityDisplayName(selectedCommodity)})
+                    </button>
+                  )}
+                  {selectedProductCategory && (
+                    <button
+                      onClick={() => setSelectedProductCategory(null)}
+                      className="text-xs font-mono text-purple-400 hover:text-purple-300 underline"
+                    >
+                      Clear Product Category ({selectedProductCategory})
+                    </button>
+                  )}
                 </div>
-              </>
-            )}
-          </div>
-        </section>
-
-        {/* Interactive Commodities & Macro Drivers Filter Tabs */}
-        <section>
-          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-3">
-            <div className="flex items-center gap-3 flex-wrap">
-              <div className="inline-flex rounded-xl bg-[#111827] border border-slate-800 p-1">
-                <button
-                  type="button"
-                  onClick={() => setDriverFilterTab("commodities")}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1.5 ${
-                    driverFilterTab === "commodities"
-                      ? "bg-sky-500 text-white shadow-sm"
-                      : "text-slate-400 hover:text-slate-200"
-                  }`}
-                >
-                  <span>Commodities</span>
-                  <span
-                    className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
-                      driverFilterTab === "commodities"
-                        ? "bg-sky-950/50 text-white"
-                        : "bg-slate-800 text-slate-400"
-                    }`}
-                  >
-                    {commodityInputs.length}
-                  </span>
-                </button>
-                <button
-                  type="button"
-                  onClick={() => setDriverFilterTab("macro")}
-                  className={`px-3 py-1.5 rounded-lg text-xs font-medium transition flex items-center gap-1.5 ${
-                    driverFilterTab === "macro"
-                      ? "bg-sky-500 text-white shadow-sm"
-                      : "text-slate-400 hover:text-slate-200"
-                  }`}
-                >
-                  <span>Macro Drivers</span>
-                  <span
-                    className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
-                      driverFilterTab === "macro"
-                        ? "bg-sky-950/50 text-white"
-                        : "bg-slate-800 text-slate-400"
-                    }`}
-                  >
-                    {macroDriverInputs.length}
-                  </span>
-                </button>
+                <span className="text-xs text-slate-500">EOD Market, FRED &amp; AI Spot</span>
               </div>
 
-              <span className="text-xs text-slate-400">
-                {driverFilterTab === "commodities"
-                  ? "Click a raw material or feedstock to filter exposed products & companies"
-                  : "Click a macro indicator or end-market proxy to filter exposed companies"}
-              </span>
-
-              {selectedCommodity && (
-                <button
-                  onClick={() => setSelectedCommodity(null)}
-                  className="text-xs font-mono text-sky-400 hover:text-sky-300 underline"
-                >
-                  Clear Filter ({getCommodityDisplayName(selectedCommodity)})
-                </button>
-              )}
-              {selectedProductCategory && (
-                <button
-                  onClick={() => setSelectedProductCategory(null)}
-                  className="text-xs font-mono text-purple-400 hover:text-purple-300 underline"
-                >
-                  Clear Product Category ({selectedProductCategory})
-                </button>
-              )}
-            </div>
-            <span className="text-xs text-slate-500">EOD Market, FRED &amp; AI Spot</span>
-          </div>
-
-          <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-4 gap-3">
-            {displayedFilterInputs.map((item) => {
-              const isSelected = selectedCommodity === item.input_code;
-              const linkedCompanyCount = Object.keys(
-                commodityReverseIndex[item.input_code] || {}
-              ).length;
-              return (
-                <button
-                  key={item.input_code}
-                  onClick={() =>
-                    setSelectedCommodity(isSelected ? null : item.input_code)
-                  }
-                  title={item.source_note || undefined}
-                  className={`text-left rounded-xl p-3.5 border transition ${
-                    isSelected
-                      ? "bg-sky-950/50 border-sky-400 ring-1 ring-sky-400/50"
-                      : "bg-[#111827]/90 border-slate-800/90 hover:border-slate-700"
-                  }`}
-                >
-                  <div className="flex items-center justify-between gap-1.5">
-                    <span className="text-[11px] font-medium text-sky-400 truncate">
-                      {item.category ||
-                        (driverFilterTab === "macro"
-                          ? "Macro Driver"
-                          : "Commodity")}
-                    </span>
-                    <div className="flex items-center gap-1 shrink-0">
-                      {linkedCompanyCount > 0 && (
-                        <span className="px-1.5 py-0.2 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 text-[9px] font-mono">
-                          {linkedCompanyCount} Prod. Co.
+              <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-4 gap-3">
+                {displayedFilterInputs.map((item) => {
+                  const isSelected = selectedCommodity === item.input_code;
+                  const linkedCompanyCount = Object.keys(
+                    commodityReverseIndex[item.input_code] || {}
+                  ).length;
+                  return (
+                    <button
+                      key={item.input_code}
+                      onClick={() =>
+                        setSelectedCommodity(isSelected ? null : item.input_code)
+                      }
+                      title={item.source_note || undefined}
+                      className={`text-left rounded-xl p-3.5 border transition ${
+                        isSelected
+                          ? "bg-sky-950/50 border-sky-400 ring-1 ring-sky-400/50"
+                          : "bg-[#111827]/90 border-slate-800/90 hover:border-slate-700"
+                      }`}
+                    >
+                      <div className="flex items-center justify-between gap-1.5">
+                        <span className="text-[11px] font-medium text-sky-400 truncate">
+                          {item.category ||
+                            (driverFilterTab === "macro"
+                              ? "Macro Driver"
+                              : "Commodity")}
                         </span>
-                      )}
-                      {item.is_proxy && (
-                        <span className="px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[9px] font-mono uppercase">
-                          AI Spot
+                        <div className="flex items-center gap-1 shrink-0">
+                          {linkedCompanyCount > 0 && (
+                            <span className="px-1.5 py-0.2 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 text-[9px] font-mono">
+                              {linkedCompanyCount} Prod. Co.
+                            </span>
+                          )}
+                          {item.is_proxy && (
+                            <span className="px-1.5 py-0.2 rounded bg-amber-500/15 text-amber-300 border border-amber-500/30 text-[9px] font-mono uppercase">
+                              AI Spot
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <div className="mt-1 text-xs font-semibold text-white line-clamp-1">
+                        {item.input_name}
+                      </div>
+                      <div className="mt-2.5 flex items-baseline justify-between gap-1">
+                        <span className="text-lg font-semibold font-mono text-white">
+                          {Number(item.value).toLocaleString(undefined, {
+                            minimumFractionDigits: 2,
+                            maximumFractionDigits: 2,
+                          })}
                         </span>
-                      )}
-                    </div>
-                  </div>
-                  <div className="mt-1 text-xs font-semibold text-white line-clamp-1">
-                    {item.input_name}
-                  </div>
-                  <div className="mt-2.5 flex items-baseline justify-between gap-1">
-                    <span className="text-lg font-semibold font-mono text-white">
-                      {Number(item.value).toLocaleString(undefined, {
-                        minimumFractionDigits: 2,
-                        maximumFractionDigits: 2,
-                      })}
-                    </span>
-                    <span className="text-[10px] text-slate-500 truncate">
-                      {item.unit}
-                    </span>
-                  </div>
-                </button>
-              );
-            })}
-          </div>
-        </section>
+                        <span className="text-[10px] text-slate-500 truncate">
+                          {item.unit}
+                        </span>
+                      </div>
+                    </button>
+                  );
+                })}
+              </div>
+            </section>
+          </>
+        )}
 
         {/* TAB 1: Equity Universe & Product/Commodity Exposure Table */}
         {activeTab === "screener" && (
@@ -2013,6 +2081,330 @@ export default function DashboardClient({
                     )}
                   </div>
                 ))}
+              </div>
+            )}
+          </section>
+        )}
+
+        {/* TAB 3: MATERIALS ATLAS (All Raw Materials & All Advanced Materials) */}
+        {activeTab === "materials" && (
+          <section className="space-y-6">
+            {/* Sub-Navigation Switcher: All Raw Materials vs. All Advanced Materials */}
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 bg-[#111827]/90 border border-slate-800 rounded-2xl p-4">
+              <div className="inline-flex rounded-xl bg-[#090d16] border border-slate-800 p-1 self-start">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMaterialsSubTab("raw");
+                    setSelectedMaterialSlug(null);
+                  }}
+                  className={`px-4 py-2 rounded-lg text-xs font-semibold transition flex items-center gap-2 ${
+                    materialsSubTab === "raw"
+                      ? "bg-amber-500 text-slate-950 shadow-sm"
+                      : "text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  <span>All Raw Materials</span>
+                  <span
+                    className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
+                      materialsSubTab === "raw"
+                        ? "bg-amber-950/30 text-slate-950"
+                        : "bg-slate-800 text-slate-400"
+                    }`}
+                  >
+                    {atlasRawMaterials.length}
+                  </span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMaterialsSubTab("advanced");
+                    setSelectedMaterialSlug(null);
+                  }}
+                  className={`px-4 py-2 rounded-lg text-xs font-semibold transition flex items-center gap-2 ${
+                    materialsSubTab === "advanced"
+                      ? "bg-sky-500 text-white shadow-sm"
+                      : "text-slate-400 hover:text-slate-200"
+                  }`}
+                >
+                  <span>All Advanced Materials</span>
+                  <span
+                    className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
+                      materialsSubTab === "advanced"
+                        ? "bg-sky-950/50 text-white"
+                        : "bg-slate-800 text-slate-400"
+                    }`}
+                  >
+                    {atlasAdvancedMaterials.length}
+                  </span>
+                </button>
+              </div>
+
+              {!selectedAtlasMaterial && (
+                <div className="w-full sm:w-80">
+                  <input
+                    type="text"
+                    placeholder={
+                      materialsSubTab === "raw"
+                        ? "Search raw materials (e.g. Copper, Lithium, Gallium)..."
+                        : "Search advanced materials (e.g. Silicon Wafers, CCL)..."
+                    }
+                    value={materialSearch}
+                    onChange={(e) => setMaterialSearch(e.target.value)}
+                    className="w-full rounded-lg bg-[#090d16] border border-slate-700/80 px-3.5 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-sky-500"
+                  />
+                </div>
+              )}
+            </div>
+
+            {/* SUBPAGE VIEW: Selected Material Summary + All Linked Companies */}
+            {selectedAtlasMaterial ? (
+              <div className="space-y-5">
+                <button
+                  type="button"
+                  onClick={() => setSelectedMaterialSlug(null)}
+                  className="inline-flex items-center gap-1.5 text-xs font-mono text-sky-400 hover:text-sky-300"
+                >
+                  <span>
+                    &larr; Back to{" "}
+                    {selectedAtlasMaterial.kind === "raw"
+                      ? "All Raw Materials"
+                      : "All Advanced Materials"}
+                  </span>
+                </button>
+
+                {/* Material Summary Card */}
+                <div className="rounded-2xl bg-gradient-to-br from-[#11192c] via-[#0f172a] to-[#0b1120] border border-slate-700/80 p-6 space-y-4 shadow-xl">
+                  <div className="flex items-start justify-between gap-4 flex-wrap">
+                    <div className="space-y-1.5">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span
+                          className={`px-2.5 py-0.5 rounded text-[10px] font-mono uppercase font-semibold border ${
+                            selectedAtlasMaterial.kind === "raw"
+                              ? "bg-amber-500/15 text-amber-300 border-amber-500/35"
+                              : "bg-sky-500/15 text-sky-300 border-sky-500/35"
+                          }`}
+                        >
+                          {selectedAtlasMaterial.kind === "raw"
+                            ? "Raw Material / Feedstock"
+                            : "Engineered Advanced Material"}
+                        </span>
+                        <span className="text-xs font-mono text-slate-400">
+                          {selectedAtlasMaterial.categoryLabel}
+                        </span>
+                        {selectedAtlasMaterial.spotPriceLabel && (
+                          <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 text-[11px] font-mono">
+                            Spot: {selectedAtlasMaterial.spotPriceLabel}
+                          </span>
+                        )}
+                      </div>
+                      <h2 className="text-2xl font-bold text-white tracking-tight">
+                        {selectedAtlasMaterial.name}
+                      </h2>
+                    </div>
+
+                    {selectedAtlasMaterial.registryCode && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          handleSelectCommodityFromDossier(
+                            selectedAtlasMaterial.registryCode!
+                          )
+                        }
+                        className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-xs font-mono text-sky-300 border border-slate-700 transition"
+                      >
+                        Filter Matrix by Feed ↗
+                      </button>
+                    )}
+                  </div>
+
+                  <p className="text-sm text-slate-200 leading-relaxed max-w-4xl">
+                    {selectedAtlasMaterial.summary}
+                  </p>
+
+                  {selectedAtlasMaterial.endMarkets.length > 0 && (
+                    <div className="flex items-center gap-2 flex-wrap pt-1">
+                      <span className="text-[11px] font-mono uppercase text-slate-500">
+                        Key Downstream Applications:
+                      </span>
+                      {selectedAtlasMaterial.endMarkets.map((em) => (
+                        <span
+                          key={em}
+                          className="px-2.5 py-0.5 rounded-full bg-slate-800/90 text-slate-300 border border-slate-700 text-xs"
+                        >
+                          {em}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+
+                {/* Company Links Grid */}
+                <div className="space-y-3">
+                  <div className="flex items-center justify-between">
+                    <h3 className="text-sm font-semibold text-white">
+                      {selectedAtlasMaterial.kind === "raw"
+                        ? `Companies Using ${selectedAtlasMaterial.name} in Their Advanced Materials Business (${selectedAtlasMaterial.companies.length})`
+                        : `Companies Manufacturing & Selling ${selectedAtlasMaterial.name} (${selectedAtlasMaterial.companies.length})`}
+                    </h3>
+                    <span className="text-xs text-slate-400">
+                      Click any company link to open full dossier &rarr;
+                    </span>
+                  </div>
+
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-3.5">
+                    {selectedAtlasMaterial.companies.map((comp) => {
+                      const badge =
+                        CONTRACT_BADGES[comp.contractType || ""] || {
+                          label: comp.contractType || "Standard",
+                          style: "bg-slate-800 text-slate-300 border-slate-700",
+                        };
+                      return (
+                        <button
+                          key={comp.ticker}
+                          type="button"
+                          onClick={() => setSelectedTicker(comp.ticker)}
+                          className="text-left rounded-xl bg-[#111827]/90 hover:bg-[#151f33] border border-slate-800 hover:border-sky-500/50 p-4 transition space-y-2.5 group"
+                        >
+                          <div className="flex items-start justify-between gap-2">
+                            <div>
+                              <div className="flex items-center gap-2">
+                                <span className="font-mono font-bold text-sm text-sky-400 group-hover:underline">
+                                  {comp.ticker}
+                                </span>
+                                <span className="font-semibold text-sm text-white">
+                                  {comp.companyName}
+                                </span>
+                                {comp.country && (
+                                  <span className="text-xs">
+                                    {getCountryFlag(comp.country)}
+                                  </span>
+                                )}
+                              </div>
+                              <div className="text-xs text-slate-400 mt-0.5">
+                                {comp.subSector}
+                              </div>
+                            </div>
+
+                            <div className="text-right shrink-0 space-y-1">
+                              <div className="font-mono text-xs text-slate-200">
+                                {formatMarketCap(comp.marketCapUsd)}
+                              </div>
+                              <span
+                                className={`inline-block px-2 py-0.2 rounded-full text-[10px] border ${badge.style}`}
+                              >
+                                {badge.label}
+                              </span>
+                            </div>
+                          </div>
+
+                          {comp.linkedProducts.length > 0 && (
+                            <div className="pt-2 border-t border-slate-800/80 space-y-1.5">
+                              <div className="text-[10px] font-mono uppercase text-slate-500">
+                                {selectedAtlasMaterial.kind === "raw"
+                                  ? "Consumed In:"
+                                  : "Product Lines Sold:"}
+                              </div>
+                              {comp.linkedProducts.slice(0, 3).map((lp, i) => (
+                                <div
+                                  key={`${lp.name}-${i}`}
+                                  className="text-xs text-slate-300 flex items-center justify-between gap-2"
+                                >
+                                  <span className="font-medium text-white truncate">
+                                    • {lp.name}
+                                  </span>
+                                  {lp.detail && (
+                                    <span className="text-[10px] font-mono text-slate-400 truncate max-w-[200px]">
+                                      {lp.detail}
+                                    </span>
+                                  )}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              </div>
+            ) : (
+              /* MASTER DIRECTORY GRID: All Raw Materials or All Advanced Materials */
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4">
+                {(materialsSubTab === "raw"
+                  ? atlasRawMaterials
+                  : atlasAdvancedMaterials
+                )
+                  .filter((m) => {
+                    if (!materialSearch.trim()) return true;
+                    const q = materialSearch.toLowerCase();
+                    return (
+                      m.name.toLowerCase().includes(q) ||
+                      m.categoryLabel.toLowerCase().includes(q) ||
+                      m.summary.toLowerCase().includes(q) ||
+                      m.companies.some(
+                        (c) =>
+                          c.ticker.toLowerCase().includes(q) ||
+                          c.companyName.toLowerCase().includes(q)
+                      )
+                    );
+                  })
+                  .map((mat) => (
+                    <button
+                      key={mat.slug}
+                      type="button"
+                      onClick={() => setSelectedMaterialSlug(mat.slug)}
+                      className="text-left rounded-xl bg-[#111827]/90 hover:bg-[#151f33] border border-slate-800 hover:border-sky-500/45 p-5 transition flex flex-col justify-between gap-4 group"
+                    >
+                      <div className="space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <span
+                            className={`text-[10px] font-mono uppercase px-2 py-0.5 rounded border ${
+                              mat.kind === "raw"
+                                ? "bg-amber-500/10 text-amber-300 border-amber-500/30"
+                                : "bg-sky-500/10 text-sky-300 border-sky-500/30"
+                            }`}
+                          >
+                            {mat.categoryLabel}
+                          </span>
+                          <span className="px-2 py-0.5 rounded bg-emerald-500/15 text-emerald-300 border border-emerald-500/30 text-[10px] font-mono font-semibold">
+                            {mat.companies.length}{" "}
+                            {mat.companies.length === 1 ? "Company" : "Companies"}
+                          </span>
+                        </div>
+
+                        <h3 className="text-base font-semibold text-white group-hover:text-sky-300 transition">
+                          {mat.name}
+                        </h3>
+
+                        <p className="text-xs text-slate-400 line-clamp-2 leading-relaxed">
+                          {mat.summary}
+                        </p>
+                      </div>
+
+                      <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between gap-2">
+                        <div className="flex flex-wrap gap-1">
+                          {mat.companies.slice(0, 4).map((c) => (
+                            <span
+                              key={c.ticker}
+                              className="px-1.5 py-0.5 rounded bg-[#090d16] text-sky-400 border border-slate-700/80 font-mono text-[10px]"
+                            >
+                              {c.ticker}
+                            </span>
+                          ))}
+                          {mat.companies.length > 4 && (
+                            <span className="px-1.5 py-0.5 rounded bg-slate-800 text-slate-400 font-mono text-[10px]">
+                              +{mat.companies.length - 4}
+                            </span>
+                          )}
+                        </div>
+                        <span className="text-xs font-mono text-sky-400 shrink-0">
+                          Inspect &rarr;
+                        </span>
+                      </div>
+                    </button>
+                  ))}
               </div>
             )}
           </section>
