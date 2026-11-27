@@ -2937,11 +2937,100 @@ export default function DashboardClient({
                   </div>
                 ))}
 
-              {/* TAB 4: FILINGS & BRIEFS */}
+{/* TAB 4: FILINGS & BRIEFS */}
               {dossierTab === "filings" && (
                 <div className="space-y-4">
-                  {/* Quantitative SEC / Financial Filing Metrics Table */}
-                  {selectedEquityMetrics && (
+                  {selectedEquityFilings.length === 0 ? (
+                    <div className="rounded-xl bg-[#111827] border border-slate-800 p-5 text-xs text-slate-400">
+                      This ticker is queued for the next SEC EDGAR / AI synthesis batch.
+                    </div>
+                  ) : (
+                    selectedEquityFilings.map((f) => (
+                      <div
+                        key={f.id}
+                        className="rounded-xl bg-[#111827] border border-slate-800 p-4 space-y-3"
+                      >
+                        <div className="flex items-center justify-between gap-2 flex-wrap">
+                          <span className="px-2.5 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-500/30 text-xs font-mono font-semibold">
+                            {f.fiscal_period
+                              ? `${f.fiscal_period} • ${f.filing_date}`
+                              : f.filing_type === "Earnings Brief"
+                              ? `Profile & News • As of ${f.filing_date}`
+                              : `${f.filing_type} • Filed ${f.filing_date}`}
+                          </span>
+                          {f.source_url && (
+                            <a
+                              href={f.source_url}
+                              target="_blank"
+                              rel="noreferrer"
+                              className="text-xs text-sky-400 hover:underline font-mono"
+                            >
+                              View Filing ↗
+                            </a>
+                          )}
+                        </div>
+
+                        <h4 className="text-sm font-semibold text-white">
+                          {f.headline}
+                        </h4>
+                        <p className="text-xs text-slate-300 leading-relaxed">
+                          {f.executive_summary}
+                        </p>
+
+                        <div className="grid grid-cols-1 gap-2 pt-1 text-xs">
+                          {f.pricing_and_margins && (
+                            <div className="rounded-lg bg-[#090d16] p-3 border border-slate-800/80">
+                              <span className="font-mono text-[10px] uppercase text-emerald-400 block mb-0.5">
+                                Pricing Power &amp; Margins
+                              </span>
+                              <span className="text-slate-300">
+                                {f.pricing_and_margins}
+                              </span>
+                            </div>
+                          )}
+                          {f.capex_and_backlog && (
+                            <div className="rounded-lg bg-[#090d16] p-3 border border-slate-800/80">
+                              <span className="font-mono text-[10px] uppercase text-sky-400 block mb-0.5">
+                                Backlog, Qualification &amp; Capex
+                              </span>
+                              <span className="text-slate-300">
+                                {f.capex_and_backlog}
+                              </span>
+                            </div>
+                          )}
+                          {f.key_risks && (
+                            <div className="rounded-lg bg-[#090d16] p-3 border border-slate-800/80">
+                              <span className="font-mono text-[10px] uppercase text-rose-400 block mb-0.5">
+                                Key Risks
+                              </span>
+                              <span className="text-slate-300">
+                                {f.key_risks}
+                              </span>
+                            </div>
+                          )}
+                        </div>
+                      </div>
+                    ))
+                  )}
+                </div>
+              )}
+
+              {/* TAB 5: KEY METRICS (Quantitative Filing Table) */}
+              {dossierTab === "metrics" && (
+                <div className="space-y-4">
+                  {!selectedEquityMetrics ? (
+                    <div className="rounded-xl bg-[#111827] border border-slate-800 p-5 text-xs text-slate-400">
+                      Quantitative filing metrics have not been extracted for{" "}
+                      <span className="text-white font-mono">
+                        {selectedEquity.ticker}
+                      </span>{" "}
+                      yet. Run the{" "}
+                      <span className="text-sky-400 font-mono">
+                        Extract Quantitative Filing Metrics
+                      </span>{" "}
+                      workflow to populate SEC XBRL / financial statement figures.
+                    </div>
+                  ) : (
                     <div className="rounded-xl bg-[#111827] border border-slate-800 overflow-hidden">
                       <div className="px-4 py-3 bg-[#0d1424] border-b border-slate-800/90 flex items-center justify-between gap-2 flex-wrap">
                         <div className="flex items-center gap-2 flex-wrap">
@@ -3253,6 +3342,8 @@ export default function DashboardClient({
                       </div>
                     </div>
                   )}
+                </div>
+              )}
 
                   {selectedEquityFilings.length === 0 ? (
                     <div className="rounded-xl bg-[#111827] border border-slate-800 p-5 text-xs text-slate-400">
