@@ -552,6 +552,7 @@ export default function DashboardClient({
   products = [],
   excludedProducts = [],
   productProfiles = [],
+  filingMetrics = [],
 }: {
   equities: EquityRow[];
   inputs: RawInputRow[];
@@ -563,6 +564,7 @@ export default function DashboardClient({
   products?: CompanyProduct[];
   excludedProducts?: ExcludedProduct[];
   productProfiles?: CompanyProductProfile[];
+  filingMetrics?: FilingMetricsRow[];
 }) {
   // Deduplicate repeated company rows (e.g., 120290 vs 120290.KS)
   const equities = useMemo(() => {
@@ -600,12 +602,13 @@ export default function DashboardClient({
   // Exclude FY2024 or older filings defensively
   const filings = useMemo(() => {
     return rawFilings.filter((f) => {
-      if (f.fiscal_period && /\b202[0-4]\b/.test(f.fiscal_period)) return false;
+      if (f.fiscal_period && /\b(?:fy\s*)?202[0-4]\b/i.test(f.fiscal_period))
+        return false;
       if (f.filing_date && f.filing_date < "2025-01-01") return false;
       if (
-        ["10-K", "20-F", "40-F"].includes(f.filing_type) &&
+        ["10-K", "20-F", "40-F", "10-K/A", "20-F/A"].includes(f.filing_type) &&
         f.filing_date &&
-        f.filing_date < "2025-04-01"
+        f.filing_date < "2025-06-01"
       ) {
         return false;
       }
@@ -851,6 +854,14 @@ export default function DashboardClient({
     }
     return map;
   }, [filings]);
+
+  const tickerMetricsMap = useMemo(() => {
+    const map: Record<string, FilingMetricsRow> = {};
+    for (const m of filingMetrics) {
+      map[m.ticker] = m;
+    }
+    return map;
+  }, [filingMetrics]);
 
   const coveredCompanyCount = useMemo(
     () => Object.keys(tickerFilingsMap).length,
@@ -1136,6 +1147,10 @@ export default function DashboardClient({
   const selectedEquityFilings = selectedTicker
     ? tickerFilingsMap[selectedTicker] || []
     : [];
+
+  const selectedEquityMetrics = selectedTicker
+    ? tickerMetricsMap[selectedTicker] || null
+    : null;
 
   const selectedEquityDrivers = selectedTicker
     ? tickerDriversMap[selectedTicker] || []
@@ -2921,9 +2936,325 @@ export default function DashboardClient({
               {/* TAB 4: FILINGS & BRIEFS */}
               {dossierTab === "filings" && (
                 <div className="space-y-4">
+                  {/* Quantitative SEC / Financial Filing Metrics Table */}
+                  {selectedEquityMetrics && (
+                    <div className="rounded-xl bg-[#111827] border border-slate-800 overflow-hidden">
+                      <div className="px-4 py-3 bg-[#0d1424] border-b border-slate-800/90 flex items-center justify-between gap-2 flex-wrap">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <span className="text-[11px] font-mono uppercase tracking-wider text-sky-400 font-semibold">
+                            Quantitative Filing Snapshot
+                          </span>
+                          <span className="px-2 py-0.5 rounded bg-sky-500/15 text-sky-300 border border-sky-500/30 text-[10px] font-mono">
+                            {selectedEquityMetrics.fiscal_period}
+                          </span>
+                          <span className="text-[10px] font-mono text-slate-400">
+                            Period End: {selectedEquityMetrics.period_end_date} •{" "}
+                            {selectedEquityMetrics.currency}
+                          </span>
+                        </div>
+                        {selectedEquityMetrics.source_url && (
+                          <a
+                            href={selectedEquityMetrics.source_url}
+                            target="_blank"
+                            rel="noreferrer"
+                            className="text-[11px] font-mono text-sky-400 hover:underline"
+                          >
+                            {selectedEquityMetrics.source_type} ↗
+                          </a>
+                        )}
+                      </div>
+
+                      <div className="overflow-x-auto">
+                        <table className="w-full text-left border-collapse text-xs">
+                          <thead>
+                            <tr className="border-b border-slate-800/80 text-[10px] font-mono uppercase text-slate-400 bg-[#090d16]/70">
+                              <th className="py-2.5 px-4">Filing Metric</th>
+                              <th className="py-2.5 px-4 text-right">
+                                Reported Value
+                              </th>
+                              <th className="py-2.5 px-4 text-right">
+                                Margin / Intensity / YoY
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-slate-800/60">
+                            {/* Revenue */}
+                            <tr>
+                              <td className="py-2.5 px-4 font-medium text-white">
+                                Revenue
+                              </td>
+                              <td className="py-2.5 px-4 text-right font-mono text-white">
+                                {formatFilingAmount(
+                                  selectedEquityMetrics.revenue,
+                                  selectedEquityMetrics.currency
+                                )}
+                              </td>
+                              <td className="py-2.5 px-4 text-right font-mono">
+                                {selectedEquityMetrics.revenue_yoy_pct != null ? (
+                                  <span
+                                    className={
+                                      Number(
+                                        selectedEquityMetrics.revenue_yoy_pct
+                                      ) >= 0
+                                        ? "text-emerald-400"
+                                        : "text-rose-400"
+                                    }
+                                  >
+                                    {formatSignedPct(
+                                      selectedEquityMetrics.revenue_yoy_pct
+                                    )}
+                                  </span>
+                                ) : (
+                                  <span className="text-slate-500">—</span>
+                                )}
+                              </td>
+                            </tr>
+
+                            {/* Gross Profit & Margin */}
+                            <tr>
+                              <td className="py-2.5 px-4 font-medium text-slate-200">
+                                Gross Profit &amp; Margin
+                              </td>
+                              <td className="py-2.5 px-4 text-right font-mono text-slate-200">
+                                {formatFilingAmount(
+                                  selectedEquityMetrics.gross_profit,
+                                  selectedEquityMetrics.currency
+                                )}
+                              </td>
+                              <td className="py-2.5 px-4 text-right font-mono">
+                                <span className="text-white font-semibold">
+                                  {formatMarginPct(
+                                    selectedEquityMetrics.gross_margin_pct
+                                  )}
+                                </span>
+                                {selectedEquityMetrics.gross_margin_yoy_bps !=
+                                  null && (
+                                  <span
+                                    className={`ml-2 text-[10px] ${
+                                      selectedEquityMetrics.gross_margin_yoy_bps >=
+                                      0
+                                        ? "text-emerald-400"
+                                        : "text-rose-400"
+                                    }`}
+                                  >
+                                    (
+                                    {selectedEquityMetrics.gross_margin_yoy_bps >=
+                                    0
+                                      ? "+"
+                                      : ""}
+                                    {selectedEquityMetrics.gross_margin_yoy_bps}{" "}
+                                    bps YoY)
+                                  </span>
+                                )}
+                              </td>
+                            </tr>
+
+                            {/* Operating Income (EBIT) */}
+                            <tr>
+                              <td className="py-2.5 px-4 font-medium text-slate-200">
+                                Operating Income (EBIT)
+                              </td>
+                              <td className="py-2.5 px-4 text-right font-mono text-slate-200">
+                                {formatFilingAmount(
+                                  selectedEquityMetrics.operating_income,
+                                  selectedEquityMetrics.currency
+                                )}
+                              </td>
+                              <td className="py-2.5 px-4 text-right font-mono text-slate-300">
+                                {selectedEquityMetrics.operating_margin_pct !=
+                                null
+                                  ? `${formatMarginPct(
+                                      selectedEquityMetrics.operating_margin_pct
+                                    )} Op. Margin`
+                                  : "—"}
+                              </td>
+                            </tr>
+
+                            {/* Net Income */}
+                            <tr>
+                              <td className="py-2.5 px-4 font-medium text-slate-200">
+                                Net Income
+                              </td>
+                              <td className="py-2.5 px-4 text-right font-mono text-slate-200">
+                                {formatFilingAmount(
+                                  selectedEquityMetrics.net_income,
+                                  selectedEquityMetrics.currency
+                                )}
+                              </td>
+                              <td className="py-2.5 px-4 text-right font-mono text-slate-300">
+                                {selectedEquityMetrics.net_income != null &&
+                                selectedEquityMetrics.revenue != null &&
+                                Number(selectedEquityMetrics.revenue) !== 0
+                                  ? `${(
+                                      (Number(
+                                        selectedEquityMetrics.net_income
+                                      ) /
+                                        Number(selectedEquityMetrics.revenue)) *
+                                      100
+                                    ).toFixed(1)}% Net Margin`
+                                  : "Bottom-line GAAP/IFRS"}
+                              </td>
+                            </tr>
+
+                            {/* Operating Cash Flow */}
+                            <tr>
+                              <td className="py-2.5 px-4 font-medium text-slate-200">
+                                Operating Cash Flow
+                              </td>
+                              <td className="py-2.5 px-4 text-right font-mono text-slate-200">
+                                {formatFilingAmount(
+                                  selectedEquityMetrics.operating_cash_flow,
+                                  selectedEquityMetrics.currency
+                                )}
+                              </td>
+                              <td className="py-2.5 px-4 text-right font-mono text-slate-300">
+                                {selectedEquityMetrics.operating_cash_flow !=
+                                  null &&
+                                selectedEquityMetrics.revenue != null &&
+                                Number(selectedEquityMetrics.revenue) !== 0
+                                  ? `${(
+                                      (Number(
+                                        selectedEquityMetrics
+                                          .operating_cash_flow
+                                      ) /
+                                        Number(selectedEquityMetrics.revenue)) *
+                                      100
+                                    ).toFixed(1)}% OCF Margin`
+                                  : "Cash from operations"}
+                              </td>
+                            </tr>
+
+                            {/* Capital Expenditures */}
+                            <tr>
+                              <td className="py-2.5 px-4 font-medium text-slate-200">
+                                Capital Expenditures (CapEx)
+                              </td>
+                              <td className="py-2.5 px-4 text-right font-mono text-slate-200">
+                                {formatFilingAmount(
+                                  selectedEquityMetrics.capex,
+                                  selectedEquityMetrics.currency
+                                )}
+                              </td>
+                              <td className="py-2.5 px-4 text-right font-mono text-amber-300">
+                                {selectedEquityMetrics.capex_pct_rev != null
+                                  ? `${formatMarginPct(
+                                      selectedEquityMetrics.capex_pct_rev
+                                    )} of Rev`
+                                  : "—"}
+                              </td>
+                            </tr>
+
+                            {/* Free Cash Flow */}
+                            <tr>
+                              <td className="py-2.5 px-4 font-medium text-white">
+                                Free Cash Flow (FCF)
+                              </td>
+                              <td
+                                className={`py-2.5 px-4 text-right font-mono font-semibold ${
+                                  selectedEquityMetrics.free_cash_flow !=
+                                    null &&
+                                  Number(
+                                    selectedEquityMetrics.free_cash_flow
+                                  ) >= 0
+                                    ? "text-emerald-400"
+                                    : "text-rose-400"
+                                }`}
+                              >
+                                {formatFilingAmount(
+                                  selectedEquityMetrics.free_cash_flow,
+                                  selectedEquityMetrics.currency
+                                )}
+                              </td>
+                              <td className="py-2.5 px-4 text-right font-mono text-slate-300">
+                                {selectedEquityMetrics.free_cash_flow != null &&
+                                selectedEquityMetrics.revenue != null &&
+                                Number(selectedEquityMetrics.revenue) !== 0
+                                  ? `${(
+                                      (Number(
+                                        selectedEquityMetrics.free_cash_flow
+                                      ) /
+                                        Number(selectedEquityMetrics.revenue)) *
+                                      100
+                                    ).toFixed(1)}% FCF Margin`
+                                  : "OCF minus CapEx"}
+                              </td>
+                            </tr>
+
+                            {/* R&D Expense */}
+                            {selectedEquityMetrics.rd_expense != null && (
+                              <tr>
+                                <td className="py-2.5 px-4 font-medium text-slate-200">
+                                  R&amp;D Expense
+                                </td>
+                                <td className="py-2.5 px-4 text-right font-mono text-slate-200">
+                                  {formatFilingAmount(
+                                    selectedEquityMetrics.rd_expense,
+                                    selectedEquityMetrics.currency
+                                  )}
+                                </td>
+                                <td className="py-2.5 px-4 text-right font-mono text-sky-300">
+                                  {selectedEquityMetrics.rd_pct_rev != null
+                                    ? `${formatMarginPct(
+                                        selectedEquityMetrics.rd_pct_rev
+                                      )} of Rev`
+                                    : "—"}
+                                </td>
+                              </tr>
+                            )}
+
+                            {/* Inventory & Turnover */}
+                            <tr>
+                              <td className="py-2.5 px-4 font-medium text-slate-200">
+                                Inventory &amp; Turnover
+                              </td>
+                              <td className="py-2.5 px-4 text-right font-mono text-slate-200">
+                                {formatFilingAmount(
+                                  selectedEquityMetrics.inventory,
+                                  selectedEquityMetrics.currency
+                                )}
+                              </td>
+                              <td className="py-2.5 px-4 text-right font-mono text-slate-300">
+                                {selectedEquityMetrics.inventory_days != null
+                                  ? `${selectedEquityMetrics.inventory_days} Days (DIO)`
+                                  : "—"}
+                              </td>
+                            </tr>
+
+                            {/* Cash / Total Debt (Net Debt) */}
+                            <tr>
+                              <td className="py-2.5 px-4 font-medium text-slate-200">
+                                Cash / Total Debt (Net Debt)
+                              </td>
+                              <td className="py-2.5 px-4 text-right font-mono text-slate-200">
+                                {formatFilingAmount(
+                                  selectedEquityMetrics.cash_and_equivalents,
+                                  selectedEquityMetrics.currency
+                                )}{" "}
+                                /{" "}
+                                {formatFilingAmount(
+                                  selectedEquityMetrics.total_debt,
+                                  selectedEquityMetrics.currency
+                                )}
+                              </td>
+                              <td className="py-2.5 px-4 text-right font-mono text-slate-300">
+                                Net:{" "}
+                                {formatFilingAmount(
+                                  selectedEquityMetrics.net_debt,
+                                  selectedEquityMetrics.currency
+                                )}
+                              </td>
+                            </tr>
+                          </tbody>
+                        </table>
+                      </div>
+                    </div>
+                  )}
+
                   {selectedEquityFilings.length === 0 ? (
                     <div className="rounded-xl bg-[#111827] border border-slate-800 p-5 text-xs text-slate-400">
-                      This ticker is queued for the next SEC EDGAR / AI synthesis batch.
+                      {selectedEquityMetrics
+                        ? "Narrative filing briefs are queued for the next SEC EDGAR / AI synthesis batch."
+                        : "This ticker is queued for the next SEC EDGAR / AI synthesis batch."}
                     </div>
                   ) : (
                     selectedEquityFilings.map((f) => (
