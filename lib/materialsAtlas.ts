@@ -201,8 +201,8 @@ export function buildMaterialsAtlas({
     bucket: RawBucket,
     ticker: string,
     origin: AtlasCompanyLink["sourceOrigin"],
-    prodInfo?: {
-      id?: number;
+  prodInfo?: {
+      id?: string | number;
       name: string;
       category?: string;
       businessUnit?: string;
