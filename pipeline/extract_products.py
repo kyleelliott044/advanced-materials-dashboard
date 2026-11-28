@@ -55,6 +55,12 @@ EXTERNAL_SALES_EVIDENCE_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Reject generic segment umbrellas that are not specific physical materials
+VAGUE_UMBRELLA_PRODUCT_RE = re.compile(
+    r"^\s*([a-z0-9\-&/\s]{0,30}\s+)?(advanced|specialty|functional|performance|electronic|engineered|industrial|chemical)\s+materials?\s*$",
+    re.IGNORECASE,
+)
+
 
 def _build_gemini_client():
     if not GEMINI_API_KEY:
@@ -691,6 +697,9 @@ def run_split_extraction(conn, force_tickers: Optional[List[str]] = None):
         - Format `product_line_name` in consistent Title Case (preserving chemical acronyms like NdFeB, SiC, PVC, PTFE, SOI, CMP, OLED).
         - NEVER list end-markets ('Aerospace', 'Mobility', 'Life Science', 'Optics') or processes ('Mining', 'Refining') as materials.
         - Every item MUST include a verbatim `source_quote` from the text below proving the company produces/sells it.
+        - ADVANCED MATERIALS ONLY: Extract ONLY high-value, customer-qualified advanced materials (semiconductor, battery, aerospace/defense, optical, magnetic, high-performance fluoropolymers/composites, specialty electronic chemicals). EXCLUDE commodity construction/infrastructure materials (e.g., commodity PVC, POVAL/polyvinyl alcohol, cement, basic packaging resins) unless explicitly described as high-purity/semiconductor/battery grade.
+        - SPECIFIC MATERIAL NAMES ONLY: NEVER emit generic segment names or umbrellas like 'Advanced Materials', 'Performance Materials', 'Electronic Materials', 'Specialty Materials', or '<Company> Advanced Materials'. Every `canonical_material` and `product_line_name` must name an actual physical chemistry, alloy, ceramic, crystal, or polymer class.
+        - POSITIVE EVIDENCE ONLY: Ignore sentences stating what a company does NOT make or classifies outside its advanced materials segments (never use a sentence starting with "No," as a `source_quote`).
 
         ITEM 1 & SEGMENT TEXT ({src_ref}):
         {pass_a_text}
