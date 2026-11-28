@@ -1,0 +1,54 @@
+name: Crawl Official Product Catalogs
+
+on:
+  workflow_dispatch:
+    inputs:
+      tickers:
+        description: "Optional comma-separated tickers (e.g. 4063.T,ENTG,ALB). Leave blank for next batch."
+        required: false
+        default: ""
+      dry_run:
+        description: "Dry run (print discovered & filtered products without writing to DB)"
+        type: boolean
+        required: false
+        default: false
+      batch_limit:
+        description: "Max companies to crawl per run"
+        required: false
+        default: "10"
+
+jobs:
+  crawl-catalogs:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: |
+          pip install -r requirements.txt
+          pip install beautifulsoup4 yfinance google-genai pydantic psycopg[binary] requests
+
+      - name: Run Official Product Catalog Crawler
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          SERPER_API_KEY: ${{ secrets.SERPER_API_KEY }}
+          CATALOG_BATCH_LIMIT: ${{ github.event.inputs.batch_limit }}
+        run: |
+          ARGS=""
+          if [ -n "${{ github.event.inputs.tickers }}" ]; then
+            ARGS="$ARGS --tickers ${{ github.event.inputs.tickers }}"
+          fi
+          if [ "${{ github.event.inputs.dry_run }}" = "true" ]; then
+            ARGS="$ARGS --dry-run"
+          fi
+          python pipeline/crawl_product_catalogs.py $ARGS
