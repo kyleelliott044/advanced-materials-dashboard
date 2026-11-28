@@ -760,7 +760,7 @@ def run_split_extraction(conn, force_tickers: Optional[List[str]] = None):
                 stats["excluded_T3"] += 1
                 continue
 
-          raw_mat_label = (cand.get("canonical_material") or "").strip()
+        raw_mat_label = (cand.get("canonical_material") or "").strip()
             quote = (cand.get("source_quote") or "").strip()
             if (
                 not raw_mat_label
