@@ -1342,7 +1342,7 @@ function isInputRelevantToProduct(
 const selectedEquityProducts = useMemo(() => {
     if (!selectedTicker) return [];
 
-    const prodTitleRaw = (l.product_name || mat.canonical_name).trim();
+      const prodTitleRaw = (l.product_name || mat.canonical_name).trim();
         const displayTitle = formatProductTitle(prodTitleRaw);
 
         const scopedInputs = allConsumedLinks
