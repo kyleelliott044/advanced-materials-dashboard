@@ -56,8 +56,10 @@ EXTERNAL_SALES_EVIDENCE_RE = re.compile(
 )
 
 # Reject generic segment umbrellas that are not specific physical materials
+_UMBRELLA_ADJ = r"(?:advanced|specialty|functional|performance|electronic|engineered|industrial|chemical|semiconductor|high[- ]purity|composite|critical)"
+
 VAGUE_UMBRELLA_PRODUCT_RE = re.compile(
-    r"^\s*([a-z0-9\-&/\s]{0,30}\s+)?(advanced|specialty|functional|performance|electronic|engineered|industrial|chemical)\s+materials?\s*$",
+    rf"^\s*(?:[a-z0-9\-&/\s]{{0,30}}\s+)?{_UMBRELLA_ADJ}(?:\s*(?:,|and|&)\s*{_UMBRELLA_ADJ}|\s+{_UMBRELLA_ADJ})*\s+materials?\s*$",
     re.IGNORECASE,
 )
 
@@ -758,9 +760,15 @@ def run_split_extraction(conn, force_tickers: Optional[List[str]] = None):
                 stats["excluded_T3"] += 1
                 continue
 
-            raw_mat_label = (cand.get("canonical_material") or "").strip()
+          raw_mat_label = (cand.get("canonical_material") or "").strip()
             quote = (cand.get("source_quote") or "").strip()
-            if not raw_mat_label or len(quote) < 8:
+            if (
+                not raw_mat_label
+                or len(quote) < 8
+                or VAGUE_UMBRELLA_PRODUCT_RE.match(raw_mat_label)
+                or NEGATIVE_QUOTE_RE.search(quote)
+            ):
+                stats["excluded_vague_or_negative"] += 1
                 continue
 
             resolved = resolve_material_candidate(raw_mat_label, alias_map)
@@ -781,9 +789,13 @@ def run_split_extraction(conn, force_tickers: Optional[List[str]] = None):
                 continue
 
             mid, cname, db_tier = resolved
-            if db_tier == "T3":
+            if db_tier == "T3" or VAGUE_UMBRELLA_PRODUCT_RE.match(cname):
                 stats["excluded_T3"] += 1
                 continue
+
+            raw_prod_line = (cand.get("product_line_name") or "").strip()
+            if not raw_prod_line or VAGUE_UMBRELLA_PRODUCT_RE.match(raw_prod_line):
+                raw_prod_line = cname
 
             # Rule 5: Resolve ambiguous items by registry tier (T0/T1 never becomes T2)
             sold_items.setdefault(mid, []).append({
