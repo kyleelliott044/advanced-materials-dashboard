@@ -584,6 +584,12 @@ def _format_taxonomy_prompt_lists(by_id: Dict[int, Tuple[str, str, str]]) -> Tup
     return ", ".join(t2_list), ", ".join(t0_t1_list)
 
 
+BARE_T0_T1_NAMES_RE = re.compile(
+    r"^\s*(silicon|metallurgical\s+silicon|polysilicon|lithium|cobalt|nickel|graphite|copper|titanium|aluminum|quartz|silica|rare\s+earths?)\s*$",
+    re.IGNORECASE,
+)
+
+
 def run_split_extraction(conn, force_tickers: Optional[List[str]] = None):
     conn = ensure_schema(conn)
     alias_map, by_id = load_material_registry(conn)
@@ -663,6 +669,184 @@ def run_split_extraction(conn, force_tickers: Optional[List[str]] = None):
             continue
 
         rev_note = f"{adv_mat_rev_pct}% of revenue" if adv_mat_rev_pct is not None else "specialist segment"
+
+        # -------------------------------------------------------------------
+        # PASS A: SOLD MATERIALS ONLY (Item 1 + Segment Notes)
+        # -------------------------------------------------------------------
+        prompt_a = f"""
+        You are an institutional advanced materials analyst.
+        Analyze ONLY the Item 1 Business & Segment text below for {company_name} ({ticker}) | Sub-sector: {sub_sector} ({rev_note}).
+        Extract every physical material that {company_name} MANUFACTURES AND SELLS to customers.
+
+        TIER & CLASSIFICATION RULES:
+        - Classify each candidate into one of three buckets:
+          1. 'sold_T2_material': Engineered material specified and qualified in the customer's manufacturing process. Canonical T2 list:
+             [{t2_vocab}]
+          2. 'sold_T0_T1_material': Primary ore/metal/mineral (T0) or refined/traded intermediate not customer-process-qualified (T1, e.g., Polysilicon, Lithium Carbonate and Hydroxide, NdPr Oxide). Canonical T0/T1 list:
+             [{t0_t1_vocab}]
+          3. 'sold_T3_non_material': Assembled battery cells/modules/packs, connectors, sensors, optical transceivers, displays, machinery, pharma, food, or software (EXCLUDE from products).
+        - Match to an EXACT canonical name from the lists above whenever applicable; only mint a new specific material name if genuinely distinct.
+        - ONE ENTRY PER MATERIAL CLASS: Do NOT split a single material class into multiple rows just because it serves different end-markets (e.g., emit ONE entry for 'Silicones', NOT both 'Silicones' and 'Semiconductor Silicones'). Combine all end-markets into `end_demand`.
+        - NEVER emit bare upstream elements or feedstocks ('Silicon', 'Lithium', 'Cobalt', 'Nickel', 'Copper', 'Quartz') as 'sold_T2_material'.
+        - Format `product_line_name` in consistent Title Case (preserving chemical acronyms like NdFeB, SiC, PVC, PTFE, SOI, CMP, OLED).
+        - NEVER list end-markets ('Aerospace', 'Mobility', 'Life Science', 'Optics') or processes ('Mining', 'Refining') as materials.
+        - Every item MUST include a verbatim `source_quote` from the text below proving the company produces/sells it.
+
+        ITEM 1 & SEGMENT TEXT ({src_ref}):
+        {pass_a_text}
+        """
+
+        parsed_a = _call_ai(prompt_a, PassASoldBatch)
+        if not parsed_a:
+            print("All AI providers exhausted — stopping cleanly.", flush=True)
+            break
+
+        sold_product_names = sorted(
+            {
+                (cand.get("product_line_name") or cand.get("canonical_material") or "").strip()
+                for cand in parsed_a.get("sold_candidates", [])
+                if cand.get("classification") != "sold_T3_non_material"
+                and (cand.get("product_line_name") or cand.get("canonical_material"))
+            }
+        )
+        sold_products_str = ", ".join(sold_product_names) if sold_product_names else "None disclosed"
+
+        # -------------------------------------------------------------------
+        # PASS B: CONSUMED RAW INPUTS ONLY (Raw Materials / COGS / Risk)
+        # -------------------------------------------------------------------
+        prompt_b = f"""
+        You are an institutional supply-chain & commodity risk analyst.
+        Analyze ONLY the Raw Materials, Cost of Sales, and Commodity Risk text below for {company_name} ({ticker}).
+        Extract every physical T0 or T1 raw material/feedstock that {company_name} PURCHASES OR CONSUMES as a manufacturing input.
+
+        SOLD PRODUCTS CONTEXT (from Item 1):
+        [{sold_products_str}]
+
+        STRICT RULES:
+        - Match each consumed input to an EXACT canonical name from our T0/T1 registry list when applicable:
+          [{t0_t1_vocab}]
+        - PRODUCT ATTRIBUTION (`target_products`): Map each consumed input ONLY to the exact product name(s) in SOLD PRODUCTS CONTEXT that physically/chemically require that input (e.g., Methanol & Caustic Soda -> Silicones, NOT Rare Earth Magnets; Quartz -> Semiconductor Silicon & Silicones, NOT Rare Earth Magnets). If an input cannot be reliably linked to a specific product, return `[]`.
+        - STRICTLY FORBIDDEN: 'Labor', 'Electricity', 'Fuel', 'Energy', 'Freight', 'Packaging', 'Utilities', 'Raw Materials', 'Feedstock'.
+        - NATURAL GAS RULE: Include 'Natural Gas' ONLY if the text describes it as a chemical/reforming feedstock or direct thermal conversion input (set `is_feedstock_not_fuel=true`). If it is merely facility heating/fuel, set `is_feedstock_not_fuel=false` or omit it.
+        - Every item MUST include a verbatim `source_quote` proving purchase, supply, or input cost exposure.
+
+        RAW MATERIALS, COGS & RISK TEXT ({src_ref}):
+        {pass_b_text}
+        """
+
+        parsed_b = _call_ai(prompt_b, PassBConsumedBatch)
+        if not parsed_b:
+            print("All AI providers exhausted — stopping cleanly.", flush=True)
+            break
+
+        # -------------------------------------------------------------------
+        # RESOLVE TIERS, DETECT CAPTIVE OVERLAP & SAVE LINKS
+        # -------------------------------------------------------------------
+        # sold_items: material_id -> list of dict metadata
+        sold_items: Dict[int, List[dict]] = {}
+        for cand in parsed_a.get("sold_candidates", []):
+            if cand.get("classification") == "sold_T3_non_material":
+                stats["excluded_T3"] += 1
+                continue
+
+            raw_mat_label = (cand.get("canonical_material") or "").strip()
+            quote = (cand.get("source_quote") or "").strip()
+            if not raw_mat_label or len(quote) < 8:
+                continue
+
+            resolved = resolve_material_candidate(raw_mat_label, alias_map)
+            if not resolved:
+                if BARE_T0_T1_NAMES_RE.match(raw_mat_label):
+                    inferred_tier = "T0"
+                else:
+                    inferred_tier = "T2" if cand.get("classification") == "sold_T2_material" else "T1"
+                resolved = mint_or_get_material(
+                    conn,
+                    alias_map,
+                    by_id,
+                    raw_mat_label,
+                    inferred_tier,
+                    cand.get("material_group") or "Engineered Materials",
+                )
+            if not resolved:
+                continue
+
+            mid, cname, db_tier = resolved
+            if db_tier == "T3":
+                stats["excluded_T3"] += 1
+                continue
+
+            # Rule 5: Resolve ambiguous items by registry tier (T0/T1 never becomes T2)
+            sold_items.setdefault(mid, []).append({
+                "canonical_name": cname,
+                "tier": db_tier,
+                "product_name": (cand.get("product_line_name") or cname).strip()[:160],
+                "business_unit": (cand.get("business_unit") or sub_sector or "Core Materials")[:120],
+                "performance_spec": cand.get("performance_spec"),
+                "end_demand": cand.get("end_demand"),
+                "source_quote": quote[:400],
+                "confidence": cand.get("confidence") if cand.get("confidence") in ("high", "med", "low") else "med",
+            })
+
+        # Collapse redundant same-material_id entries where one product_name is a substring of another
+        for mid, entries in list(sold_items.items()):
+            if len(entries) > 1:
+                entries.sort(key=lambda x: len(x["product_name"]))
+                merged_demands = []
+                for e in entries:
+                    ed = (e.get("end_demand") or "").strip()
+                    if ed and ed not in merged_demands:
+                        merged_demands.append(ed)
+                primary = entries[0]
+                if merged_demands:
+                    primary["end_demand"] = ", ".join(merged_demands)[:240]
+                sold_items[mid] = [primary]
+
+        # consumed_items: material_id -> dict metadata
+        consumed_items: Dict[int, dict] = {}
+        for inp in parsed_b.get("consumed_inputs", []):
+            raw_inp_label = (inp.get("canonical_material") or "").strip()
+            quote = (inp.get("source_quote") or "").strip()
+            if not raw_inp_label or len(quote) < 8:
+                continue
+
+            resolved = resolve_material_candidate(raw_inp_label, alias_map)
+            if not resolved:
+                tier_guess = inp.get("tier_guess") if inp.get("tier_guess") in ("T0", "T1") else "T0"
+                resolved = mint_or_get_material(
+                    conn,
+                    alias_map,
+                    by_id,
+                    raw_inp_label,
+                    tier_guess,
+                    inp.get("material_group") or "Raw Inputs",
+                )
+            if not resolved:
+                continue
+
+            mid, cname, db_tier = resolved
+            if db_tier not in ("T0", "T1"):
+                # Consumed inputs should only be T0/T1 feedstocks
+                continue
+
+            # Enforce Natural Gas feedstock-only rule
+            if cname.lower() == "natural gas":
+                if not inp.get("is_feedstock_not_fuel", False) and not NG_FEEDSTOCK_EVIDENCE_RE.search(quote):
+                    stats["rejected_ng_fuel"] += 1
+                    continue
+
+            target_prods = [
+                p.strip()[:160]
+                for p in (inp.get("target_products") or [])
+                if isinstance(p, str) and p.strip()
+            ]
+            consumed_items[mid] = {
+                "canonical_name": cname,
+                "tier": db_tier,
+                "target_products": target_prods,
+                "source_quote": quote[:400],
+                "confidence": inp.get("confidence") if inp.get("confidence") in ("high", "med", "low") else "med",
+            }
 
         # -------------------------------------------------------------------
         # PASS A: SOLD MATERIALS ONLY (Item 1 + Segment Notes)
