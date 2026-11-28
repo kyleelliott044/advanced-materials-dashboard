@@ -1349,19 +1349,57 @@ const selectedEquityProducts = useMemo(() => {
       return Boolean(mat && mat.tier === "T2");
     });
 
-    if (soldOrCaptive.length > 0) {
+if (soldOrCaptive.length > 0) {
       const allConsumedLinks = selectedEquityMaterialLinks.filter(
         (l) => l.role === "consumes"
       );
 
-      return soldOrCaptive.map((l, idx): CompanyProduct => {
-        const mat = materialById.get(l.material_id)!;
-        const prodTitleRaw = (l.product_name || mat.canonical_name).trim();
+      // Deduplicate multiple rows sharing the same material_id (e.g., "Silicones" + "Semiconductor Silicones")
+      const groupedByMatId = new Map<number, CompanyMaterialLinkRow[]>();
+      for (const l of soldOrCaptive) {
+        const arr = groupedByMatId.get(l.material_id) || [];
+        arr.push(l);
+        groupedByMatId.set(l.material_id, arr);
+      }
+
+      return Array.from(groupedByMatId.entries()).map(([matId, rows], idx): CompanyProduct => {
+        const mat = materialById.get(matId)!;
+        // Prefer the concise canonical/generic product name when one is a subset of another
+        const sortedRows = [...rows].sort((a, b) => {
+          const aName = (a.product_name || mat.canonical_name).trim();
+          const bName = (b.product_name || mat.canonical_name).trim();
+          return aName.length - bName.length;
+        });
+        const primary = sortedRows[0];
+        const prodTitleRaw = (primary.product_name || mat.canonical_name).trim();
         const displayTitle = formatProductTitle(prodTitleRaw);
-        const rawEndDemand = (l.end_demand || "").trim();
-        const canonicalEm = rawEndDemand
-          ? resolveCanonicalEndMarket(rawEndDemand)
+
+        const allProductNamesLower = new Set(
+          rows.flatMap((r) => [
+            (r.product_name || "").trim().toLowerCase(),
+            mat.canonical_name.toLowerCase(),
+          ])
+        );
+
+        const rawEndDemands = Array.from(
+          new Set(
+            rows
+              .map((r) => (r.end_demand || "").trim())
+              .filter(Boolean)
+          )
+        );
+        const primaryEndDemand = rawEndDemands[0] || "";
+        const canonicalEm = primaryEndDemand
+          ? resolveCanonicalEndMarket(primaryEndDemand)
           : null;
+
+        const mergedSpec = Array.from(
+          new Set(
+            rows
+              .map((r) => (r.performance_spec || "").trim())
+              .filter(Boolean)
+          )
+        ).join(" • ");
 
         const scopedInputs = allConsumedLinks
           .filter((cLink) => {
@@ -1371,10 +1409,7 @@ const selectedEquityProducts = useMemo(() => {
               const targets = cLink.target_product
                 .split("|")
                 .map((t) => t.trim().toLowerCase());
-              return (
-                targets.includes(prodTitleRaw.toLowerCase()) ||
-                targets.includes(mat.canonical_name.toLowerCase())
-              );
+              return targets.some((t) => allProductNamesLower.has(t));
             }
             return isInputRelevantToProduct(
               mat.canonical_name,
@@ -1395,17 +1430,17 @@ const selectedEquityProducts = useMemo(() => {
           });
 
         return {
-          id: `link-${selectedTicker}-${l.material_id}-${idx}`,
+          id: `link-${selectedTicker}-${matId}-${idx}`,
           ticker: selectedTicker,
           name: displayTitle,
           category: mat.canonical_name,
           business_unit:
-            l.business_unit || selectedEquity?.sub_sector || "Core Materials",
+            primary.business_unit || selectedEquity?.sub_sector || "Core Materials",
           status: "active",
-          as_of: l.source_section || "Verified Filing",
+          as_of: primary.source_section || "Verified Filing",
           advanced: {
             performance_spec:
-              l.performance_spec ||
+              mergedSpec ||
               mat.summary ||
               "Customer-qualified T2 material",
             qualification_months: null,
@@ -1414,7 +1449,7 @@ const selectedEquityProducts = useMemo(() => {
           raw_materials: scopedInputs,
           downstream: {
             process_step: "Customer manufacturing process",
-            end_product: rawEndDemand || "Engineered end-product",
+            end_product: rawEndDemands.join(", ") || "Engineered end-product",
             end_demand: canonicalEm ? canonicalEm.name : "",
             demand_proxy_ref: canonicalEm ? canonicalEm.registryCode : null,
             customers: null,
@@ -1422,8 +1457,8 @@ const selectedEquityProducts = useMemo(() => {
           pricing_structure: null,
           revenue: { basis: "business_unit", share_pct: null },
           peers: [],
-          src: { type: "filing", ref: l.source_section },
-          conf: (l.confidence as "high" | "med" | "low") || "high",
+          src: { type: "filing", ref: primary.source_section },
+          conf: (primary.confidence as "high" | "med" | "low") || "high",
         };
       });
     }
