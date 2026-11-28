@@ -20,6 +20,7 @@ export interface CompanyMaterialLinkRow {
   product_name: string | null;
   business_unit: string | null;
   performance_spec: string | null;
+  target_product?: string | null;
   end_demand: string | null;
   source_section: string | null;
   source_quote: string;
