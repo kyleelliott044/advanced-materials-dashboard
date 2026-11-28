@@ -1342,6 +1342,40 @@ function isInputRelevantToProduct(
 const selectedEquityProducts = useMemo(() => {
     if (!selectedTicker) return [];
 
+    const prodTitleRaw = (l.product_name || mat.canonical_name).trim();
+        const displayTitle = formatProductTitle(prodTitleRaw);
+
+        const scopedInputs = allConsumedLinks
+          .filter((cLink) => {
+            const inMat = materialById.get(cLink.material_id);
+            if (!inMat) return false;
+            if (cLink.target_product && cLink.target_product.trim()) {
+              const targets = cLink.target_product
+                .split("|")
+                .map((t) => t.trim().toLowerCase());
+              return (
+                targets.includes(prodTitleRaw.toLowerCase()) ||
+                targets.includes(mat.canonical_name.toLowerCase())
+              );
+            }
+            return isInputRelevantToProduct(
+              mat.canonical_name,
+              displayTitle,
+              inMat.canonical_name,
+              mat.material_group,
+              inMat.material_group
+            );
+          })
+          .map((cLink) => {
+            const inMat = materialById.get(cLink.material_id)!;
+            return {
+              name: inMat.canonical_name,
+              commodity_ref: inMat.registry_code,
+              role: "input",
+              basis: "disclosed" as const,
+            };
+          });
+
     // 1. Prefer verified T2 sells / makes_captive rows from `company_material_links`
     const soldOrCaptive = selectedEquityMaterialLinks.filter((l) => {
       if (l.role !== "sells" && l.role !== "makes_captive") return false;
