@@ -257,6 +257,7 @@ async function DashboardDataLoader() {
         business_unit,
         performance_spec,
         end_demand,
+        target_product,
         source_section,
         source_quote,
         confidence
