@@ -1021,13 +1021,16 @@ export default function DashboardClient({
     for (const eq of equities) {
       const rollup = tickerRollupMap[eq.ticker];
       if (rollup && rollup.isProductDerived) {
+        const loggedInputs = rollup.costInputCodes.map((code) => ({
+          code,
+          label: formatShortCostInput(getCommodityDisplayName(code), code),
+        }));
+        const unloggedInputs = rollup.unloggedMaterials.map((name) => ({
+          code: null,
+          label: formatShortCostInput(name, null),
+        }));
         map[eq.ticker] = {
-          costInputs: dedupeByLabel(
-            rollup.costInputCodes.map((code) => ({
-              code,
-              label: formatShortCostInput(getCommodityDisplayName(code), code),
-            }))
-          ),
+          costInputs: dedupeByLabel([...loggedInputs, ...unloggedInputs]),
           demandProxies: dedupeByLabel(
             rollup.demandProxyCodes.map((code) => ({
               code,
@@ -2225,16 +2228,7 @@ export default function DashboardClient({
                           <td className="py-3.5 px-4">
                             <div className="flex flex-wrap gap-1.5 max-w-[210px]">
                               {roleDrivers.costInputs.length === 0 ? (
-                                rollup?.unloggedMaterials.length ? (
-                                  <span
-                                    className="px-2 py-0.5 rounded text-[10px] font-mono border border-dashed border-slate-600 text-slate-400"
-                                    title={`Unlogged raw materials: ${rollup.unloggedMaterials.join(", ")}`}
-                                  >
-                                    {rollup.unloggedMaterials.length} unlogged
-                                  </span>
-                                ) : (
-                                  <span className="text-xs text-slate-500">—</span>
-                                )
+                                <span className="text-xs text-slate-500">—</span>
                               ) : (
                                 <>
                                   {roleDrivers.costInputs
@@ -2245,9 +2239,7 @@ export default function DashboardClient({
                                         className="px-2 py-0.5 rounded text-[11px] font-medium border bg-rose-500/10 text-rose-300 border-rose-500/30"
                                         title={
                                           ci.detail ||
-                                          (roleDrivers.fromProductRollup
-                                            ? "Rolled up from active products (cost input -> margin)"
-                                            : undefined)
+                                          "Consumed raw material / intermediate (cost input -> margin)"
                                         }
                                       >
                                         {ci.label}
@@ -2258,15 +2250,6 @@ export default function DashboardClient({
                                       +{roleDrivers.costInputs.length - 3}
                                     </span>
                                   )}
-                                  {rollup &&
-                                    rollup.unloggedMaterials.length > 0 && (
-                                      <span
-                                        className="px-1.5 py-0.5 rounded text-[10px] font-mono border border-dashed border-slate-600 text-slate-400"
-                                        title={`Unlogged raw materials: ${rollup.unloggedMaterials.join(", ")}`}
-                                      >
-                                        +{rollup.unloggedMaterials.length} unlogged
-                                      </span>
-                                    )}
                                 </>
                               )}
                             </div>
@@ -3123,38 +3106,26 @@ export default function DashboardClient({
                               <div className="rounded-lg bg-[#090d16] border border-slate-800/80 p-3 flex flex-wrap items-center gap-2 text-xs">
                                 <div className="flex flex-wrap items-center gap-1.5">
                                   {(prod.raw_materials || []).map(
-                                    (rm, rIdx) => {
-                                      const isLogged = Boolean(
-                                        rm.commodity_ref &&
-                                          validRegistryCodes.has(
-                                            rm.commodity_ref
-                                          )
-                                      );
-                                      return (
-                                        <button
-                                          key={`${rm.name}-${rIdx}`}
-                                          type="button"
-                                          onClick={() =>
-                                            handleOpenMaterialInAtlas(
-                                              rm.name,
-                                              "raw"
-                                            )
-                                          }
-                                          title={`Inspect ${rm.name} in Materials Atlas (${rm.role})`}
-                                          className={`px-2.5 py-1 rounded-md font-medium transition cursor-pointer ${
-                                            isLogged
-                                              ? "bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-solid border-amber-400/60"
-                                              : "bg-slate-900/70 hover:bg-slate-800 text-slate-300 border border-dashed border-slate-600"
-                                          }`}
-                                        >
-                                          {formatShortCostInput(
+                                    (rm, rIdx) => (
+                                      <button
+                                        key={`${rm.name}-${rIdx}`}
+                                        type="button"
+                                        onClick={() =>
+                                          handleOpenMaterialInAtlas(
                                             rm.name,
-                                            rm.commodity_ref
-                                          )}{" "}
-                                          ↗
-                                        </button>
-                                      );
-                                    }
+                                            "raw"
+                                          )
+                                        }
+                                        title={`Inspect ${rm.name} in Materials Atlas (${rm.role})`}
+                                        className="px-2.5 py-1 rounded-md font-medium transition cursor-pointer bg-amber-500/20 hover:bg-amber-500/30 text-amber-200 border border-solid border-amber-400/60"
+                                      >
+                                        {formatShortCostInput(
+                                          rm.name,
+                                          rm.commodity_ref
+                                        )}{" "}
+                                        ↗
+                                      </button>
+                                    )
                                   )}
                                 </div>
 
