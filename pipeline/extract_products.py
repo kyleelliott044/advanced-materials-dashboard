@@ -683,6 +683,7 @@ def run_split_extraction(conn, force_tickers: Optional[List[str]] = None):
         - Format `product_line_name` in consistent Title Case (preserving chemical acronyms like NdFeB, SiC, PVC, PTFE, SOI, CMP, OLED).
         - NEVER list end-markets ('Aerospace', 'Mobility', 'Life Science', 'Optics') or processes ('Mining', 'Refining') as materials.
         - Every item MUST include a verbatim `source_quote` from the text below proving the company produces/sells it.
+        - ONE ENTRY PER MATERIAL CLASS: Do NOT split a single material class into multiple rows just because it serves different end-markets (e.g., emit ONE entry for 'Silicones', NOT both 'Silicones' and 'Semiconductor Silicones'). Combine all end-markets into end_demand.
 
         ITEM 1 & SEGMENT TEXT ({src_ref}):
         {pass_a_text}
