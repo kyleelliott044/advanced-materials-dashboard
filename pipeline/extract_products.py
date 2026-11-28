@@ -115,6 +115,20 @@ def ensure_conn(conn):
     return connect_db()
 
 
+def ensure_schema(conn):
+    """Ensures `target_product` column exists on `company_material_links`."""
+    conn = ensure_conn(conn)
+    with conn.cursor() as cur:
+        cur.execute(
+            """
+            ALTER TABLE company_material_links
+            ADD COLUMN IF NOT EXISTS target_product TEXT;
+            """
+        )
+    conn.commit()
+    return conn
+
+
 def normalize_alias_key(raw: str) -> str:
     """Canonical alias lookup key: lowercase, punctuation-stripped, '&' -> 'and'."""
     s = re.sub(r"\s*\([^)]*\)?", " ", (raw or "").strip())
@@ -367,7 +381,7 @@ class SoldMaterialCandidate(BaseModel):
         description="Canonical material name from the provided T0/T1/T2 list if matched, or a specific Title Case material name if novel. Never an end-market ('Aerospace'), process ('Mining', 'Refining'), or vague umbrella ('Electronic Materials')."
     )
     product_line_name: str = Field(
-        description="Company's specific commercial product line or material grade name (e.g., '300mm Epitaxial Silicon Wafers', 'Battery-Grade Lithium Hydroxide')."
+        description="Company's specific commercial product line or material grade name in clean Title Case (e.g., '300mm Epitaxial Silicon Wafers', 'Battery-Grade Lithium Hydroxide')."
     )
     classification: Literal["sold_T2_material", "sold_T0_T1_material", "sold_T3_non_material"] = Field(
         description="Classify strictly: 'sold_T2_material' for customer-qualified engineered materials; 'sold_T0_T1_material' for traded ores, metals, or refined intermediates (polysilicon, lithium carbonate, NdPr oxide); 'sold_T3_non_material' for assembled cells, connectors, sensors, equipment, or non-materials."
@@ -403,6 +417,10 @@ class ConsumedInputCandidate(BaseModel):
     )
     material_group: str = Field(
         description="Group from the raw input list (e.g. 'Base and battery metals', 'Minor metals', 'Industrial minerals', 'Energy and hydrocarbons', 'Basic petrochemicals', 'Inorganic chemicals', 'Refined intermediates')."
+    )
+    target_products: List[str] = Field(
+        default_factory=list,
+        description="Exact product_line_name(s) from the company's SOLD PRODUCTS list that chemically/physically consume this input. Only include products that actually require this feedstock; return [] if unclear.",
     )
     is_feedstock_not_fuel: bool = Field(
         default=True,
@@ -567,7 +585,7 @@ def _format_taxonomy_prompt_lists(by_id: Dict[int, Tuple[str, str, str]]) -> Tup
 
 
 def run_split_extraction(conn, force_tickers: Optional[List[str]] = None):
-    conn = ensure_conn(conn)
+    conn = ensure_schema(conn)
     alias_map, by_id = load_material_registry(conn)
     t2_vocab, t0_t1_vocab = _format_taxonomy_prompt_lists(by_id)
     sec_by_ticker, sec_by_name = fetch_sec_ticker_map()
@@ -662,6 +680,7 @@ def run_split_extraction(conn, force_tickers: Optional[List[str]] = None):
              [{t0_t1_vocab}]
           3. 'sold_T3_non_material': Assembled battery cells/modules/packs, connectors, sensors, optical transceivers, displays, machinery, pharma, food, or software (EXCLUDE from products).
         - Match to an EXACT canonical name from the lists above whenever applicable; only mint a new specific material name if genuinely distinct.
+        - Format `product_line_name` in consistent Title Case (preserving chemical acronyms like NdFeB, SiC, PVC, PTFE, SOI, CMP, OLED).
         - NEVER list end-markets ('Aerospace', 'Mobility', 'Life Science', 'Optics') or processes ('Mining', 'Refining') as materials.
         - Every item MUST include a verbatim `source_quote` from the text below proving the company produces/sells it.
 
@@ -674,6 +693,16 @@ def run_split_extraction(conn, force_tickers: Optional[List[str]] = None):
             print("All AI providers exhausted — stopping cleanly.", flush=True)
             break
 
+        sold_product_names = sorted(
+            {
+                (cand.get("product_line_name") or cand.get("canonical_material") or "").strip()
+                for cand in parsed_a.get("sold_candidates", [])
+                if cand.get("classification") != "sold_T3_non_material"
+                and (cand.get("product_line_name") or cand.get("canonical_material"))
+            }
+        )
+        sold_products_str = ", ".join(sold_product_names) if sold_product_names else "None disclosed"
+
         # -------------------------------------------------------------------
         # PASS B: CONSUMED RAW INPUTS ONLY (Raw Materials / COGS / Risk)
         # -------------------------------------------------------------------
@@ -682,9 +711,13 @@ def run_split_extraction(conn, force_tickers: Optional[List[str]] = None):
         Analyze ONLY the Raw Materials, Cost of Sales, and Commodity Risk text below for {company_name} ({ticker}).
         Extract every physical T0 or T1 raw material/feedstock that {company_name} PURCHASES OR CONSUMES as a manufacturing input.
 
+        SOLD PRODUCTS CONTEXT (from Item 1):
+        [{sold_products_str}]
+
         STRICT RULES:
         - Match each consumed input to an EXACT canonical name from our T0/T1 registry list when applicable:
           [{t0_t1_vocab}]
+        - PRODUCT ATTRIBUTION (`target_products`): Map each consumed input ONLY to the exact product name(s) in SOLD PRODUCTS CONTEXT that physically/chemically require that input (e.g., Methanol & Caustic Soda -> Silicones, NOT Rare Earth Magnets; Quartz -> Semiconductor Silicon & Silicones, NOT Rare Earth Magnets). If an input cannot be reliably linked to a specific product, return `[]`.
         - STRICTLY FORBIDDEN: 'Labor', 'Electricity', 'Fuel', 'Energy', 'Freight', 'Packaging', 'Utilities', 'Raw Materials', 'Feedstock'.
         - NATURAL GAS RULE: Include 'Natural Gas' ONLY if the text describes it as a chemical/reforming feedstock or direct thermal conversion input (set `is_feedstock_not_fuel=true`). If it is merely facility heating/fuel, set `is_feedstock_not_fuel=false` or omit it.
         - Every item MUST include a verbatim `source_quote` proving purchase, supply, or input cost exposure.
@@ -777,9 +810,15 @@ def run_split_extraction(conn, force_tickers: Optional[List[str]] = None):
                     stats["rejected_ng_fuel"] += 1
                     continue
 
+            target_prods = [
+                p.strip()[:160]
+                for p in (inp.get("target_products") or [])
+                if isinstance(p, str) and p.strip()
+            ]
             consumed_items[mid] = {
                 "canonical_name": cname,
                 "tier": db_tier,
+                "target_products": target_prods,
                 "source_quote": quote[:400],
                 "confidence": inp.get("confidence") if inp.get("confidence") in ("high", "med", "low") else "med",
             }
@@ -801,12 +840,13 @@ def run_split_extraction(conn, force_tickers: Optional[List[str]] = None):
                     for e in s_entries:
                         link_rows.append((
                             ticker, mid, "sells", e["product_name"], e["business_unit"],
-                            e["performance_spec"], e["end_demand"], f"Item 1 / Segment ({src_ref})",
-                            e["source_quote"], e["confidence"]
+                            e["performance_spec"], e["end_demand"], None,
+                            f"Item 1 / Segment ({src_ref})", e["source_quote"], e["confidence"]
                         ))
                     c_entry = consumed_items[mid]
+                    target_str = " | ".join(c_entry["target_products"]) or None
                     link_rows.append((
-                        ticker, mid, "consumes", None, None, None, None,
+                        ticker, mid, "consumes", None, None, None, None, target_str,
                         f"Raw Materials / Risk ({src_ref})", c_entry["source_quote"], c_entry["confidence"]
                     ))
                 else:
@@ -814,20 +854,21 @@ def run_split_extraction(conn, force_tickers: Optional[List[str]] = None):
                     stats["captive_flagged"] += 1
                     link_rows.append((
                         ticker, mid, "makes_captive", e["product_name"], e["business_unit"],
-                        e["performance_spec"], e["end_demand"], f"Captive Overlap ({src_ref})",
-                        e["source_quote"], e["confidence"]
+                        e["performance_spec"], e["end_demand"], None,
+                        f"Captive Overlap ({src_ref})", e["source_quote"], e["confidence"]
                     ))
             elif in_sold:
                 for e in sold_items[mid]:
                     link_rows.append((
                         ticker, mid, "sells", e["product_name"], e["business_unit"],
-                        e["performance_spec"], e["end_demand"], f"Item 1 / Segment ({src_ref})",
-                        e["source_quote"], e["confidence"]
+                        e["performance_spec"], e["end_demand"], None,
+                        f"Item 1 / Segment ({src_ref})", e["source_quote"], e["confidence"]
                     ))
             elif in_cons:
                 c_entry = consumed_items[mid]
+                target_str = " | ".join(c_entry["target_products"]) or None
                 link_rows.append((
-                    ticker, mid, "consumes", None, None, None, None,
+                    ticker, mid, "consumes", None, None, None, None, target_str,
                     f"Raw Materials / Risk ({src_ref})", c_entry["source_quote"], c_entry["confidence"]
                 ))
 
@@ -840,12 +881,13 @@ def run_split_extraction(conn, force_tickers: Optional[List[str]] = None):
                 """
                 INSERT INTO company_material_links (
                     ticker, material_id, role, product_name, business_unit,
-                    performance_spec, end_demand, source_section, source_quote, confidence
-                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                    performance_spec, end_demand, target_product, source_section, source_quote, confidence
+                ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
                 ON CONFLICT (ticker, material_id, role, COALESCE(product_name, '')) DO UPDATE SET
                     business_unit = COALESCE(EXCLUDED.business_unit, company_material_links.business_unit),
                     performance_spec = COALESCE(EXCLUDED.performance_spec, company_material_links.performance_spec),
                     end_demand = COALESCE(EXCLUDED.end_demand, company_material_links.end_demand),
+                    target_product = COALESCE(EXCLUDED.target_product, company_material_links.target_product),
                     source_section = EXCLUDED.source_section,
                     source_quote = EXCLUDED.source_quote,
                     confidence = EXCLUDED.confidence,
@@ -880,7 +922,7 @@ def run_eval_check(conn):
     with conn.cursor() as cur:
         cur.execute(
             """
-            SELECT l.ticker, m.tier, m.canonical_name, l.role, l.product_name, l.source_quote
+            SELECT l.ticker, m.tier, m.canonical_name, l.role, l.product_name, l.target_product, l.source_quote
             FROM company_material_links l
             JOIN materials m ON l.material_id = m.id
             WHERE l.ticker = ANY(%s)
@@ -891,8 +933,11 @@ def run_eval_check(conn):
         rows = cur.fetchall()
 
     print(f"=== EVAL CHECK ({len(rows)} links across benchmark tickers) ===", flush=True)
-    for tk, tier, cname, role, pname, quote in rows:
-        print(f"  {tk:<8} | {tier} | {role:<13} | {cname:<34} | prod={pname or '-':<28} | {quote[:65]}...", flush=True)
+    for tk, tier, cname, role, pname, tprod, quote in rows:
+        print(
+            f"  {tk:<8} | {tier} | {role:<13} | {cname:<34} | prod={pname or '-':<24} | target={tprod or '-':<24} | {quote[:50]}...",
+            flush=True,
+        )
     return conn
 
 
