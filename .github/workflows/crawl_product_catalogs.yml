@@ -1,4 +1,4 @@
-name: Crawl Official Product Catalogs
+name: "Task: Crawl Official Product Catalogs"
 
 on:
   workflow_dispatch:
