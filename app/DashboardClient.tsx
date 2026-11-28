@@ -1264,7 +1264,82 @@ export default function DashboardClient({
     return materialLinks.filter((l) => l.ticker === selectedTicker);
   }, [selectedTicker, materialLinks]);
 
-  const selectedEquityProducts = useMemo(() => {
+const PRODUCT_ACRONYMS = new Set([
+  "ndfeb", "smco", "sic", "gan", "gaas", "inp", "soi", "cmp", "euv", "arf",
+  "krf", "oled", "mlcc", "ccl", "abf", "hbm", "ic", "rf", "ev", "pvc", "ptfe",
+  "pfa", "pvdf", "peek", "pps", "mdi", "tdi", "pan", "lipf6", "pgm", "nf3",
+  "wf6", "ald", "cvd", "pfsa", "uhmwpe", "lcp", "tpu", "eva", "epdm", "led",
+]);
+
+function formatProductTitle(raw: string): string {
+  const trimmed = (raw || "").trim();
+  if (!trimmed) return "";
+  return trimmed
+    .split(/\s+/)
+    .map((word, idx) => {
+      // Preserve hyphenated compounds like "Lithium-Ion" or "Silicon-Carbon"
+      if (word.includes("-")) {
+        return word
+          .split("-")
+          .map((part) => {
+            const low = part.toLowerCase();
+            if (PRODUCT_ACRONYMS.has(low)) return part.toUpperCase();
+            return part.charAt(0).toUpperCase() + part.slice(1).toLowerCase();
+          })
+          .join("-");
+      }
+      const clean = word.replace(/[^a-zA-Z0-9]/g, "").toLowerCase();
+      if (PRODUCT_ACRONYMS.has(clean)) {
+        return word.toUpperCase();
+      }
+      const lower = word.toLowerCase();
+      if (idx > 0 && ["and", "or", "of", "for", "in", "to", "with"].includes(lower)) {
+        return lower;
+      }
+      return word.charAt(0).toUpperCase() + word.slice(1).toLowerCase();
+    })
+    .join(" ");
+}
+
+// Feedstock compatibility rules so company-wide `consumes` rows attach only to chemically relevant T2 products
+const T2_ALLOWED_INPUTS: [RegExp, RegExp][] = [
+  [/magnet|ndfeb|smco/i, /\b(rare\s+earth|ndpr|neodymium|praseodymium|dysprosium|terbium|samarium|cobalt|iron|boron)\b/i],
+  [/silicone|siloxane/i, /\b(silicon|quartz|silica|methanol|methyl\s+chloride|caustic\s+soda|chlorine|platinum)\b/i],
+  [/silicon\s+wafer|polysilicon|semiconductor\s+silicon|soi\s+wafer/i, /\b(silicon|quartz|silica|polysilicon|chlorine|hydrogen|hydrofluoric|caustic\s+soda)\b/i],
+  [/silicon\s+carbide|sic/i, /\b(silicon|quartz|silica|coke|graphite|carbon)\b/i],
+  [/anode/i, /\b(graphite|coke|coal\s+tar|silicon|silane|pitch)\b/i],
+  [/cathode/i, /\b(lithium|nickel|cobalt|manganese|phosphate|iron|soda\s+ash|caustic\s+soda|sulfuric)\b/i],
+  [/electrolyte|lipf6/i, /\b(lithium|fluorspar|hydrofluoric|phosphor|carbonate|solvent)\b/i],
+  [/fluoropolymer|ptfe|pfa|pvdf/i, /\b(fluorspar|hydrofluoric|chlorine|chloroform|methane|ethylene)\b/i],
+  [/carbon\s+fiber|prepreg|aramid/i, /\b(pan|acrylonitrile|propylene|ammonia|epoxy|bisphenol|epichlorohydrin|phenylene)\b/i],
+  [/steel|superalloy|alloy|titanium/i, /\b(iron|steel|nickel|cobalt|chromium|molybdenum|tungsten|titanium|vanadium|niobium|manganese|scrap)\b/i],
+  [/photoresist|cmp|slurr|electronic\s+gas|specialty\s+gas/i, /\b(silica|quartz|cerium|alumina|fluorspar|hydrofluoric|ammonia|chlorine|tungsten|silane|germanium|gallium|natural\s+gas)\b/i],
+  [/glass|optical\s+fiber/i, /\b(quartz|silica|soda\s+ash|boron|alumina|germanium|titanium|platinum)\b/i],
+];
+
+function isInputRelevantToProduct(
+  t2CanonicalName: string,
+  productTitle: string,
+  inputCanonicalName: string,
+  t2Group: string,
+  inputGroup: string
+): boolean {
+  const target = `${t2CanonicalName} ${productTitle}`;
+  for (const [prodRe, allowedInputRe] of T2_ALLOWED_INPUTS) {
+    if (prodRe.test(target)) {
+      return allowedInputRe.test(inputCanonicalName);
+    }
+  }
+  // Fallback: match if they share a broad domain (e.g. both metals or both chemicals/polymers)
+  const g1 = t2Group.toLowerCase();
+  const g2 = inputGroup.toLowerCase();
+  if (g1.includes("magnet") || g1.includes("rare earth")) {
+    return g2.includes("rare earth") || g2.includes("metal");
+  }
+  return true;
+}
+  
+const selectedEquityProducts = useMemo(() => {
     if (!selectedTicker) return [];
 
     // 1. Prefer verified T2 sells / makes_captive rows from `company_material_links`
@@ -1275,30 +1350,42 @@ export default function DashboardClient({
     });
 
     if (soldOrCaptive.length > 0) {
-      const consumedInputs = selectedEquityMaterialLinks
+      const allConsumedMats = selectedEquityMaterialLinks
         .filter((l) => l.role === "consumes")
-        .map((l) => {
-          const mat = materialById.get(l.material_id);
-          return mat
-            ? {
-                name: mat.canonical_name,
-                commodity_ref: mat.registry_code,
-                role: "input",
-                basis: "disclosed" as const,
-              }
-            : null;
-        })
-        .filter((x): x is NonNullable<typeof x> => Boolean(x));
+        .map((l) => materialById.get(l.material_id))
+        .filter((m): m is MaterialRecord => Boolean(m));
+
       return soldOrCaptive.map((l, idx): CompanyProduct => {
         const mat = materialById.get(l.material_id)!;
+        const displayTitle = formatProductTitle(
+          l.product_name || mat.canonical_name
+        );
         const rawEndDemand = (l.end_demand || "").trim();
         const canonicalEm = rawEndDemand
           ? resolveCanonicalEndMarket(rawEndDemand)
           : null;
+
+        const scopedInputs = allConsumedMats
+          .filter((inMat) =>
+            isInputRelevantToProduct(
+              mat.canonical_name,
+              displayTitle,
+              inMat.canonical_name,
+              mat.material_group,
+              inMat.material_group
+            )
+          )
+          .map((inMat) => ({
+            name: inMat.canonical_name,
+            commodity_ref: inMat.registry_code,
+            role: "input",
+            basis: "disclosed" as const,
+          }));
+
         return {
           id: `link-${selectedTicker}-${l.material_id}-${idx}`,
           ticker: selectedTicker,
-          name: l.product_name || mat.canonical_name,
+          name: displayTitle,
           category: mat.canonical_name,
           business_unit:
             l.business_unit || selectedEquity?.sub_sector || "Core Materials",
@@ -1312,7 +1399,7 @@ export default function DashboardClient({
             qualification_months: null,
             switching_barrier: "Process requalification required",
           },
-          raw_materials: consumedInputs,
+          raw_materials: scopedInputs,
           downstream: {
             process_step: "Customer manufacturing process",
             end_product: rawEndDemand || "Engineered end-product",
@@ -1329,10 +1416,13 @@ export default function DashboardClient({
       });
     }
 
-    // 2. Fallback to legacy `company_products` (filtering out fragments <= 4 chars like "Bio")
-    return (tickerProductsMap[selectedTicker] || []).filter(
-      (p) => p.name.trim().length > 4 && p.category.trim().length > 4
-    );
+    // 2. Fallback to legacy `company_products` (with normalized title case)
+    return (tickerProductsMap[selectedTicker] || [])
+      .filter((p) => p.name.trim().length > 4 && p.category.trim().length > 4)
+      .map((p) => ({
+        ...p,
+        name: formatProductTitle(p.name),
+      }));
   }, [
     selectedTicker,
     selectedEquityMaterialLinks,
