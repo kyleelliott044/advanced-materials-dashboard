@@ -29,12 +29,11 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-          cache: "pip"
 
       - name: Install dependencies
         run: |
-          pip install -r requirements.txt
-          pip install beautifulsoup4 yfinance google-genai pydantic psycopg[binary] requests
+          pip install --upgrade pip
+          pip install beautifulsoup4 yfinance google-genai pydantic "psycopg[binary]" requests
 
       - name: Run Official Product Catalog Crawler
         env:
