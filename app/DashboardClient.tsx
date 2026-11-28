@@ -1342,8 +1342,26 @@ function isInputRelevantToProduct(
 const selectedEquityProducts = useMemo(() => {
     if (!selectedTicker) return [];
 
-      const prodTitleRaw = (l.product_name || mat.canonical_name).trim();
+    // 1. Prefer verified T2 sells / makes_captive rows from `company_material_links`
+    const soldOrCaptive = selectedEquityMaterialLinks.filter((l) => {
+      if (l.role !== "sells" && l.role !== "makes_captive") return false;
+      const mat = materialById.get(l.material_id);
+      return Boolean(mat && mat.tier === "T2");
+    });
+
+    if (soldOrCaptive.length > 0) {
+      const allConsumedLinks = selectedEquityMaterialLinks.filter(
+        (l) => l.role === "consumes"
+      );
+
+      return soldOrCaptive.map((l, idx): CompanyProduct => {
+        const mat = materialById.get(l.material_id)!;
+        const prodTitleRaw = (l.product_name || mat.canonical_name).trim();
         const displayTitle = formatProductTitle(prodTitleRaw);
+        const rawEndDemand = (l.end_demand || "").trim();
+        const canonicalEm = rawEndDemand
+          ? resolveCanonicalEndMarket(rawEndDemand)
+          : null;
 
         const scopedInputs = allConsumedLinks
           .filter((cLink) => {
@@ -1375,46 +1393,6 @@ const selectedEquityProducts = useMemo(() => {
               basis: "disclosed" as const,
             };
           });
-
-    // 1. Prefer verified T2 sells / makes_captive rows from `company_material_links`
-    const soldOrCaptive = selectedEquityMaterialLinks.filter((l) => {
-      if (l.role !== "sells" && l.role !== "makes_captive") return false;
-      const mat = materialById.get(l.material_id);
-      return Boolean(mat && mat.tier === "T2");
-    });
-
-    if (soldOrCaptive.length > 0) {
-      const allConsumedMats = selectedEquityMaterialLinks
-        .filter((l) => l.role === "consumes")
-        .map((l) => materialById.get(l.material_id))
-        .filter((m): m is MaterialRecord => Boolean(m));
-
-      return soldOrCaptive.map((l, idx): CompanyProduct => {
-        const mat = materialById.get(l.material_id)!;
-        const displayTitle = formatProductTitle(
-          l.product_name || mat.canonical_name
-        );
-        const rawEndDemand = (l.end_demand || "").trim();
-        const canonicalEm = rawEndDemand
-          ? resolveCanonicalEndMarket(rawEndDemand)
-          : null;
-
-        const scopedInputs = allConsumedMats
-          .filter((inMat) =>
-            isInputRelevantToProduct(
-              mat.canonical_name,
-              displayTitle,
-              inMat.canonical_name,
-              mat.material_group,
-              inMat.material_group
-            )
-          )
-          .map((inMat) => ({
-            name: inMat.canonical_name,
-            commodity_ref: inMat.registry_code,
-            role: "input",
-            basis: "disclosed" as const,
-          }));
 
         return {
           id: `link-${selectedTicker}-${l.material_id}-${idx}`,
